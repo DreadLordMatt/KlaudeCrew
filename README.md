@@ -1,265 +1,282 @@
-# KiroCrew
+<!-- Logo: pyfiglet "ANSI Shadow" font. Regenerate with:
+     python3 -m pyfiglet -f ansi_shadow KiroCrew -->
+<div align="center">
+<pre>
+██╗  ██╗██╗██████╗  ██████╗  ██████╗██████╗ ███████╗██╗    ██╗
+██║ ██╔╝██║██╔══██╗██╔═══██╗██╔════╝██╔══██╗██╔════╝██║    ██║
+█████╔╝ ██║██████╔╝██║   ██║██║     ██████╔╝█████╗  ██║ █╗ ██║
+██╔═██╗ ██║██╔══██╗██║   ██║██║     ██╔══██╗██╔══╝  ██║███╗██║
+██║  ██╗██║██║  ██║╚██████╔╝╚██████╗██║  ██║███████╗╚███╔███╔╝
+╚═╝  ╚═╝╚═╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝ ╚══╝╚══╝
+</pre>
+</div>
 
-Open-source personal AI agent that runs on your own machine. Chat with it from
-Slack, a web dashboard, or the command line; let it run multi-step tasks
-unattended, schedule recurring jobs, and remember context across sessions.
-**[What's New](CHANGELOG.md)**
+<p align="center">
+  <b>A self-hosted AI agent that runs kiro-cli. Fully local, and locked down so it can't overstep.</b>
+</p>
+
+<p align="center">
+  Chat with it from Slack, a web dashboard, or the command line. It runs
+  multi-step tasks while you're away, schedules recurring jobs, spawns background
+  workers, and remembers context between sessions. Nothing leaves your machine,
+  and a security policy caps what it's allowed to touch.
+</p>
+
+<p align="center">
+  <a href="https://github.com/kirodotdev/KiroCrew/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/kirodotdev/KiroCrew/ci.yml?branch=main&style=for-the-badge" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=for-the-badge" alt="Apache 2.0 License"></a>
+  <img src="https://img.shields.io/badge/python-3.9%2B-blue?style=for-the-badge" alt="Python 3.9+">
+  <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=for-the-badge" alt="Platforms">
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#what-it-does">What it does</a> ·
+  <a href="#talk-to-it-from-anywhere">Surfaces</a> ·
+  <a href="#security">Security</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#documentation">Docs</a>
+</p>
+
+---
+
+<!-- TODO(maintainer): add a dashboard screenshot or short GIF here — the web
+     dashboard is the headline surface and the README currently has no visual.
+     e.g. <p align="center"><img src="docs/assets/dashboard.png" width="800"></p> -->
+
+KiroCrew is an open-source personal AI agent you host yourself. It runs the
+[`kiro-cli`](#2-install-the-agent-backend-kiro-cli) agent as its brain, wraps it
+in a gateway that stays up, and lets you reach it wherever you already work:
 
 ```
-CLI / Slack DM / Dashboard → KiroCrew → LLM agent (kiro-cli over ACP) + MCP tools
+CLI · Slack DM · Web Dashboard  →  KiroCrew gateway  →  kiro-cli + MCP tools
 ```
 
-KiroCrew drives an LLM through the **`kiro-cli`** agent over the
-[Agent Client Protocol](https://github.com/zed-industries/agent-client-protocol)
-(ACP). kiro-cli is the only provider — install it and log in, and KiroCrew
-talks to it for every session. See [Configuration](#configuration).
+There's no hosted backend, no account to sign up for, and no per-seat pricing.
+You run the gateway, and the data stays with you. (Under the hood, KiroCrew talks
+to kiro-cli over the [Agent Client Protocol](https://github.com/zed-industries/agent-client-protocol),
+so any MCP tool you add is available to the agent.)
 
-## Quick Start
+## What it does
 
-KiroCrew ships as a Python backend (installed via `pip`) plus a React web
-dashboard (built with `npm`). Memory and the knowledge library use a local
-[Ollama](https://ollama.com) server for embeddings.
+**Runs tasks while you're away.** Hand it a spec with `kirocrew run TASK.md` and
+it works the job for hours, taking multiple steps on its own. You can watch the
+progress from any surface, or ignore it until it's done.
 
-> **Platforms: macOS, Linux, and Windows.** macOS/Linux install via `pip` as
-> below. **Windows** runs natively from the same Python **source install** —
-> CPython 3.12 + a venv + `pip install -e . tzdata` (3.12 because numpy 1.x has
-> no 3.13 wheel; `tzdata` because Windows ships no system IANA tz database),
-> launched as `python -m kiro_crew gateway`. Cross-platform process / file-lock
-> / signal / metrics behavior is routed through `kiro_crew.platform_compat`, so
-> macOS + Linux behavior is unchanged. See
-> **[docs/WINDOWS_INSTALL.md](docs/WINDOWS_INSTALL.md)** for step-by-step Windows
-> setup, per-feature status, and troubleshooting. (`install.ps1` is a separate
-> thin-client bootstrapper for `kirocrew cloud`, which runs the gateway on a
-> Linux EC2 box — not the native Windows path.)
+**Schedules recurring work.** The built-in cron supports jitter, timeouts, and
+timezones, so a nightly backup or a Monday-morning report is just a job you
+describe once in plain language.
 
-### 1. Install the backend (pip)
+**Remembers, and learns from corrections.** It carries context across sessions
+and picks up your preferences. When you correct it, the correction sticks as a
+lesson that changes what it does next time.
+
+**Searches your own docs.** Point the knowledge library at a folder of docs or
+code and it builds a searchable index, using SQLite full-text search plus local
+Ollama embeddings. All of it stays on your machine.
+
+**Spawns subagents.** For work that splits cleanly, it launches isolated
+background agents, runs them in parallel, and collects the results.
+
+**Extends through MCP and apps.** It auto-discovers the MCP servers you add, and
+ships an app store plus an SDK so you can install or build new capabilities.
+
+**Built on kiro-cli.** KiroCrew targets one agent backend instead of a lowest
+common denominator, so it uses kiro-cli's native tool execution, session
+handling, and model access directly. You get whatever models your kiro-cli login
+provides, without KiroCrew reimplementing a provider layer on top.
+
+**Keeps you in control of what it can touch.** The `kiro-cli` subprocess runs in
+an OS sandbox, credentials are redacted from output, destructive commands are
+blocked by default, and an optional governance policy sets a ceiling the running
+agent can't raise. More on this under [Security](#security).
+
+**Speaks, if you want it to.** Optional speech-to-text and text-to-speech,
+defaulting to a local [Piper](https://github.com/rhasspy/piper) voice with no
+cloud dependency.
+
+The complete list is in [docs/FEATURES.md](docs/FEATURES.md).
+
+## Quick start
+
+You need **Python 3.9+** and **Node** to build KiroCrew, and **`kiro-cli`** as
+the agent it drives. [Ollama](https://ollama.com) is optional: it powers memory
+and knowledge search, but you can skip it for a first run and add it later. On
+Windows, use CPython 3.12 and see [docs/WINDOWS_INSTALL.md](docs/WINDOWS_INSTALL.md).
+
+### 1. Install and build KiroCrew
 
 ```bash
-# From a clone of this repo
 git clone https://github.com/kirodotdev/KiroCrew.git
-cd kirocrew
-
-# Build the frontend (see step 2) BEFORE installing so the dashboard is bundled
-pip install .
-# or, for development, an editable install:
-pip install -e ".[voice]"   # [voice] adds optional speech-to-text extras
+cd KiroCrew
+make build      # builds the React dashboard, then installs the backend into a venv
 ```
 
-This installs the `kirocrew` (and `kirocrew-browse`) commands onto your `PATH`.
+`make build` is the one-command path: it runs the npm/Vite build, bundles the
+dashboard into the package, and installs the `kirocrew` command. (If you'd rather
+run the steps by hand, or want a wheel or the desktop app, see
+[Installation and distribution](#installation-and-distribution).)
 
-### 2. Build the frontend (npm)
+### 2. Install the agent backend (`kiro-cli`)
 
-The dashboard is a React + Vite SPA in the `website/` directory. Production
-builds are bundled into `src/kiro_crew/static/dist/` and served by the backend.
-
-```bash
-cd website
-npm install
-npm run build
-# Copy the build output into the package so pip bundles it:
-#   cp -r website/dist ../src/kiro_crew/static/dist
-```
-
-### 3. Install the agent backend
-
-KiroCrew drives the **`kiro-cli`** agent over ACP. Install `kiro-cli` per its
-own docs, make sure it is on your `PATH`, and log in:
+KiroCrew runs `kiro-cli` as its agent, so install it and log in:
 
 ```bash
+curl -fsSL https://cli.kiro.dev/install | bash   # macOS/Linux; see below for other OSes
 kiro-cli login
 ```
 
-`kirocrew doctor` reports whether `kiro-cli` is found and logged in.
+Full install options (Linux AppImage/zip, Ubuntu `.deb`, Windows) are in
+[docs/kiro-cli/installation.md](docs/kiro-cli/installation.md) and at
+[kiro.dev](https://kiro.dev/docs/cli/installation/).
 
-### 4. Install Ollama (for memory / knowledge embeddings)
+### 3. Configure and run
 
 ```bash
-# Install Ollama from https://ollama.com, then pull the embedding model:
-ollama pull qwen3-embedding:0.6b      # default
-# or the documented fallback:
-ollama pull nomic-embed-text
+kirocrew setup      # interactive wizard: data dir, agent, credentials
+kirocrew doctor     # health check: kiro-cli, Ollama, config
+kirocrew gateway    # start the server, then open http://localhost:5476
 ```
 
-Ollama runs at `http://localhost:11434` by default. KiroCrew manages its
-lifecycle automatically; you can also run your own server.
+Open the dashboard and start talking to it. Slack is optional: skip the Slack
+tokens during `kirocrew setup` and it runs dashboard-only.
 
-### 5. Configure and run
+### Adding memory (optional)
+
+Memory and knowledge search use a local Ollama server. Install
+[Ollama](https://ollama.com), pull the embedding model, and KiroCrew picks it up
+automatically:
 
 ```bash
-kirocrew setup                # interactive wizard: data dir, agent, credentials
-kirocrew doctor               # verify everything is wired up
-kirocrew gateway              # start server → open http://localhost:5476
+ollama pull qwen3-embedding:0.6b      # default (fallback: nomic-embed-text)
 ```
 
-**Dashboard-only mode**: skip Slack tokens during `kirocrew setup` to run
-without Slack.
+## Talk to it from anywhere
 
-## Installation & Distribution
+| Surface | What it's for |
+|---------|---------------|
+| **Web dashboard** | React app at `localhost:5476`, with multi-session chat, a memory explorer, the cron manager, and the app store. |
+| **CLI** | `kirocrew chat` for interactive use, `kirocrew run TASK.md` for jobs you leave running, plus `cron`, `spawn`, and the rest. |
+| **Slack DM** | Message the agent in Slack. Each thread is its own session with full tool access. See [SLACK_SETUP.md](SLACK_SETUP.md). |
+| **Desktop app** | An Electron wrapper with multi-tab gateway connections and native macOS tabs. See [docs/DESKTOP_APP.md](docs/DESKTOP_APP.md). |
 
-There are three ways to build and run KiroCrew, from lightest (developer
-checkout) to heaviest (double-clickable desktop app). All builds are driven by
-the [`Makefile`](Makefile) — plain `pip` + `npm`/Vite + `pytest`, no
-proprietary tooling. See [docs/INSTALL.md](docs/INSTALL.md) for the full guide.
+> Telegram and WeChat gateways also live in the codebase, but the four surfaces
+> above are the ones that are documented and supported.
 
-### a. From source (development)
-
-Build the dashboard, install the backend into a local virtualenv, then run the
-gateway straight from `src/`:
+### Handy commands
 
 ```bash
-make build                                   # npm build + venv editable install
-PYTHONPATH=src python -m kiro_crew gateway   # → http://localhost:5476
+kirocrew chat                 # interactive CLI conversation
+kirocrew run TASK.md          # run a multi-step spec unattended
+kirocrew gateway              # start dashboard + Slack server
+kirocrew cron add ...         # schedule a recurring job
+kirocrew spawn run ...        # launch a background subagent
+kirocrew memory ...           # inspect / manage persistent memory
+kirocrew security audit       # scan history for suspicious tool use
+kirocrew doctor               # full health check
+kirocrew update               # update to the latest version
 ```
 
-### b. Self-contained pip wheel
+### Running 24/7
 
-Produce a wheel that bundles the pre-built dashboard, then install it anywhere
-with Python:
-
-```bash
-make wheel                # → dist/kirocrew-0.1.0-*.whl (dashboard bundled)
-pip install dist/*.whl    # installs the kirocrew / kirocrew-browse commands
-kirocrew gateway          # → http://localhost:5476
-```
-
-### c. Bundled desktop app
-
-Build a double-clickable desktop app that embeds a python-build-standalone
-interpreter + uv-installed deps inside an Electron shell — end users need **no**
-Python, pip, npm, or node:
+For always-on operation as a Slack bot or cron runner, install it as a service
+and it survives reboots and crashes:
 
 ```bash
-make desktop              # → website/electron/dist/KiroCrew-*.dmg (macOS)
-                          #   or website/electron/dist/KiroCrew-*.AppImage (Linux)
-```
-
-See [docs/DESKTOP_APP.md](docs/DESKTOP_APP.md) for the build pipeline and how
-the app locates and launches the bundled backend.
-
-### Makefile targets
-
-| Target | What it does |
-|--------|--------------|
-| `make build` | Build the frontend (npm/Vite) + install the backend into `.venv` |
-| `make wheel` | Self-contained pip wheel with the dashboard bundled → `dist/` |
-| `make desktop` | Full desktop app — DMG (macOS) / AppImage (Linux) |
-| `make test` | Build, then run the `pytest` suite |
-| `make clean` | Remove build artifacts, dists, caches |
-
-## What It Does
-
-| Surface | Description |
-|---------|-------------|
-| **Slack DM** | Chat with your agent in Slack. Each thread = isolated AI session with full tool access |
-| **Web Dashboard** | React SPA at localhost:5476 — multi-session chat, memory explorer, cron manager, app store |
-| **Desktop App** | Electron wrapper with multi-tab gateway connections and native macOS tabs |
-| **CLI** | `kirocrew chat`, `kirocrew run TASK.md`, `kirocrew cron`, `kirocrew spawn` |
-
-### Key Capabilities
-
-- **Autonomous task execution** — run multi-step specs unattended for hours (`kirocrew run`)
-- **Cron scheduling** — recurring and one-shot jobs with jitter, timeouts, and timezone support
-- **Subagent orchestration** — spawn parallel background agents for independent tasks
-- **Persistent memory** — learns preferences, remembers context across sessions
-- **Self-learning** — corrections persist as lessons that change future behavior
-- **App platform** — install and build apps that extend KiroCrew (App Store + SDK)
-- **Security sandbox** — OS-level isolation (namespaces/seatbelt), credential redaction, denied command patterns
-- **Governance model** — optional two-level security policy (an enterprise ceiling the running app cannot weaken, intersected with per-surface/app/task profiles) enforced at KiroCrew's own tool gate; `kirocrew policy show|validate|explain`
-- **MCP tool ecosystem** — auto-discovers and manages MCP servers (slack-mcp and any MCP server you add)
-- **Voice** — optional speech-to-text input + text-to-speech replies (Piper, or AWS via the `voice` extra)
-- **Knowledge Library** — ingest docs/code into a searchable graph with SQLite FTS5 + Ollama embeddings
-- **System service** — `kirocrew service install` for systemd/launchd with auto-restart
-
-For the full feature list, see [docs/FEATURES.md](docs/FEATURES.md).
-
-## Running 24/7
-
-For always-on operation (Slack bot, cron jobs, task runner):
-
-```bash
-kirocrew service install      # systemd (Linux) or launchd (macOS)
+kirocrew service install      # systemd (Linux) or launchd (macOS), auto-restart
 kirocrew service status
 ```
 
-For running on a remote host, see [docs/REMOTE_DESKTOP_SETUP.md](docs/REMOTE_DESKTOP_SETUP.md).
+To run it on a remote host, see
+[docs/REMOTE_DESKTOP_SETUP.md](docs/REMOTE_DESKTOP_SETUP.md).
+
+## Security
+
+The agent has real tool access to your machine, so the controls run at
+KiroCrew's own tool gate rather than trusting the agent to behave.
+
+- **OS sandbox.** The `kiro-cli` subprocess runs inside Linux user/mount
+  namespaces or a macOS seatbelt profile that hides `~/.aws`, `~/.ssh`, and other
+  sensitive paths. Set with `"sandbox": "auto"`.
+- **Always-on guards.** AWS credentials (`AKIA`/`ASIA`) are redacted from output,
+  destructive commands are blocked by default, writes to sensitive paths are
+  refused, and every tool call is written to a tamper-evident event log.
+- **Governance policy (optional).** A two-level model: an enterprise ceiling the
+  running app can't raise, narrowed further by per-surface, per-app, and per-task
+  profiles. Inspect it with `kirocrew policy show`, `validate`, or `explain`.
+
+For the full architecture see [docs/security-deep-dive.md](docs/security-deep-dive.md),
+and report vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## Configuration
 
-Config: `~/.kirocrew/config.json` — manage via `kirocrew config get/set/edit`
+Config lives at `~/.kirocrew/config.json`. Manage it with
+`kirocrew config get`, `set`, and `edit`:
 
 ```json
 {
-  "agent": { "provider": "acp", "approval_mode": "interactive", "sandbox": "auto" },
-  "session": { "timeout_secs": 1800, "pool_size": 2 },
+  "agent":     { "provider": "acp", "approval_mode": "interactive", "sandbox": "auto" },
+  "session":   { "timeout_secs": 1800, "pool_size": 2 },
   "dashboard": { "bot_name": "KiroCrew" },
-  "slack": { "command": "kirocrew" }
+  "slack":     { "command": "kirocrew" }
 }
 ```
 
-> The dashboard port is set via the `KIROCREW_PORT` env var (default `5476`) or
-> `kirocrew gateway --port <n>`, not in config. `dashboard.url` is the
-> externally-advertised URL only.
+The provider is fixed to `acp`, since KiroCrew always drives `kiro-cli` over ACP.
+Embeddings come from your Ollama server, controlled by `memory.embedding_model`
+(default `qwen3-embedding:0.6b`) and `memory.embedding_url` (default
+`http://localhost:11434`). The dashboard port is the one setting that doesn't
+live here: set it through `KIROCREW_PORT` or `kirocrew gateway --port <n>`, and
+it defaults to `5476`. Credentials go in `~/.kirocrew/.env` instead:
+`SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, and `KIROCREW_OWNER_ID`.
 
-**Provider** — `agent.provider` is `acp`: KiroCrew drives the **`kiro-cli`** ACP
-agent over stdio. It is the only provider.
+## Installation and distribution
 
-**Embeddings** — `memory.embedding_model` (default `qwen3-embedding:0.6b`) and
-`memory.embedding_url` (default `http://localhost:11434`) control the Ollama
-server used for memory and knowledge-library search.
+There are three ways to build and run KiroCrew, lightest to heaviest. All of them
+go through the [`Makefile`](Makefile) using plain `pip`, `npm`/Vite, and
+`pytest`, with no proprietary tooling. Full guide: [docs/INSTALL.md](docs/INSTALL.md).
 
-Credentials: `~/.kirocrew/.env` — `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, `KIROCREW_OWNER_ID`
+| Method | Command | Result |
+|--------|---------|--------|
+| **From source** (dev) | `make build`, then `PYTHONPATH=src python -m kiro_crew gateway` | Editable install, run straight from `src/`. |
+| **Self-contained wheel** | `make wheel`, then `pip install dist/*.whl` | A wheel with the dashboard bundled, so you can install it anywhere Python runs. |
+| **Desktop app** | `make desktop` | A double-clickable DMG (macOS) or AppImage (Linux). End users need no Python or Node. See [docs/DESKTOP_APP.md](docs/DESKTOP_APP.md). |
 
-## Troubleshooting
-
-### `AcpTimeoutError: ACP prompt timed out`
-
-The agent backend didn't respond to the initialize handshake. Fixes:
-
-1. Confirm the `kiro-cli` backend binary is on your `PATH` and you are logged in (`kiro-cli login`)
-2. `kirocrew setup --agent-only --clean` if MCP servers are broken
-3. Wait — first launch loads MCP servers and can take >60s
-4. `kirocrew doctor` for a full health check
-
-### Memory / knowledge search not working
-
-1. Confirm Ollama is installed and running (`curl http://localhost:11434/api/tags`)
-2. Pull the embedding model: `ollama pull qwen3-embedding:0.6b`
-3. `kirocrew doctor` reports embedding-server health
-
-### Slack integration not working
-
-Slack is optional — dashboard-only mode works without it. For Slack setup, see
-[SLACK_SETUP.md](SLACK_SETUP.md).
-
-### MCP server not working after uninstall
-
-```bash
-kirocrew setup --agent-only          # re-validates, drops missing servers
-kirocrew setup --agent-only --clean  # fresh config from scratch
-```
+Other Makefile targets: `make test` (build then run pytest) and `make clean`.
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [docs/INSTALL.md](docs/INSTALL.md) | Build & install guide — the three run methods, Makefile targets, env vars |
-| [docs/DESKTOP_APP.md](docs/DESKTOP_APP.md) | Electron desktop app build pipeline and packaging |
-| [FEATURES.md](docs/FEATURES.md) | Complete feature reference |
-| [DEPENDENCIES.md](DEPENDENCIES.md) | Full dependency list (pip + npm + optional extras) |
-| [CHANGELOG.md](CHANGELOG.md) | Release history |
-| [AGENTS.md](AGENTS.md) | AI assistant rules and development conventions |
-| [SLACK_SETUP.md](SLACK_SETUP.md) | Slack app creation and setup |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow and PR guidelines |
-| [docs/REMOTE_DESKTOP_SETUP.md](docs/REMOTE_DESKTOP_SETUP.md) | 24/7 remote host setup |
-| [docs/security-deep-dive.md](docs/security-deep-dive.md) | Security architecture |
-| [docs/memory-architecture.md](docs/memory-architecture.md) | Memory system architecture (preferences, lessons, knowledge graph) |
-| [docs/mcp-architecture.md](docs/mcp-architecture.md) | MCP server discovery and tool management architecture |
-| [docs/app-kit/getting-started.md](docs/app-kit/getting-started.md) | App Kit developer guide |
-| [docs/system-specs/](docs/system-specs/) | Module-level specifications |
+Start here, then follow the links inside each doc for the rest.
 
-## Development
+- **Install and run:** [docs/INSTALL.md](docs/INSTALL.md) · Windows: [docs/WINDOWS_INSTALL.md](docs/WINDOWS_INSTALL.md) · desktop app: [docs/DESKTOP_APP.md](docs/DESKTOP_APP.md) · remote/24-7: [docs/REMOTE_DESKTOP_SETUP.md](docs/REMOTE_DESKTOP_SETUP.md)
+- **Features:** [docs/FEATURES.md](docs/FEATURES.md) · Slack: [SLACK_SETUP.md](SLACK_SETUP.md) · memory: [docs/memory-architecture.md](docs/memory-architecture.md) · MCP: [docs/mcp-architecture.md](docs/mcp-architecture.md) · apps: [docs/app-kit/getting-started.md](docs/app-kit/getting-started.md)
+- **Security:** [docs/security-deep-dive.md](docs/security-deep-dive.md)
+- **Reference:** [DEPENDENCIES.md](DEPENDENCIES.md) · [CHANGELOG.md](CHANGELOG.md) · [AGENTS.md](AGENTS.md) (conventions for AI assistants working in the repo)
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for full guidelines.
+## Troubleshooting
+
+`AcpTimeoutError: ACP prompt timed out` means the agent backend never answered
+the handshake. Check that `kiro-cli` is on your `PATH` and logged in
+(`kiro-cli login`). The first launch loads MCP servers and can take over a
+minute, so give it a moment before retrying, then run `kirocrew doctor`.
+
+If memory or knowledge search isn't working, Ollama probably isn't up. Confirm
+it with `curl http://localhost:11434/api/tags` and pull the embedding model
+(`ollama pull qwen3-embedding:0.6b`). `kirocrew doctor` reports on embedding
+health too.
+
+If Slack won't connect, remember it's optional and dashboard-only mode works
+fine without it. For the full Slack setup, see [SLACK_SETUP.md](SLACK_SETUP.md).
+
+If an MCP server breaks after you uninstall it, run `kirocrew setup --agent-only`
+to re-validate and drop the missing servers. Add `--clean` to rebuild the config
+from scratch.
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and
+[AGENTS.md](AGENTS.md) for the development workflow, conventions, and PR
+guidelines.
 
 ```bash
 # Backend
@@ -272,6 +289,13 @@ npm run check          # typecheck + lint + tests
 npm run build          # production bundle → website/dist
 ```
 
+## Community
+
+Bugs and feature requests go in
+[GitHub Issues](https://github.com/kirodotdev/KiroCrew/issues). For security
+reports, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+
 ## License
 
-See [LICENSE](LICENSE) if present in this repository.
+KiroCrew is licensed under the Apache License 2.0. See [LICENSE](LICENSE) and
+[NOTICE](NOTICE).
