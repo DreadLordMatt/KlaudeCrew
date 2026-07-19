@@ -37,6 +37,11 @@ from typing import TYPE_CHECKING
 from kiro_crew import platform_compat
 from kiro_crew.platform import current_context
 
+try:
+    import resource as _resource_mod
+except ImportError:  # non-POSIX (Windows)
+    _resource_mod = None  # type: ignore[assignment]
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -1679,3 +1684,59 @@ def resource_limit_preexec() -> "Callable[[], None] | None":
         # every limit is disabled). Cache it; passing a no-op preexec_fn is fine.
         _RESOURCE_PREEXEC = apply_resource_limits(cfg)
     return _RESOURCE_PREEXEC  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# Session host preexec — the inverse of resource_limit_preexec.
+# ---------------------------------------------------------------------------
+
+_SESSION_HOST_PREEXEC: object = _UNSET
+
+
+def session_host_preexec() -> "Callable[[], None] | None":
+    """Return a ``preexec_fn`` that *raises* NOFILE for a session host process.
+
+    Session hosts (kiro-cli-chat / claude-agent-acp) are **trusted** internal
+    processes — they manage a tree of MCP server subprocesses, each consuming
+    pipe fd pairs for stdin/stdout communication.  A single session host may
+    hold 100-200 fds under normal operation (10+ MCP servers × pipe pairs +
+    sockets + log files).
+
+    The default ``resource_limit_preexec()`` caps NOFILE at 1024 to defend
+    against compromised *tool* processes, but applying the same cap to the
+    trusted session host causes "Too many open files" crashes when subagent
+    concurrency or MCP server count is high.
+
+    This preexec raises NOFILE soft+hard to the *gateway's* inherited hard
+    limit (typically 10240 from the systemd unit, or 524288 kernel max) so
+    the session host has headroom proportional to the gateway itself.  Other
+    resource limits (NPROC, CPU, AS) are left at their sandbox values — a
+    session host has no legitimate reason to fork-bomb or allocate unbounded
+    memory.
+
+    Returns ``None`` on non-POSIX platforms (preexec_fn must be None there).
+    """
+    global _SESSION_HOST_PREEXEC
+    if _SESSION_HOST_PREEXEC is _UNSET:
+        if os.name != "posix" or _resource_mod is None:
+            _SESSION_HOST_PREEXEC = None
+            return None
+
+        res = _resource_mod
+
+        def _raise_nofile() -> None:
+            """Raise NOFILE to the hard limit in the child process."""
+            try:
+                _soft, hard = res.getrlimit(res.RLIMIT_NOFILE)
+                if hard == res.RLIM_INFINITY:
+                    # Kernel allows unlimited — cap at a sane maximum but never
+                    # reduce below the inherited soft limit.
+                    target = max(_soft, 65536)
+                else:
+                    target = hard
+                res.setrlimit(res.RLIMIT_NOFILE, (target, hard))
+            except (ValueError, OSError):
+                pass  # Leave inherited — better than failing the spawn.
+
+        _SESSION_HOST_PREEXEC = _raise_nofile
+    return _SESSION_HOST_PREEXEC  # type: ignore[return-value]

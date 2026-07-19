@@ -877,6 +877,63 @@ class TestResourceLimitPreexec:
             self._reset_cache()
 
 
+class TestSessionHostPreexec:
+    """session_host_preexec() raises NOFILE to the hard limit for trusted
+    session host processes (kiro-cli-chat), preventing EMFILE crashes when
+    managing many MCP server subprocesses."""
+
+    def _reset_cache(self):
+        import kiro_crew.sandbox as sb
+
+        sb._SESSION_HOST_PREEXEC = sb._UNSET
+
+    def test_returns_callable_and_caches(self):
+        import kiro_crew.sandbox as sb
+
+        self._reset_cache()
+        try:
+            first = sb.session_host_preexec()
+            second = sb.session_host_preexec()
+            assert callable(first)
+            assert first is second
+        finally:
+            self._reset_cache()
+
+    def test_raises_nofile_to_hard_limit(self):
+        """The preexec callable raises NOFILE soft to the hard limit."""
+        import resource
+
+        import kiro_crew.sandbox as sb
+
+        self._reset_cache()
+        try:
+            fn = sb.session_host_preexec()
+            assert fn is not None
+            # Save current limits, lower soft to simulate the problem.
+            orig_soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            if hard < 2048:
+                pytest.skip("hard limit too low for test")
+            resource.setrlimit(resource.RLIMIT_NOFILE, (1024, hard))
+            try:
+                fn()
+                new_soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+                assert new_soft == hard
+            finally:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (orig_soft, hard))
+        finally:
+            self._reset_cache()
+
+    def test_non_posix_returns_none(self):
+        import kiro_crew.sandbox as sb
+
+        self._reset_cache()
+        try:
+            with patch("kiro_crew.sandbox.os.name", "nt"):
+                assert sb.session_host_preexec() is None
+        finally:
+            self._reset_cache()
+
+
 class TestCgroupScopeArgv:
     """cgroup_scope_argv() wraps agent spawns in a transient systemd --user
     --scope with pids.max + memory.max — the default-on fork-bomb / memory-DoS

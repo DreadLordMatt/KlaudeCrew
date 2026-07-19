@@ -25,7 +25,7 @@ of failure.
 | ACP prompt timeout | `acp/client.py` | Per-prompt | 2 hr (`_DEFAULT_PROMPT_TIMEOUT`) | No | Raises `AcpTimeoutError` |
 | ACP read timeout | `acp/client.py` | Per-readline | 20s (`_READ_TIMEOUT`) | No | Allows `CancelledError` delivery at each yield point |
 | Process group kill | `acp/client.py` | Process cleanup | Immediate | No | `killpg(SIGTERM)` → `killpg(SIGKILL)` → `_kill_escaped_children` for different-PGID descendants |
-| Per-process resource limits | `security.py` (`apply_resource_limits`) via `sandbox.py` (`resource_limit_preexec`) | Every agent-influenced spawn (root agent, ACP subagents/runtime, MCP servers, app backends, cron scripts, git, hooks, voice) | Kernel-enforced `RLIMIT_NOFILE=1024` default-on; `RLIMIT_NPROC`/`RLIMIT_CPU`/`RLIMIT_AS` opt-in (default off) | Yes — kernel enforces at fork/alloc/open time, no sweep needed | Kernel refuses `open()` past the FD cap (EMFILE); on opt-in NPROC/CPU/AS, EAGAIN / SIGXCPU / ENOMEM |
+| Per-process resource limits | `security.py` (`apply_resource_limits`) via `sandbox.py` (`resource_limit_preexec`) | Every agent-influenced spawn (MCP servers, app backends, cron scripts, git, hooks, voice). Exception: the trusted ACP session-host spawns (`acp/client.py`, `acp/runtime.py`) use `sandbox.py:session_host_preexec()`, which RAISES NOFILE to the inherited hard limit instead — a session host multiplexes many MCP pipe pairs and the 1024 cap caused EMFILE crashes | Kernel-enforced `RLIMIT_NOFILE=1024` default-on; `RLIMIT_NPROC`/`RLIMIT_CPU`/`RLIMIT_AS` opt-in (default off) | Yes — kernel enforces at fork/alloc/open time, no sweep needed | Kernel refuses `open()` past the FD cap (EMFILE); on opt-in NPROC/CPU/AS, EAGAIN / SIGXCPU / ENOMEM |
 | cgroup v2 scope (fork bomb + memory) | `sandbox.py` (`cgroup_scope_argv`) | Every agent-influenced spawn tree (root agent + all its MCP servers/subagents as one scope; each cron/app-backend/hook/git/tool spawn its own) | `pids.max=8192` (`TasksMax`) + `memory.max=65% of host RAM` (`MemoryMax`, `MemorySwapMax=0`) per transient `systemd --user --scope` under `kirocrew-agents.slice`, default-on where cgroup v2 delegation exists. Note: `pids.max` counts tasks (threads), not processes — 8192 accommodates JVM build trees while still bounding fork bombs. | Yes — kernel enforces at fork()/alloc time; OOM-kills the scope on memory breach, `fork()` fails EAGAIN past `pids.max` | Fork bomb bounded to `pids.max`; memory balloon OOM-killed at `memory.max`. Unavailable (no delegation/macOS) → no-op + one loud SECURITY warning; RLIMIT_NOFILE still applies |
 | Bounded restart shutdown | `dashboard/handlers.py` | Dashboard ⚡ Apply & Restart | 5s (`_SHUTDOWN_TIMEOUT_SECS`) | No | `asyncio.wait_for` on `provider.shutdown()`; `_sync_kill_provider` fallback on timeout |
 | Subagent injection outer cap | `subagent.py _run()` | Per-subagent completion | 1200s (`_ON_DONE_TIMEOUT`) | No | Semaphore wait + injection combined; on timeout kills stuck kiro-cli via `sessions.reset()` and queues failure event for parent to drain |
@@ -67,8 +67,11 @@ of failure.
 3. **Per-process resource limits — implemented and wired (Talos bdf0d7e5 / V2285983353).**
    `security.py:apply_resource_limits(config)` returns a `preexec_fn` that applies POSIX
    `setrlimit` caps in the child (post-fork, pre-exec), and `sandbox.py:resource_limit_preexec()`
-   is the cached accessor every agent-influenced spawn passes as `preexec_fn=` — the root agent
-   and ACP subagents/runtime (`acp/client.py`, `acp/runtime.py`), MCP server probes
+   is the cached accessor every agent-influenced spawn passes as `preexec_fn=` — the ACP
+   session-host spawns (`acp/client.py`, `acp/runtime.py`) now use
+   `sandbox.py:session_host_preexec()` instead, which RAISES NOFILE to the inherited hard limit
+   for the trusted session host (it multiplexes many MCP pipe pairs); all other
+   agent-influenced spawns keep `resource_limit_preexec` — MCP server probes
    (`mcp_discovery.py`), app backends and their dependency installs (`apps/backend.py`), the app
    registry's git clone/build spawns (`apps/registry.py`, `apps/routes.py`), builtin app
    subprocesses (deploy_web, file_explorer), cron scripts/commands

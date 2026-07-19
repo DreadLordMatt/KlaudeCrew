@@ -79,7 +79,7 @@ _ROUTED_TOKENS = ("sandboxed_spawn_argv", "wrap_argv")
 # filesystem + credential isolation, this gives it a fork-bomb / resource
 # ceiling. Functions whose ONLY spawns are fixed-argv internal probes (no
 # agent-influenced child) are exempted in ``PREEXEC_EXEMPT`` below.
-_PREEXEC_TOKEN = "resource_limit_preexec"
+_PREEXEC_TOKENS = ("resource_limit_preexec", "session_host_preexec")
 
 # Routed functions exempt from the resource-limit requirement: the enclosing
 # function is sandbox-routed (so it appears routed) but the specific spawn is a
@@ -274,7 +274,7 @@ def _collect_routed_spawns_without_preexec() -> set[str]:
     return {
         key
         for key, fsrc in _collect_spawn_functions().items()
-        if any(tok in fsrc for tok in _ROUTED_TOKENS) and _PREEXEC_TOKEN not in fsrc
+        if any(tok in fsrc for tok in _ROUTED_TOKENS) and not any(tok in fsrc for tok in _PREEXEC_TOKENS)
     }
 
 

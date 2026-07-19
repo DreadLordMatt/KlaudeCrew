@@ -45,7 +45,7 @@ from kiro_crew.acp.types import (
 )
 from kiro_crew.env import augmented_path, resolve_krb5_ccname
 from kiro_crew.executors import subprocess_executor
-from kiro_crew.sandbox import cgroup_scope_argv, resource_limit_preexec, wrap_argv
+from kiro_crew.sandbox import cgroup_scope_argv, session_host_preexec, wrap_argv
 from kiro_crew.session_pid import (
     _track_pid,
     _track_session_pid,
@@ -430,7 +430,7 @@ class AcpRuntime:
             start_new_session=platform_compat.IS_POSIX,
             creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
             env=env,
-            preexec_fn=resource_limit_preexec(),
+            preexec_fn=session_host_preexec(),
         )
         self._pid = self._process.pid
         self._start_time = _get_start_time(self._pid)
