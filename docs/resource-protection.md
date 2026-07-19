@@ -26,7 +26,7 @@ of failure.
 | ACP read timeout | `acp/client.py` | Per-readline | 20s (`_READ_TIMEOUT`) | No | Allows `CancelledError` delivery at each yield point |
 | Process group kill | `acp/client.py` | Process cleanup | Immediate | No | `killpg(SIGTERM)` → `killpg(SIGKILL)` → `_kill_escaped_children` for different-PGID descendants |
 | Per-process resource limits | `security.py` (`apply_resource_limits`) via `sandbox.py` (`resource_limit_preexec`) | Every agent-influenced spawn (root agent, ACP subagents/runtime, MCP servers, app backends, cron scripts, git, hooks, voice) | Kernel-enforced `RLIMIT_NOFILE=1024` default-on; `RLIMIT_NPROC`/`RLIMIT_CPU`/`RLIMIT_AS` opt-in (default off) | Yes — kernel enforces at fork/alloc/open time, no sweep needed | Kernel refuses `open()` past the FD cap (EMFILE); on opt-in NPROC/CPU/AS, EAGAIN / SIGXCPU / ENOMEM |
-| cgroup v2 scope (fork bomb + memory) | `sandbox.py` (`cgroup_scope_argv`) | Every agent-influenced spawn tree (root agent + all its MCP servers/subagents as one scope; each cron/app-backend/hook/git/tool spawn its own) | `pids.max=1024` (`TasksMax`) + `memory.max=65% of host RAM` (`MemoryMax`, `MemorySwapMax=0`) per transient `systemd --user --scope` under `kirocrew-agents.slice`, default-on where cgroup v2 delegation exists | Yes — kernel enforces at fork()/alloc time; OOM-kills the scope on memory breach, `fork()` fails EAGAIN past `pids.max` | Fork bomb bounded to `pids.max`; memory balloon OOM-killed at `memory.max`. Unavailable (no delegation/macOS) → no-op + one loud SECURITY warning; RLIMIT_NOFILE still applies |
+| cgroup v2 scope (fork bomb + memory) | `sandbox.py` (`cgroup_scope_argv`) | Every agent-influenced spawn tree (root agent + all its MCP servers/subagents as one scope; each cron/app-backend/hook/git/tool spawn its own) | `pids.max=8192` (`TasksMax`) + `memory.max=65% of host RAM` (`MemoryMax`, `MemorySwapMax=0`) per transient `systemd --user --scope` under `kirocrew-agents.slice`, default-on where cgroup v2 delegation exists. Note: `pids.max` counts tasks (threads), not processes — 8192 accommodates JVM build trees while still bounding fork bombs. | Yes — kernel enforces at fork()/alloc time; OOM-kills the scope on memory breach, `fork()` fails EAGAIN past `pids.max` | Fork bomb bounded to `pids.max`; memory balloon OOM-killed at `memory.max`. Unavailable (no delegation/macOS) → no-op + one loud SECURITY warning; RLIMIT_NOFILE still applies |
 | Bounded restart shutdown | `dashboard/handlers.py` | Dashboard ⚡ Apply & Restart | 5s (`_SHUTDOWN_TIMEOUT_SECS`) | No | `asyncio.wait_for` on `provider.shutdown()`; `_sync_kill_provider` fallback on timeout |
 | Subagent injection outer cap | `subagent.py _run()` | Per-subagent completion | 1200s (`_ON_DONE_TIMEOUT`) | No | Semaphore wait + injection combined; on timeout kills stuck kiro-cli via `sessions.reset()` and queues failure event for parent to drain |
 | Subagent injection inner cap | `gateway.py` | Per `stream_and_collect` | 300s (`INJECTION_TIMEOUT`) | No | `_inject_with_retry` up to 2 retries (3 attempts) with backoff; bounded by outer 1200s cap |
@@ -118,9 +118,12 @@ of failure.
    resident memory), the actual default-on defense is a **cgroup v2 scope** applied by
    `sandbox.py:cgroup_scope_argv()`. Every agent-influenced spawn is wrapped in a transient
    `systemd-run --user --scope` (nested under `kirocrew-agents.slice`) with:
-   - `TasksMax` = `pids.max` (default **1024**, from `max_processes`) — the **fork-bomb**
-     ceiling. Per-cgroup, so it bounds the agent + all its MCP-server/tool descendants as one
-     unit without the per-UID footgun; `fork()` fails `EAGAIN` past it.
+   - `TasksMax` = `pids.max` (default **8192**, from `max_processes`) — the **fork-bomb**
+     ceiling. `pids.max` counts tasks (threads), not processes; 1024 starved legitimate JVM
+     build trees (Gradle + parallel test workers need thousands of threads). 8192 still bounds
+     fork bombs which spawn tens of thousands of tasks near-instantly. Per-cgroup, so it bounds
+     the agent + all its MCP-server/tool descendants as one unit without the per-UID footgun;
+     `fork()` fails `EAGAIN` past it.
    - `MemoryMax` + `MemorySwapMax=0` = `memory.max` (default **65% of physical RAM** — e.g.
      ~10.6 GB on a 16 GB box, ~21.3 GB on 32 GB; overridable via `max_memory_mb`, and an
      8192 MB fallback when host RAM can't be read) — the **memory-balloon** ceiling. It scales

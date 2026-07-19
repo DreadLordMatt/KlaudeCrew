@@ -815,13 +815,13 @@ class TestCgroupScopeArgv:
                 patch("kiro_crew.sandbox._probe_cgroup_scope", return_value=(True, "ok")),
                 patch(
                     "kiro_crew.sandbox._cgroup_limits_from_config",
-                    return_value=(1024, 8192),
+                    return_value=(8192, 8192),
                 ),
             ):
                 out = sb.cgroup_scope_argv(["kiro-cli", "chat"])
             assert out[0] == "systemd-run"
             assert "--user" in out and "--scope" in out
-            assert "TasksMax=1024" in out
+            assert "TasksMax=8192" in out
             assert "MemoryMax=8192M" in out
             assert "MemorySwapMax=0" in out
             assert out[out.index("--") + 1 :] == ["kiro-cli", "chat"]

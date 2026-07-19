@@ -1408,7 +1408,11 @@ def sandboxed_spawn_argv(
 
 # Default cgroup ceilings (per agent scope). Overridable via the same
 # ``resource_limits`` config block used by apply_resource_limits.
-_CGROUP_DEFAULT_MAX_PROCESSES = 1024  # pids.max — bounds fork bombs
+_CGROUP_DEFAULT_MAX_PROCESSES = 8192  # pids.max counts TASKS (threads), not processes;
+# 1024 starved legitimate JVM build trees (Gradle + parallel test workers need
+# thousands of threads -> pthread_create EAGAIN / 'unable to create native thread'
+# while the host is idle); 8192 still bounds fork bombs which spawn tens of
+# thousands of tasks near-instantly. Override via resource_limits.max_processes.
 
 # The memory.max default is HOST-PROPORTIONAL, not a flat cap: the agent
 # subprocess tree may occupy up to this fraction of physical RAM before the

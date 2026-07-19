@@ -2775,7 +2775,7 @@ _RLIMIT_DEFAULTS = {
     # NOTE: the fork-bomb defense that IS default-on is the cgroup v2 scope
     # (sandbox.cgroup_scope_argv → pids.max), which is per-cgroup not per-UID.
     # This same ``max_processes`` key sets that cgroup pids.max ceiling (default
-    # 1024 there); the RLIMIT_NPROC path below stays opt-in for the reasons above.
+    # 8192 there); the RLIMIT_NPROC path below stays opt-in for the reasons above.
     "max_processes": 0,
     # RLIMIT_CPU: CPU-seconds. 0 = disabled (default). CAVEAT: this counts
     # against the WHOLE lifetime of a long-lived process — the root agent runs
