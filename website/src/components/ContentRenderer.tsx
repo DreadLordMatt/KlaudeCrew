@@ -56,7 +56,7 @@ let themesRegistered = false
 
 /** Monaco-based code editor for editable text content. */
 export function CodeEditor({
-  content, lang, lineNums, wordWrap, autocomplete, onChange,
+  content, lang, lineNums, wordWrap, autocomplete, onChange, flush,
 }: {
   content: string
   lang: string
@@ -64,6 +64,9 @@ export function CodeEditor({
   wordWrap: boolean
   autocomplete: boolean
   onChange: (v: string) => void
+  /** Drop the rounded border box — the host surface (e.g. a side-panel tab
+   *  body) provides the frame, so content runs edge-to-edge. */
+  flush?: boolean
 }) {
   const dark = useIsDark()
   const monoFont = useMemo(
@@ -71,7 +74,7 @@ export function CodeEditor({
     [],
   )
   return (
-    <div className="w-full h-full border border-border rounded-md overflow-hidden">
+    <div className={`w-full h-full overflow-hidden ${flush ? '' : 'border border-border rounded-md'}`}>
       <Suspense fallback={<div className="p-3 text-muted text-[12px] animate-pulse">Loading editor…</div>}>
         <MonacoEditor
           height="100%"
@@ -101,6 +104,15 @@ export function CodeEditor({
             automaticLayout: true,
             padding: { top: 8, bottom: 8 },
             hover: { enabled: true },
+            // No red error squiggles by default — the panel editor is for
+            // quick edits, not full IDE diagnostics.
+            renderValidationDecorations: 'off',
+            // No indent guide lines — visual noise in a quick-edit panel.
+            guides: { indentation: false },
+            // No sticky scroll (enclosing function pinned at the top).
+            stickyScroll: { enabled: false },
+            // No current-line highlight box.
+            renderLineHighlight: 'none',
           }}
         />
       </Suspense>
@@ -121,7 +133,7 @@ export const ContentRenderer = memo(function ContentRenderer({
   isRichType, fileType, filePath, content, editing,
   lang, lineNums, wordWrap, autocomplete, onChange,
   previewRef, displayContent, isMarkdown, highlightedHtml,
-  gutterReadRef, markdownClassName, previewStyle,
+  gutterReadRef, markdownClassName, previewStyle, flush,
 }: {
   isRichType: boolean
   fileType: string
@@ -141,6 +153,9 @@ export const ContentRenderer = memo(function ContentRenderer({
   gutterReadRef?: React.RefObject<HTMLDivElement | null>
   markdownClassName?: string
   previewStyle?: React.CSSProperties
+  /** Drop the rounded border boxes around the editor / code views — used when
+   *  the host surface (side-panel tab body) already frames the content. */
+  flush?: boolean
 }) {
   const inner = (
     <>
@@ -159,6 +174,7 @@ export const ContentRenderer = memo(function ContentRenderer({
           wordWrap={wordWrap}
           autocomplete={autocomplete}
           onChange={onChange}
+          flush={flush}
         />
       )}
       {!isRichType && !editing && isMarkdown && (
@@ -169,7 +185,7 @@ export const ContentRenderer = memo(function ContentRenderer({
         </div>
       )}
       {!isRichType && !editing && !isMarkdown && (
-        <div className="relative w-full h-full font-mono text-[13px] leading-[18px] border border-border rounded-md overflow-hidden">
+        <div className={`relative w-full h-full font-mono text-[13px] leading-[18px] overflow-hidden ${flush ? '' : 'border border-border rounded-md'}`}>
           {lineNums && (
             <div ref={gutterReadRef as React.RefObject<HTMLDivElement>} className="absolute left-0 top-0 bottom-0 w-[3em] text-right pr-2 pt-3 text-[13px] text-muted select-none overflow-hidden z-10 leading-[18px]" style={{ fontFamily: "Menlo, Monaco, 'Courier New', monospace" }}>
               {Array.from({ length: content.split('\n').length }, (_, i) => <div key={i}>{i + 1}</div>)}

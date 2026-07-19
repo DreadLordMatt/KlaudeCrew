@@ -325,7 +325,9 @@ describe('App routing', () => {
 
   it('renders connection status', () => {
     renderWithProviders(<App />, { route: '/chat' })
-    expect(screen.getByText('Offline')).toBeInTheDocument()
+    // Connection is a colored dot in the unified readout capsule ("Offline"
+    // text was removed -- the capsule's red tint is the disconnected signal).
+    expect(screen.getByLabelText('Gateway offline')).toBeInTheDocument()
   })
 
   it('renders theme toggle', () => {

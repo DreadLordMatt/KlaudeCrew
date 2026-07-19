@@ -11,7 +11,7 @@ export type ContentWidth = 'compact' | 'comfortable' | 'full'
 export type SendMode = 'enter' | 'ctrl-enter' | 'enter-ctrl-newline'
 
 export const CONTENT_WIDTH: Record<ContentWidth, { messages: string; input: string }> = {
-  compact: { messages: '900px', input: '916px' },
+  compact: { messages: '800px', input: '816px' },
   comfortable: { messages: '84%', input: '85%' },
   // 'full' = the widest single-pane width (keeps a small gutter so text doesn't
   // touch the window edge). Native grid panes force true edge-to-edge (100%)

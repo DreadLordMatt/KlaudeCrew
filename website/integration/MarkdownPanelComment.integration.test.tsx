@@ -194,7 +194,9 @@ describe('MarkdownPanel comment/copy flow', () => {
 
   it('does not show selection toolbar in edit mode', () => {
     render(<Providers><MarkdownPanel {...defaultProps} /></Providers>)
-    fireEvent.click(screen.getByText('Edit'))
+    // 'View Source' is the toolbar's single view-mode toggle button
+    // (replaced the Preview/Raw segmented switch, which replaced 'Edit').
+    fireEvent.click(screen.getByText('View Source'))
     // Attempt to trigger toolbar — preview container won't exist in edit mode
     fireEvent.mouseUp(document, { clientX: 100, clientY: 80 })
     act(() => { vi.advanceTimersByTime(60) })

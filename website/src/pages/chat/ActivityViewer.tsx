@@ -456,11 +456,14 @@ function FileBrowser({ onFileOpen, initialPath = '' }: { onFileOpen?: (path: str
   )
 }
 
-export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, files, onFileOpen, onFileRemove, onFilesClear, projectDir, navLinks, navResolving }: {
+export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, files, onFileOpen, onFileRemove, onFilesClear, projectDir, navLinks, navResolving, view }: {
   subagents: Record<string, SubagentActivity>; toolLog: ToolActivity[]; open: boolean; onToggle: () => void; slot: string
   files?: TouchedFile[]; onFileOpen?: (path: string) => void; onFileRemove?: (path: string) => void; onFilesClear?: (source: 'history' | 'tool') => void
   projectDir?: string
   navLinks?: ExtractedLink[]; navResolving?: boolean
+  /** When set, render ONLY this view and hide the internal SegmentedControl.
+   *  Used by SidePanel, which owns the top-level tab strip. */
+  view?: 'subagents' | 'logs' | 'files' | 'side' | 'workflows'
 }) {
   const dispatch = useAppDispatch()
   const [, setSelected] = useState(0)
@@ -514,6 +517,10 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
 
   if (!open) return null
 
+  // When a `view` prop is supplied, SidePanel owns the tab strip — render only
+  // that view and skip the internal SegmentedControl.
+  const effectiveTab = view ?? tab
+
   const TABS: { key: typeof tab; label: string; icon: ReactNode; count?: number }[] = [
     { key: 'files', label: 'Files', icon: <FileText size={13} />, count: files?.length || 0 },
     { key: 'subagents', label: 'Subagents', icon: <Bot size={13} />, count: ids.length + visibleLog.filter(isSpawnApproval).length },
@@ -528,18 +535,20 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
     // a region, not an interactive control.
     // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
     <div ref={containerRef} role="region" aria-label="Activity" className="flex flex-col h-full bg-bg relative" tabIndex={0}>
-      {/* Tab bar */}
-      <div className="px-3 py-2 shrink-0 flex justify-center">
-        <SegmentedControl
-          segments={TABS}
-          value={tab}
-          onChange={t => { setTab(t); explicitTab.current = true; dispatch(openActivityToTab(t)) }}
-          layoutId="activity-tab"
-        />
-      </div>
+      {/* Tab bar — hidden when SidePanel drives the view via the `view` prop. */}
+      {!view && (
+        <div className="px-3 py-2 shrink-0 flex justify-center">
+          <SegmentedControl
+            segments={TABS}
+            value={tab}
+            onChange={t => { setTab(t); explicitTab.current = true; dispatch(openActivityToTab(t)) }}
+            layoutId="activity-tab"
+          />
+        </div>
+      )}
 
       {/* Subagents tab */}
-      {tab === 'subagents' && (
+      {effectiveTab === 'subagents' && (
         <div className="flex-1 overflow-y-auto py-2">
           {/* Pending approvals */}
           {visibleLog.filter(isSpawnApproval).map((entry, i) => (
@@ -557,7 +566,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
       )}
 
       {/* Workflows tab (M6): live dynamic-workflow runs */}
-      {tab === 'workflows' && (
+      {effectiveTab === 'workflows' && (
         <div className="flex-1 overflow-y-auto py-2 px-3 flex flex-col gap-2">
           {wfRunsForSlot.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-muted/30 gap-2">
@@ -573,11 +582,16 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
         </div>
       )}
 
-      {/* Logs tab */}
-      {tab === 'logs' && <LogViewer compact />}
+      {/* Logs tab — LogViewer is an edge-to-edge page component; give it a
+          little breathing room inside the panel. */}
+      {effectiveTab === 'logs' && (
+        <div className="flex-1 min-h-0 flex flex-col px-2 pb-2 pt-1">
+          <LogViewer compact />
+        </div>
+      )}
 
       {/* Files tab */}
-      {tab === 'files' && (() => {
+      {effectiveTab === 'files' && (() => {
         const suggested = (files || []).filter(f => f.source === 'tool')
         const history = (files || []).filter(f => f.source === 'history')
         return (
@@ -689,7 +703,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
       })()}
 
       {/* Side tab */}
-      {tab === 'side' && <SideChat slot={slot} />}
+      {effectiveTab === 'side' && <SideChat slot={slot} />}
 
       {/* Scroll to bottom button (tools tab only) */}
     </div>

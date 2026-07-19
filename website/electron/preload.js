@@ -21,6 +21,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   bootComplete: () => ipcRenderer.send("boot-complete"),
   // Dev mode IPC: renderer signals main process to show/hide DevTools menu item.
   setDevMode: (enabled) => ipcRenderer.send("dev-mode-changed", !!enabled),
+  onFullScreenChanged: (callback) => {
+    const handler = (_event, isFullScreen) => callback(!!isFullScreen);
+    ipcRenderer.on("fullscreen-changed", handler);
+    return () => ipcRenderer.removeListener("fullscreen-changed", handler);
+  },
 });
 
 // Desktop auto-update bridge. Drives the in-app UpdateModal + Settings > About.

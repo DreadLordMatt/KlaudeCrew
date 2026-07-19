@@ -5,8 +5,8 @@ describe('Content Width', () => {
   afterEach(() => { vi.restoreAllMocks() })
 
   it('CONTENT_WIDTH map has correct values', () => {
-    expect(CONTENT_WIDTH.compact.messages).toBe('900px')
-    expect(CONTENT_WIDTH.compact.input).toBe('916px')
+    expect(CONTENT_WIDTH.compact.messages).toBe('800px')
+    expect(CONTENT_WIDTH.compact.input).toBe('816px')
     expect(CONTENT_WIDTH.comfortable.messages).toBe('84%')
     expect(CONTENT_WIDTH.comfortable.input).toBe('85%')
     expect(CONTENT_WIDTH.full.messages).toBe('92%')

@@ -77,7 +77,12 @@ if (migrateRemoteHostConfig(store, PORT)) {
 const HEALTH_URL = `${BACKEND_URL}/api/status`;
 const POLL_INTERVAL_MS = 500;
 const MAX_WAIT_MS = 30_000; // 30s max wait for backend
-const TAB_BAR_HEIGHT = 28; // macOS native tab bar height in px
+const IS_MAC = process.platform === "darwin";
+// The dashboard view fills the whole content area on all platforms. On macOS
+// the window is frameless (titleBarStyle:"hidden") and the dashboard's own
+// 52px header doubles as the title bar: an injected drag region makes it
+// draggable and the native traffic lights are inset into it (see
+// positionTrafficLights).
 
 const { validateRemoteSettings } = require("./validation");
 const { attachContextMenu } = require("./context-menu");
@@ -417,7 +422,7 @@ function setupWindowContents(win, backendUrl) {
   const port = new URL(backendUrl).port;
   let customName = null;
 
-  // Create a WebContentsView positioned below the tab bar
+  // Create a WebContentsView filling the window's content area
   const view = new WebContentsView({
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -428,33 +433,28 @@ function setupWindowContents(win, backendUrl) {
   view.setBackgroundColor("#00000000");
   win.contentView.addChildView(view);
 
-  // Drag region in the tab bar padding area (makes it draggable)
-  const dragView = new WebContentsView();
-  dragView.setBackgroundColor("#00000000");
-  dragView.webContents.loadURL("about:blank");
-  dragView.webContents.on("did-finish-load", () => {
-    dragView.webContents.insertCSS("html { -webkit-app-region: drag; height: 100%; }");
-  });
-  win.contentView.addChildView(dragView);
-
   // Clean up views when window is closed
   win.on("closed", () => {
     view.webContents.close();
-    dragView.webContents.close();
   });
 
-  // Position the content view below the tab bar area
+  // The dashboard view fills the entire content area; the SPA's own header is
+  // the title bar (drag region injected below on macOS).
   function updateViewBounds() {
     if (win.isDestroyed()) return;
     const { width, height } = win.getContentBounds();
-    const offset = win.isFullScreen() ? 0 : TAB_BAR_HEIGHT;
-    dragView.setBounds({ x: 0, y: 0, width, height: offset });
-    view.setBounds({ x: 0, y: offset, width, height: height - offset });
+    view.setBounds({ x: 0, y: 0, width, height });
   }
   updateViewBounds();
   win.on("resize", updateViewBounds);
-  win.on("enter-full-screen", updateViewBounds);
-  win.on("leave-full-screen", updateViewBounds);
+  // Fullscreen also notifies the renderer: macOS hides the traffic lights in
+  // fullscreen, so the SPA drops its 84px header inset (mac-fullscreen class).
+  const sendFullScreen = () => {
+    if (win.isDestroyed() || view.webContents.isDestroyed()) return;
+    view.webContents.send("fullscreen-changed", win.isFullScreen());
+  };
+  win.on("enter-full-screen", () => { updateViewBounds(); sendFullScreen(); });
+  win.on("leave-full-screen", () => { updateViewBounds(); sendFullScreen(); });
   // The initial updateViewBounds() above runs before win.show() and before the
   // dashboard finishes loading, so getContentBounds() can return a pre-layout
   // size — leaving the WebContentsView mis-sized (content overflows / gets cut
@@ -465,6 +465,9 @@ function setupWindowContents(win, backendUrl) {
   win.on("move", updateViewBounds); // display / scale-factor changes
   view.webContents.on("did-finish-load", () => {
     updateViewBounds();
+    // Initial state for the renderer (covers booting straight into fullscreen
+    // via the fullscreen-restore flag) — and after in-app reloads.
+    sendFullScreen();
     // The dashboard loads built-in apps and other content asynchronously after
     // did-finish-load, which can drive a late layout pass; recompute once more
     // shortly after so a content-triggered resize can't leave the view cut off.
@@ -485,15 +488,24 @@ function setupWindowContents(win, backendUrl) {
   win._mcView = view;
   attachContextMenu(view.webContents);
 
+  // Keep the native traffic lights centered in the zoom-scaled header row.
+  // "zoom-changed" covers pinch / ctrl+wheel gestures; the View-menu zoom
+  // items call positionTrafficLights explicitly (see zoomItem in the menu).
+  if (IS_MAC) {
+    positionTrafficLights(win);
+    view.webContents.on("zoom-changed", () => setTimeout(() => positionTrafficLights(win), 0));
+  }
+
+  // The frameless macOS window emits system-context-menu for the drag region;
+  // replace it with our window actions.
   win.on("system-context-menu", (e, point) => {
     e.preventDefault();
     Menu.buildFromTemplate([
-      { label: "Rename Tab…", click: () => renameCurrentTab() },
+      { label: "Rename Window…", click: () => renameCurrentWindow() },
       { label: "Set Remote Host…", click: () => promptRemoteHost() },
       { label: "Refresh Token", click: () => refreshToken() },
       { type: "separator" },
-      { label: "New Connection Tab…", click: () => openNewTab() },
-      { label: "Merge All Windows", click: () => mergeAllWindows() },
+      { label: "New Connection Window…", click: () => openNewConnectionWindow() },
     ]).popup({ window: win, x: point.x, y: point.y });
   });
 
@@ -552,6 +564,33 @@ function setupWindowContents(win, backendUrl) {
   });
 }
 
+// ── Traffic lights ──
+//
+// The SPA renders a 52px (CSS px) header that acts as the title bar. The
+// native traffic lights are AppKit controls with a fixed ~14px visual height —
+// they do not scale with webContents zoom. To keep them visually centered in
+// the header at any zoom level, recompute their inset from the current zoom
+// factor: the header's on-screen height is 52 * zoomFactor, so both the x
+// inset and the vertical centering scale with it.
+const HEADER_CSS_PX = 52;
+const TRAFFIC_LIGHT_NATIVE_H = 14;
+
+function trafficLightPositionForZoom(zoomFactor) {
+  const headerPx = Math.round(HEADER_CSS_PX * zoomFactor);
+  return {
+    x: Math.round(16 * zoomFactor),
+    y: Math.max(6, Math.round((headerPx - TRAFFIC_LIGHT_NATIVE_H) / 2)),
+  };
+}
+
+function positionTrafficLights(win) {
+  if (!IS_MAC || !win || win.isDestroyed()) return;
+  try {
+    const zoom = win._mcView ? win._mcView.webContents.getZoomFactor() : 1;
+    win.setWindowButtonPosition(trafficLightPositionForZoom(zoom));
+  } catch { /* window mid-teardown */ }
+}
+
 function createWindow() {
   // Restore the saved geometry so quitting from native fullscreen (or any size)
   // comes back correctly. Without this the window is always rebuilt at the
@@ -571,20 +610,16 @@ function createWindow() {
     height: state.height,
     minWidth: 550,
     minHeight: 600,
-    tabbingIdentifier: "kirocrew",
     titleBarStyle: "hidden",
     backgroundColor: "#0f1117",
   };
-  // Only include `fullscreen` when we actually want fullscreen. On macOS with
-  // `tabbingIdentifier` set, passing `fullscreen: false` explicitly to
-  // BaseWindow shifts NSWindow.tabbingMode into NSWindowTabbingModePreferred,
-  // which turns the green traffic-light button into an add-tab button (+) and
-  // blocks native fullscreen (Cmd+Ctrl+F and View → Enter Full Screen do
-  // nothing). Setting the flag only when true preserves the fullscreen-restore
-  // intent — the window still comes up already fullscreen when we quit in
-  // fullscreen, so updateViewBounds() (fired on show/enter-full-screen) sizes
-  // the WebContentsView with offset 0 (no black gap, no tiny window). The
-  // width/height above become the normal frame to return to on exit.
+  // Inset the native traffic lights into the dashboard's 52px header row.
+  // Kept in sync with zoom by positionTrafficLights().
+  if (IS_MAC) opts.trafficLightPosition = trafficLightPositionForZoom(1);
+  // Only include `fullscreen` when we actually want fullscreen: the flag
+  // preserves the fullscreen-restore intent — the window comes up already
+  // fullscreen when we quit in fullscreen. The width/height above become the
+  // normal frame to return to on exit.
   if (state.fullScreen) opts.fullscreen = true;
   if (typeof state.x === "number" && typeof state.y === "number") {
     opts.x = state.x;
@@ -643,12 +678,13 @@ function createTray() {
   const icon = nativeImage.createFromPath(iconPath).resize({ width: 18, height: 18 });
   tray = new Tray(icon);
   tray.setToolTip("KiroCrew");
+  // Each connection opens as its own window on every platform (native window
+  // tabs were removed with the single-surface shell redesign).
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: "Show KiroCrew", click: () => mainWindow?.show() },
       { type: "separator" },
-      { label: "New Connection Tab…", click: () => openNewTab() },
-      { label: "Merge All Windows", click: () => mergeAllWindows() },
+      { label: "New Connection Window…", click: () => openNewConnectionWindow() },
       { type: "separator" },
       { label: "Open Config File", click: () => shell.openPath(store.path) },
       { type: "separator" },
@@ -1133,9 +1169,9 @@ async function showLoadingThenConnect(win, backendUrl = BACKEND_URL) {
   }
 }
 
-// ── New Connection Tab ──
+// ── New Connection Window ──
 
-async function openNewTab() {
+async function openNewConnectionWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.show();
 
@@ -1170,37 +1206,39 @@ async function openNewTab() {
     if (!mainWindow || mainWindow.isDestroyed()) return;
 
     const backendUrl = `http://localhost:${port}`;
-    const tabWin = new BaseWindow({
+    const connOpts = {
       width: 1280,
       height: 860,
       minWidth: 550,
       minHeight: 600,
-      tabbingIdentifier: "kirocrew",
       titleBarStyle: "hidden",
       backgroundColor: "#0f1117",
-    });
+    };
+    // Same traffic-light inset as the main window (see createWindow).
+    if (IS_MAC) connOpts.trafficLightPosition = trafficLightPositionForZoom(1);
+    const connWin = new BaseWindow(connOpts);
 
-    setupWindowContents(tabWin, backendUrl);
+    setupWindowContents(connWin, backendUrl);
 
     const onNavigate = createTokenRetryHandler(async () => {
       let token = await fetchLocalToken(backendUrl);
       if (!token) ({ token } = await fetchRemoteToken(port));
-      if (token && !tabWin.isDestroyed()) {
-        tabWin.webContents.loadURL(`${backendUrl}?token=${token}`);
+      if (token && !connWin.isDestroyed()) {
+        connWin.webContents.loadURL(`${backendUrl}?token=${token}`);
       }
     });
-    tabWin.webContents.on("did-navigate", (_e, _url, httpCode) => {
+    connWin.webContents.on("did-navigate", (_e, _url, httpCode) => {
       onNavigate(httpCode).catch((err) => console.error("Token retry failed:", err));
     });
 
-    mainWindow.addTabbedWindow(tabWin);
-    await showLoadingThenConnect(tabWin, backendUrl);
+    // Every connection is a standalone window (tracked for menu actions).
+    await showLoadingThenConnect(connWin, backendUrl);
   });
 }
 
-// ── Rename Tab ──
+// ── Rename Window ──
 
-function renameCurrentTab() {
+function renameCurrentWindow() {
   const focused = BaseWindow.getFocusedWindow();
   if (!focused || !focused._mcSetCustomName) return;
 
@@ -1221,11 +1259,11 @@ function renameCurrentTab() {
     .check-row input { width:auto; margin:0; }
     .check-row label { margin:0; font-size:12px; }
   </style></head><body>
-    <label>Tab name</label>
+    <label>Window name</label>
     <input id="n" value="${esc(currentTitle.replace(/^KiroCrew /g, ''))}" autofocus>
     <div class="row"><button class="ok" onclick="go()">Rename</button>
     <button class="cancel" onclick="window.close()">Cancel</button></div>
-    <div class="check-row"><input type="checkbox" id="d"><label for="d">Set as default name for :${port} tabs</label></div>
+    <div class="check-row"><input type="checkbox" id="d"><label for="d">Set as default name for :${port} windows</label></div>
     <script>
       function go() { document.title = JSON.stringify({name: document.getElementById('n').value.trim(), setDefault: document.getElementById('d').checked}); window.close(); }
       document.addEventListener('keydown', e => { if(e.key==='Enter') go(); if(e.key==='Escape') window.close(); });
@@ -1257,27 +1295,6 @@ function renameCurrentTab() {
   }); // end getDashboardThemeVars().then()
 }
 
-// ── Merge Windows ──
-
-function mergeAllWindows() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.show();
-
-  const others = BaseWindow.getAllWindows().filter(
-    (w) => w !== mainWindow && !w.isDestroyed() && w._mcSetCustomName
-  );
-  for (const win of others) {
-    mainWindow.addTabbedWindow(win);
-  }
-  // Force tab bar redraw after merge
-  setTimeout(() => {
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.setHasShadow(false);
-      mainWindow.setHasShadow(true);
-    }
-  }, 50);
-}
-
 // ── App lifecycle ──
 
 // Guide the user to grant macOS Screen Recording permission when it has been
@@ -1304,19 +1321,56 @@ function showScreenPermissionDialog() {
 }
 
 app.whenReady().then(async () => {
-  // App menu with Rename Tab shortcut
+  // Zoom items are explicit (not `role:`-based) so each zoom change can also
+  // recenter the macOS traffic lights in the zoom-scaled header row.
+  // Resolve the dashboard WebContents of the focused window. The de-tabbed
+  // shell hosts pages in WebContentsViews inside BaseWindows: BaseWindow has
+  // no `webContents`, so menu `role:` items (reload/forceReload) and
+  // BrowserWindow.getFocusedWindow() lookups silently no-op on main windows.
+  // Window-first resolution (focused window -> its content view) is also
+  // deterministic when DevTools has focus, where getFocusedWebContents()
+  // would return the DevTools page itself.
+  const focusedDashboardWC = () => {
+    const win = BaseWindow.getFocusedWindow();
+    if (win) {
+      const views = win.contentView && win.contentView.children;
+      if (views && views.length > 0) {
+        // First view with a real page loaded is the dashboard (works for
+        // localhost AND remote-host connection windows).
+        const mainView = views.find((v) => {
+          try { return !!(v.webContents && v.webContents.getURL()); }
+          catch { return false; }
+        });
+        if (mainView) return mainView.webContents;
+      }
+      if (win.webContents) return win.webContents; // plain BrowserWindow (prompts)
+    }
+    return webContents.getFocusedWebContents();
+  };
+  const zoomItem = (label, accelerator, apply) => ({
+    label,
+    accelerator,
+    click: () => {
+      const wc = webContents.getFocusedWebContents();
+      if (!wc) return;
+      apply(wc);
+      positionTrafficLights(BaseWindow.getFocusedWindow());
+    },
+  });
   const appMenu = Menu.buildFromTemplate([
     { role: "appMenu" },
     { role: "editMenu" },
     {
       label: "View",
       submenu: [
-        { role: "reload" },
-        { role: "forceReload" },
+        // Explicit handlers, not { role: ... }: the roles target the focused
+        // window's own webContents, which BaseWindow doesn't have.
+        { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => { const wc = focusedDashboardWC(); if (wc) wc.reload(); } },
+        { label: "Force Reload", accelerator: "CmdOrCtrl+Shift+R", click: () => { const wc = focusedDashboardWC(); if (wc) wc.reloadIgnoringCache(); } },
         { type: "separator" },
-        { role: "resetZoom" },
-        { role: "zoomIn" },
-        { role: "zoomOut" },
+        zoomItem("Actual Size", "CmdOrCtrl+0", (wc) => wc.setZoomLevel(0)),
+        zoomItem("Zoom In", "CmdOrCtrl+=", (wc) => wc.setZoomLevel(wc.getZoomLevel() + 0.5)),
+        zoomItem("Zoom Out", "CmdOrCtrl+-", (wc) => wc.setZoomLevel(wc.getZoomLevel() - 0.5)),
         { type: "separator" },
         { role: "togglefullscreen" },
         { type: "separator" },
@@ -1326,30 +1380,18 @@ app.whenReady().then(async () => {
           id: "devtools-toggle",
           visible: false, // hidden until dev-mode IPC fires
           click: () => {
-            const focused = BrowserWindow.getFocusedWindow();
-            if (!focused) return;
-            // WebContentsView-based windows: find the main content view
-            const views = focused.contentView && focused.contentView.children;
-            if (views && views.length > 0) {
-              // The first view with a real page loaded is the dashboard
-              const mainView = views.find(v => {
-                try { const u = v.webContents && v.webContents.getURL(); return u && u.includes("localhost"); }
-                catch { return false; }
-              });
-              if (mainView) { mainView.webContents.toggleDevTools(); return; }
-            }
-            // Fallback: BrowserWindow.webContents (non-WebContentsView windows)
-            if (focused.webContents) focused.webContents.toggleDevTools();
+            const wc = focusedDashboardWC();
+            if (wc) wc.toggleDevTools();
           },
         },
       ],
     },
     {
-      label: "Tab",
+      label: "Connection",
       submenu: [
-        { label: "New Connection Tab…", accelerator: "CmdOrCtrl+T", click: () => openNewTab() },
-        { label: "Rename Tab…", accelerator: "CmdOrCtrl+Shift+R", click: () => renameCurrentTab() },
-        { label: "Merge All Windows", click: () => mergeAllWindows() },
+        { label: "New Connection Window…", accelerator: "CmdOrCtrl+N", click: () => openNewConnectionWindow() },
+        // No accelerator: Cmd+Shift+R is Force Reload (platform standard).
+        { label: "Rename Window…", click: () => renameCurrentWindow() },
         { type: "separator" },
         { label: "Set Remote Host…", click: () => promptRemoteHost() },
         { label: "Refresh Token", accelerator: "CmdOrCtrl+Shift+T", click: () => refreshToken() },
@@ -1452,10 +1494,6 @@ app.whenReady().then(async () => {
 
   app.on("activate", () => {
     if (!mainWindow?.isVisible()) mainWindow?.show();
-  });
-
-  app.on("new-window-for-tab", () => {
-    openNewTab();
   });
 });
 

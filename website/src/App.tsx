@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useMemo, createContext, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, createContext, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Routes, Route, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -26,8 +26,11 @@ import { ZoomProvider } from './hooks/ZoomProvider'
 import { api, isAuthBannerShown } from './api/client'
 import { safeSetItem } from './utils/safeStorage'
 import { gcOrphanedStorage } from './utils/storageGc'
-import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Code, RefreshCw, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, X, Inbox, Gamepad2, Activity, TerminalSquare, ClipboardCheck, Keyboard, Brain, FolderTree, FlaskConical, ScanSearch, ChevronUp, MoreHorizontal, Coins, Contact } from 'lucide-react'
+import { Rocket, Menu, Bell, Users, BookOpen, BookOpenText, MessageSquareDot, Code, RefreshCw, Package, Loader2, Sun, Moon, Monitor, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, X, Inbox, Gamepad2, AudioWaveform, ClipboardCheck, Keyboard, Brain, FolderTree, FlaskConical, ScanSearch, ChevronUp, MoreHorizontal, Coins, Contact, PanelRight, Lightbulb } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { usePersistedBool } from './hooks/usePersistedBool'
+import { isMacElectron } from './lib/electron'
+import { SIDE_PANEL_MIN_W, measureSidePanelReservedW } from './pages/chat/SidePanel'
 import { DndContext, closestCenter, MouseSensor, TouchSensor, useSensor, useSensors, DragOverlay, type DragStartEvent, type DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -61,7 +64,6 @@ import { useUpdateSubscription } from './hooks/useUpdateSubscription'
 import UpdateModal from './components/UpdateModal'
 import CliPanel from './components/CliPanel'
 import BrowserLiveView from './components/BrowserLiveView'
-import { toggleCliPanel } from './store/terminalSlice'
 import { setTerminalEnabledFlag } from './utils/terminalRegistry'
 import AppsPage from './pages/AppsPage'
 import AppPage from './pages/AppPage'
@@ -533,6 +535,22 @@ function NotificationsBellButton() {
     return () => { document.removeEventListener('pointerdown', onPointerDown); document.removeEventListener('keydown', onKey) }
   }, [open, selectedTs])
 
+  // Anchor the popover under the button: measured on open (and window resize)
+  // so it tracks the button's real position \u2014 with the activity panel open the
+  // header is narrower and a viewport-right-anchored popover would appear far
+  // from the bell, over the panel.
+  const [anchorRight, setAnchorRight] = useState(8)
+  useLayoutEffect(() => {
+    if (!open) return
+    const measure = () => {
+      const r = containerRef.current?.getBoundingClientRect()
+      if (r) setAnchorRight(Math.max(8, window.innerWidth - r.right))
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [open])
+
   // Auto-mark-read when opening a notification's detail
   useEffect(() => {
     if (selected && !selected.acked) dispatch(ackNotification(selected.ts))
@@ -541,7 +559,7 @@ function NotificationsBellButton() {
   return (
     <div ref={containerRef} className="relative">
       <button
-        className={`top-bar-pill bg-card relative !gap-0 ${open ? 'text-accent' : ''}`}
+        className={`flex items-center justify-center w-7 h-7 rounded-md hover:bg-bg-hover transition-colors bg-transparent border-none cursor-pointer shrink-0 relative ${open ? 'text-accent' : 'text-muted hover:text-text'}`}
         onClick={() => {
           setOpen(o => {
             if (!o) recordEvent('notifications_open', { source: 'topbar' })
@@ -553,8 +571,7 @@ function NotificationsBellButton() {
         aria-label="Notifications"
         aria-expanded={open}
       >
-        <Bell size={13} />
-        <span className="w-0 overflow-hidden">{'\u200B'}</span>
+        <Bell size={15} />
         {unacked.length > 0 && (
           <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-full bg-accent text-accent-fg text-[10px] font-bold flex items-center justify-center shadow-[0_0_8px_var(--accent-glow)]" aria-hidden="true">
             {unacked.length > 99 ? '99+' : unacked.length}
@@ -565,7 +582,7 @@ function NotificationsBellButton() {
         <div
           ref={popoverRef}
           className="fixed z-[60] pointer-events-none"
-          style={isMobile ? { top: 60, bottom: 12, left: 8, right: 8 } : { top: 60, bottom: 12, right: 8, left: 12 }}
+          style={isMobile ? { top: 60, bottom: 12, left: 8, right: 8 } : { top: 60, bottom: 12, right: anchorRight, left: 12 }}
         >
           <ErrorBoundary
             scope="notifications-bell"
@@ -681,6 +698,7 @@ export default function App() {
   })
   const approvalCount = pendingApprovals.filter((a: { id?: string }) => a.id?.startsWith('task-gate-')).length
   const terminalOpen = useAppSelector(s => s.terminal.open)
+  const activityOpen = useAppSelector(s => s.chat.activityOpen)
   const terminalPosition = useAppSelector(s => s.terminal.position)
   const { data: terminalConfig } = useQuery({
     queryKey: ['terminal-enabled'],
@@ -1036,6 +1054,27 @@ export default function App() {
     if (kiroUsage === 'none') setKiroUsageOpen(false)
   }, [kiroUsage])
   const [metricsOpen, setMetricsOpen] = useState(() => localStorage.getItem('mc-topbar-metrics') === '1')
+  // Readout capsule collapse: clicking the connection dot folds the capsule
+  // down to just the dot; clicking again restores the full readout.
+  const [capsuleCollapsed, setCapsuleCollapsed] = usePersistedBool('mc-topbar-capsule-collapsed', false)
+  // Whether the window currently has room for the activity panel beside the
+  // chat's reserved minimum. When it doesn't (the panel would be
+  // force-collapsed anyway), the toggle button is disabled.
+  const [actSpace, setActSpace] = useState(true)
+  useEffect(() => {
+    const check = () => setActSpace(window.innerWidth >= SIDE_PANEL_MIN_W + measureSidePanelReservedW())
+    check()
+    window.addEventListener('resize', check)
+    return () => window.removeEventListener('resize', check)
+  }, [])
+  // macOS fullscreen hides the native traffic lights, so the header's 84px
+  // clearance inset drops while fullscreen (mac-fullscreen class on the root).
+  const [macFullscreen, setMacFullscreen] = useState(false)
+  useEffect(() => {
+    if (!isMacElectron) return
+    const api = (window as { electronAPI?: { onFullScreenChanged?: (cb: (fs: boolean) => void) => () => void } }).electronAPI
+    return api?.onFullScreenChanged?.(setMacFullscreen)
+  }, [])
   const { data: sysMetrics, isError: sysMetricsError, dataUpdatedAt: sysMetricsUpdatedAt } = useQuery({ queryKey: ['system-metrics'], queryFn: () => api.system().then(d => ({ memUsed: d.mem_used_gb, memTotal: d.mem_total_gb, cpuPct: d.cpu_pct, diskTotal: d.disk_total_gb, diskFree: d.disk_free_gb })), refetchInterval: metricsOpen ? 30_000 : false, enabled: metricsOpen })
   // Tick every 10s while widget is open so `sysMetricsStale` re-evaluates even when the query stops refetching (backgrounded tab, network drop).
   const [, setStaleTick] = useState(0)
@@ -1210,8 +1249,14 @@ export default function App() {
       {/* Local pane: the native dashboard. Hidden (not unmounted) while a remote
           instance tab is active, so local state/websocket survive the switch. */}
       <div className="absolute inset-0" style={{ display: activeInstanceId === null ? 'block' : 'none' }}>
-    <div className={`relative z-[1] h-full grid animate-rise overflow-hidden bg-bg ${isMobile ? 'grid-cols-[minmax(0,1fr)] grid-rows-[52px_minmax(0,1fr)]' : 'grid-cols-[auto_minmax(0,1fr)] grid-rows-[52px_minmax(0,1fr)]'}`}
-      style={{ gridTemplateAreas: isMobile ? '"topbar" "content"' : '"topbar topbar" "nav content"' }}>
+    <div className={`relative z-[1] h-full grid animate-rise overflow-hidden bg-bg ${isMacElectron ? `mac-electron ${macFullscreen ? 'mac-fullscreen' : ''}` : ''} ${isMobile ? 'grid-cols-[minmax(0,1fr)] grid-rows-[52px_minmax(0,1fr)]' : 'grid-cols-[auto_minmax(0,1fr)_auto] grid-rows-[52px_minmax(0,1fr)]'}`}
+      style={{ gridTemplateAreas: isMobile ? '"topbar" "content"' : '"topbar topbar actbar" "nav content actbar"' }}>
+
+      {/* Full-height activity bar slot: ChatPage portals its
+          Activity panel here on desktop so it spans the window top-to-bottom
+          instead of sitting below the header row. Empty (0 width) when the
+          panel is closed or on non-chat routes. */}
+      {!isMobile && <div id="activity-bar-slot" className="h-full min-h-0 min-w-0" style={{ gridArea: 'actbar' }} />}
 
       {/* Skip to content — visible only on focus for keyboard users */}
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[9999] focus:px-4 focus:py-2 focus:rounded-lg focus:bg-accent focus:text-accent-fg focus:text-sm focus:font-medium">Skip to content</a>
@@ -1224,95 +1269,130 @@ export default function App() {
               <Menu size={20} />
             </button>
           )}
-          <div className={`flex items-center gap-2.5 opacity-100 ${isMobile ? 'w-auto' : 'w-40'} transition-all duration-300 ease-in-out`}>
+          {/* w-auto (not the old fixed w-40): the hairline + Request a Feature
+              ghost should hug the wordmark, not float 160px out. */}
+          <div className="flex items-center gap-2.5 opacity-100 w-auto transition-all duration-300 ease-in-out">
             <img src={avatar} alt={botName} className={`${isLumon ? 'w-auto h-6' : 'w-7 h-7'} rounded-sm shrink-0 hover:rotate-[-8deg] hover:scale-110 transition-transform duration-300 object-contain`} style={{ filter: 'drop-shadow(0 2px 8px var(--accent-glow))' }} />
             <span className="text-sm font-bold tracking-[.08em] text-text-strong whitespace-nowrap">{botName.toUpperCase()}</span>
           </div>
+          {/* Hairline + borderless Request a Feature ghost (Lightbulb) --
+              lives beside the wordmark per the pooled-top-bar design. */}
+          {!isMobile && <>
+            <span className="w-px h-4 bg-border shrink-0" aria-hidden="true" />
+            <button
+              className="flex items-center gap-1.5 px-2 -ml-2 py-1 rounded-md bg-transparent border-none cursor-pointer text-[12px] text-muted hover:text-text hover:bg-bg-hover transition-colors whitespace-nowrap"
+              onClick={requestFeature}
+            >
+              <Lightbulb size={13} /> Request a Feature
+            </button>
+          </>}
         </div>
         <div className="flex items-center gap-1.5 relative">
-          {!isMobile && <button className="top-bar-pill bg-transparent text-[12px]" onClick={requestFeature}>Request a Feature</button>}
-          {connected ? (
-            <span
-              role="status"
-              className="w-1.5 h-1.5 rounded-full shrink-0 bg-ok shadow-[0_0_8px_rgba(34,197,94,.4)] transition-colors duration-300"
-              title="Gateway connected"
-              aria-label="Gateway connected"
-            />
-          ) : authRequired ? (
-            // Auth-required: red "Session expired" banner is already up at
-            // top of page (managed by api/client.ts checkSessionExpired).
-            // Suppress the offline pill so the auth banner is the single
-            // canonical signal -- two banners about the same root cause is
-            // worse UX than one. Reserve a tiny screen-reader-only marker
-            // so a11y consumers still know the gateway is unreachable.
-            <span role="status" className="sr-only">Gateway offline — session expired, see banner above</span>
-          ) : (
-            <span
-              role="status"
-              className="top-bar-pill bg-danger text-danger-fg flex items-center gap-1.5 text-[11px] font-semibold animate-pulse motion-reduce:animate-none"
-              title="Gateway offline — reconnecting"
-              aria-label="Gateway offline"
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-danger-fg" />
-              Offline
-            </span>
-          )}
-          <NotificationsBellButton />
-          {!isMobile && (() => {
-            if (!metricsOpen) return <button className="top-bar-pill bg-card text-muted hover:text-text !gap-0" onClick={() => { setMetricsOpen(true); safeSetItem('mc-topbar-metrics', '1') }} title="System metrics" aria-label="System metrics"><Activity size={13} /><span className="w-0 overflow-hidden">{'\u200B'}</span></button>
-            const m = sysMetrics; if (!m) return sysMetricsError ? (<button className="top-bar-pill bg-card text-danger flex items-center gap-1 text-[11px] cursor-pointer" title="Click to hide" onClick={() => { setMetricsOpen(false); safeSetItem('mc-topbar-metrics', '0') }}><Activity size={11} /> metrics unavailable</button>) : null
-            const memPct = m.memTotal > 0 ? m.memUsed / m.memTotal : 0
-            const dskUsed = m.diskTotal - m.diskFree
-            const dskPct = m.diskTotal > 0 ? dskUsed / m.diskTotal : 0
-            const memValid = m.memTotal > 0
-            const dskValid = m.diskTotal > 0
-            const cpuValid = typeof m.cpuPct === 'number' && Number.isFinite(m.cpuPct)
-            const staleTitle = sysMetricsStale ? ' (stale: fetch failing)' : ''
-            return (<button className={`top-bar-pill bg-card flex items-center gap-2 text-[11px] font-mono cursor-pointer ${sysMetricsStale ? 'opacity-60 ring-1 ring-danger' : ''}`} title={sysMetricsStale ? 'Metrics are stale, latest fetch failed' : 'Click to hide'} onClick={() => { setMetricsOpen(false); safeSetItem('mc-topbar-metrics', '0') }}>
-              <span className={cpuValid ? metricColor(m.cpuPct / 100) : 'text-muted'} title={cpuValid ? `CPU: ${m.cpuPct.toFixed(0)}%${staleTitle}` : 'CPU: unavailable'}>CPU {cpuValid ? `${m.cpuPct.toFixed(0)}%` : '—'}</span>
-              <span className={memValid ? metricColor(memPct) : 'text-muted'} title={memValid ? `Memory: ${m.memUsed.toFixed(1)}/${m.memTotal.toFixed(1)} GB${staleTitle}` : 'Memory: unavailable'}>MEM {memValid ? `${(memPct * 100).toFixed(0)}%` : '—'}</span>
-              <span className={dskValid ? metricColor(dskPct) : 'text-muted'} title={dskValid ? `Disk: ${dskUsed.toFixed(0)}/${m.diskTotal.toFixed(0)} GB${staleTitle}` : 'Disk: unavailable'}>DSK {dskValid ? `${(dskPct * 100).toFixed(0)}%` : '—'}</span>
-            </button>)
-          })()}
-          {/* Usage pill. Kiro credit plan when present (internal); otherwise a
-              provider-agnostic month-to-date $ spend from KiroCrew's own token
-              log, shown against a user budget if one is set. Spinner while the
-              cache warms; hidden when there's nothing to show. */}
-          {kiroUsage === 'none' ? null : !kiroUsage ? (
-            <button
-              className="top-bar-pill bg-card text-muted"
-              onClick={() => setKiroUsageOpen(true)}
-              title="Kiro credit usage — checking…"
-              aria-label="Kiro credit usage — checking"
-            >
-              <Coins size={13} /> {!isMobile && <Loader2 size={12} className="animate-spin" />}
-            </button>
-          ) : (() => {
-            const pct = kiroUsage.limit > 0 ? (kiroUsage.used / kiroUsage.limit) * 100 : 0
-            const usedStr = kiroUsage.used >= 1000 ? `${(kiroUsage.used / 1000).toFixed(1)}K` : `${kiroUsage.used}`
-            const limitStr = kiroUsage.limit >= 1000 ? `${(kiroUsage.limit / 1000).toFixed(0)}K` : `${kiroUsage.limit}`
-            const title = `Kiro credits: ${kiroUsage.used.toLocaleString()} / ${kiroUsage.limit.toLocaleString()} (${pct.toFixed(0)}%) — click for details`
-            return (
+          {/* Unified readout capsule — connection dot . system metrics .
+              kiro-credits usage pooled into one bordered pill. Offline: the
+              whole capsule tints danger (red border + subtle red bg + red
+              dot), no "Offline" text — the color shift is the signal. When
+              auth expired the session-expired banner stays the primary signal;
+              the capsule reddens quietly underneath it. (The upstream mwinit
+              segment is dropped here: Midway is stubbed in this fork. The
+              Claude-cost usage branch is likewise dropped: this fork's usage
+              pill is Kiro-credits-only.) */}
+          {(() => {
+            const offline = !connected
+            const seg = `flex items-center gap-1 -my-0.5 px-1.5 py-0.5 rounded-md bg-transparent border-none cursor-pointer transition-colors hover:bg-bg-hover ${offline ? 'opacity-70' : ''}`
+            const segments: ReactNode[] = []
+            // The dot doubles as the capsule's collapse toggle: click to
+            // fold the readouts down to just the dot, click again to expand.
+            // Padding + negative margin keep a usable hit target without
+            // growing the visual dot.
+            segments.push(
               <button
-                className="top-bar-pill bg-card"
-                onClick={() => setKiroUsageOpen(true)}
-                title={title}
-                aria-label={title}
+                key="conn"
+                className="flex items-center justify-center p-1.5 -m-1.5 rounded-full bg-transparent border-none cursor-pointer shrink-0"
+                onClick={() => setCapsuleCollapsed(c => !c)}
+                title={`${connected ? 'Gateway connected' : authRequired ? 'Gateway offline — session expired, see banner above' : 'Gateway offline — reconnecting'} · click to ${capsuleCollapsed ? 'expand' : 'collapse'} readouts`}
+                aria-label={connected ? 'Gateway connected' : 'Gateway offline'}
+                aria-expanded={!capsuleCollapsed}
               >
-                <Coins size={13} /> {!isMobile && (
-                  <span className="font-mono text-[13px]">
-                    {usedStr}<span className="text-muted">/{limitStr}</span>
-                  </span>
-                )}
+                <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full transition-colors duration-300 ${offline ? 'bg-danger animate-pulse motion-reduce:animate-none' : 'bg-ok shadow-[0_0_8px_rgba(34,197,94,.4)]'}`} />
+                {/* Live-region announcement lives in its own hidden span:
+                    role="status" on the button itself would override its
+                    implicit button role for screen readers. */}
+                <span role="status" className="sr-only">{connected ? 'Gateway connected' : 'Gateway offline'}</span>
               </button>
             )
+            if (!capsuleCollapsed) {
+            if (!isMobile) {
+              if (!metricsOpen) {
+                segments.push(<button key="metrics" className={`${seg} text-muted hover:text-text`} onClick={() => { setMetricsOpen(true); safeSetItem('mc-topbar-metrics', '1') }} title="System metrics" aria-label="System metrics"><AudioWaveform size={12} /></button>)
+              } else if (!sysMetrics) {
+                if (sysMetricsError) segments.push(<button key="metrics" className={`${seg} text-danger text-[11px]`} title="Click to hide" onClick={() => { setMetricsOpen(false); safeSetItem('mc-topbar-metrics', '0') }}><AudioWaveform size={11} /> metrics unavailable</button>)
+              } else {
+                const m = sysMetrics
+                const memPct = m.memTotal > 0 ? m.memUsed / m.memTotal : 0
+                const dskUsed = m.diskTotal - m.diskFree
+                const dskPct = m.diskTotal > 0 ? dskUsed / m.diskTotal : 0
+                const memValid = m.memTotal > 0
+                const dskValid = m.diskTotal > 0
+                const cpuValid = typeof m.cpuPct === 'number' && Number.isFinite(m.cpuPct)
+                const staleTitle = sysMetricsStale ? ' (stale: fetch failing)' : ''
+                segments.push(<button key="metrics" className={`${seg} gap-2 text-[11px] font-mono ${sysMetricsStale ? 'opacity-60' : ''}`} title={sysMetricsStale ? 'Metrics are stale, latest fetch failed' : 'Click to hide'} onClick={() => { setMetricsOpen(false); safeSetItem('mc-topbar-metrics', '0') }}>
+                  <span className={cpuValid ? metricColor(m.cpuPct / 100) : 'text-muted'} title={cpuValid ? `CPU: ${m.cpuPct.toFixed(0)}%${staleTitle}` : 'CPU: unavailable'}>CPU {cpuValid ? `${m.cpuPct.toFixed(0)}%` : '—'}</span>
+                  <span className={memValid ? metricColor(memPct) : 'text-muted'} title={memValid ? `Memory: ${m.memUsed.toFixed(1)}/${m.memTotal.toFixed(1)} GB${staleTitle}` : 'Memory: unavailable'}>MEM {memValid ? `${(memPct * 100).toFixed(0)}%` : '—'}</span>
+                  <span className={dskValid ? metricColor(dskPct) : 'text-muted'} title={dskValid ? `Disk: ${dskUsed.toFixed(0)}/${m.diskTotal.toFixed(0)} GB${staleTitle}` : 'Disk: unavailable'}>DSK {dskValid ? `${(dskPct * 100).toFixed(0)}%` : '—'}</span>
+                </button>)
+              }
+            }
+            // Usage segment — Kiro credit plan from KiroCrew's own usage
+            // cache. Spinner while the cache warms; hidden when unavailable.
+            if (kiroUsage !== 'none') {
+              if (!kiroUsage) {
+                segments.push(<button key="usage" className={`${seg} text-muted`} onClick={() => setKiroUsageOpen(true)} title="Kiro credit usage — checking…" aria-label="Kiro credit usage — checking"><Coins size={12} /> {!isMobile && <Loader2 size={11} className="animate-spin" />}</button>)
+              } else {
+                const pct = kiroUsage.limit > 0 ? (kiroUsage.used / kiroUsage.limit) * 100 : 0
+                const usedStr = kiroUsage.used >= 1000 ? `${(kiroUsage.used / 1000).toFixed(1)}K` : `${kiroUsage.used}`
+                const limitStr = kiroUsage.limit >= 1000 ? `${(kiroUsage.limit / 1000).toFixed(0)}K` : `${kiroUsage.limit}`
+                const title = `Kiro credits: ${kiroUsage.used.toLocaleString()} / ${kiroUsage.limit.toLocaleString()} (${pct.toFixed(0)}%) — click for details`
+                segments.push(<button key="usage" className={seg} onClick={() => setKiroUsageOpen(true)} title={title} aria-label={title}>
+                  <Coins size={12} /> {!isMobile && <span className="font-mono text-[11px]">{usedStr}<span className="text-muted">/{limitStr}</span></span>}
+                </button>)
+              }
+            }
+            }
+            return (
+              /* layout + tween (not spring: springs bounced in a prior
+                 attempt) animates the capsule's width as segments mount and
+                 unmount on collapse/expand. */
+              <motion.div
+                layout
+                transition={{ layout: { duration: 0.25, ease: 'easeOut' } }}
+                className={`flex items-center gap-2 h-7 px-2.5 rounded-full border transition-colors duration-300 ${offline ? 'border-danger bg-danger-subtle' : 'border-border bg-card'}`}
+              >
+                {segments.flatMap((s, i) => (i === 0 ? [s] : [<span key={`sep-${i}`} className="w-px h-3.5 bg-border shrink-0" aria-hidden="true" />, s]))}
+              </motion.div>
+            )
           })()}
-          {terminalEnabled && <button
-            className={`top-bar-pill bg-card ${terminalOpen ? 'text-accent' : ''}`}
-            onClick={() => dispatch(toggleCliPanel())}
-            title="Toggle terminal"
+          {/* Notifications bell — rightmost regular button (borderless icon,
+              matching the activity toggle's style). The activity toggle stays
+              at the absolute edge: its -mr-1.5 window-edge overlap with the
+              panel's close button is positional, and it hides when the panel
+              opens — leaving the bell as the visible far-right icon. */}
+          <NotificationsBellButton />
+          {/* Activity panel toggle — rightmost icon, adjacent to
+              the panel it opens. Hidden while the panel is open: the panel's
+              own header close button takes over (no duplicate affordance).
+              Styled + positioned to mirror that close button exactly (w-7
+              borderless icon; -mr-1.5 pulls it from the header's pr-3 to 6px
+              off the window edge, matching the strip's pr-1.5) so open/close
+              icons overlap and the toggle feels like one button flipping. */}
+          {!isMobile && activePath.startsWith('/chat') && !activityOpen && <button
+            className={`flex items-center justify-center w-7 h-7 rounded-md transition-colors bg-transparent border-none shrink-0 -mr-1.5 ${actSpace ? 'text-muted hover:text-text hover:bg-bg-hover cursor-pointer' : 'text-muted opacity-40 cursor-not-allowed'}`}
+            onClick={() => window.dispatchEvent(new CustomEvent('toggle-activity-panel'))}
+            disabled={!actSpace}
+            title={actSpace ? 'Open activity panel' : 'Window too narrow for the activity panel'}
+            aria-label={actSpace ? 'Open activity panel' : 'Window too narrow for the activity panel'}
           >
-            <TerminalSquare size={13} /> {!isMobile && 'Terminal'}
+            <PanelRight size={15} />
           </button>}
         </div>
       </header>

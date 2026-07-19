@@ -1219,6 +1219,28 @@ body::before{content:'';position:fixed;top:-50%;left:-50%;width:200%;height:200%
   border-bottom:1px solid var(--border);
   transition:background-color .25s ease}
 
+/* ── Frameless Electron window (macOS) ──
+   The SPA header row doubles as the title bar; the native traffic lights are
+   inset at the window's top-left (electron/main.js trafficLightPositionForZoom),
+   sitting over the header. Inset the header content clear of them. Keep 84px
+   in sync with TRAFFIC_LIGHT_INSET_PX in src/lib/electron.ts. */
+.mac-electron header.topbar-glass{padding-left:84px}
+/* Fullscreen: AppKit hides the traffic lights, so the clearance inset drops
+   and the branding sits flush left again (back to the header's own pl-5). */
+.mac-electron.mac-fullscreen header.topbar-glass{padding-left:1.25rem}
+/* The injected #electron-drag-bar (electron/main.js) marks the top 52px as a
+   window drag region and only exempts native controls (button/a/input/
+   [role="button"]/[tabindex]). The side panel's tab strip lives in that zone
+   and its chips are divs — punch the whole strip out of the drag region so
+   chips are clickable, hoverable, and drag-reorderable. Ignored in browsers. */
+.side-panel-strip,.side-panel-strip *{-webkit-app-region:no-drag}
+
+/* Scrollbar-free scroll container (used by the side panel tab strip — the
+   strip scrolls horizontally but a visible scrollbar under the chips reads
+   as clutter). Referenced before Tailwind ever defined it; real rules here. */
+.scrollbar-none{scrollbar-width:none;-ms-overflow-style:none}
+.scrollbar-none::-webkit-scrollbar{display:none}
+
 /* ── Scroll shadow (fade at top/bottom of scrollable panels) ── */
 .scroll-shadow{
   mask-image:linear-gradient(to bottom,transparent,black 16px,black calc(100% - 16px),transparent);

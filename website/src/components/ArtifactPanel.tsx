@@ -35,6 +35,8 @@ interface Props {
    *  the chat session the panel was opened from (panel.slot). When omitted the
    *  submit-to-chat affordance is hidden (read-only embedding). */
   onSubmitComments?: (message: string) => void
+  /** Render as a SidePanel tab body (fills parent, no resize handle/border). */
+  embedded?: boolean
 }
 
 const BODY_HEIGHT_STYLE: React.CSSProperties = { height: '100%', minHeight: 0 }
@@ -107,7 +109,7 @@ function SubmitBar({ count, submitting, onSubmit, bleed = false }: {
  * `onSubmitComments` (the local-file user-message path) rather than the
  * full-page `iterateWithAgent` navigate — and only for human comments.
  */
-export default memo(function ArtifactPanel({ slug, kind, content, onClose, onSubmitComments }: Props) {
+export default memo(function ArtifactPanel({ slug, kind, content, onClose, onSubmitComments, embedded }: Props) {
   const navigate = useNavigate()
   const previewRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -277,6 +279,7 @@ export default memo(function ArtifactPanel({ slug, kind, content, onClose, onSub
   return (
     <>
     <DetailPanel
+      embedded={embedded}
       title={
         <span className="flex items-center gap-2">
           <span className="truncate">{name}</span>

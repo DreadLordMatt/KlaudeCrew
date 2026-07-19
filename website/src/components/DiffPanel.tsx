@@ -43,6 +43,14 @@ export default memo(function DiffPanel({ filePath, original, modified, sideBySid
               monaco.editor.defineTheme('kirocrew-dark', kirocrewDark)
               monaco.editor.defineTheme('kirocrew-light', kirocrewLight)
             }}
+            onMount={(editor) => {
+              // Jump to the first change once the diff is computed (async).
+              const nav = editor.onDidUpdateDiff(() => {
+                nav.dispose()
+                const first = editor.getLineChanges()?.[0]
+                if (first) editor.getModifiedEditor().revealLineInCenter(first.modifiedStartLineNumber || first.modifiedEndLineNumber || 1)
+              })
+            }}
             options={{
               readOnly: true,
               renderSideBySide: sideBySide,
@@ -51,6 +59,10 @@ export default memo(function DiffPanel({ filePath, original, modified, sideBySid
               fontSize: 13,
               lineNumbers: lineNumbers ? 'on' : 'off',
               automaticLayout: true,
+              renderValidationDecorations: 'off',
+              guides: { indentation: false },
+              stickyScroll: { enabled: false },
+              renderLineHighlight: 'none',
               scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
             }}
             height="100%"

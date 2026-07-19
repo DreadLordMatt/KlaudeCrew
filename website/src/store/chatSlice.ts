@@ -750,6 +750,7 @@ const chatSlice = createSlice({
     setVoicePlaying(state, action: PayloadAction<boolean>) { state.voicePlaying = action.payload },
     setVoiceAudio(state, action: PayloadAction<string | null>) { state.voiceAudio = action.payload },
     toggleActivity(state) { state.activityOpen = !state.activityOpen; if (!state.activityOpen) state.focusToolCallId = null },
+    openActivityPanel(state) { state.activityOpen = true },
     openActivityToTab(state, action: PayloadAction<'subagents' | 'workflows' | 'logs' | 'files' | 'side'>) { state.activityOpen = true; state.activityTab = action.payload; state.focusToolCallId = null },
     /** Tools tab is deprecated — tool details now expand inline in the chat. This action
      *  signals the matching ToolCallLine pill to auto-expand and scroll into view. */
@@ -1573,7 +1574,7 @@ export const {
   setActiveSlot, clearSlotState, setPendingInput, setQuestionCard, clearQuestionCard, appendMessage, appendSlotMessage, updateStreamingMessage, finalizeAssistant,
   removeThinking, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, hydrateSlotMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage,
   sseContextUsage, setVoicePlaying, setVoiceAudio,
-  toggleActivity, openActivityToTab, openActivityToTool, clearFocusToolCallId, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone,
+  toggleActivity, openActivityToTab, openActivityPanel, openActivityToTool, clearFocusToolCallId, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentDone,
   sseSubagentSnapshot, sseToolActivity, sseToolResult, sseActivityEvent,
   sseWorkflowEvent, clearWorkflowRun,
   sseSideResult, sideClose, sideOptimisticAppend, sideOptimisticRollback,

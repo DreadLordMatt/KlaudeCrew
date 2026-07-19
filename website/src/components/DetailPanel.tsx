@@ -30,6 +30,19 @@ interface DetailPanelProps {
   noPadding?: boolean
   /** Override the header's default border-color/bg (e.g. to match an embedded editor). When provided, replaces the default `border-border bg-bg` styling. */
   headerClassName?: string
+  /** Embedded mode: the panel fills its parent (width 100%, no resize handle,
+   *  no left border, no width animation) instead of being a standalone
+   *  right-docked panel. Used when the panel is a tab body inside SidePanel —
+   *  the tab strip is the shell, so the panel only contributes its header
+   *  (title + actions) and content. */
+  embedded?: boolean
+  /** Replace the default header rows (title + close + headerActions and the
+   *  secondary row) with a single caller-provided bar. Used by tab bodies in
+   *  SidePanel where the tab chip already owns identity + close, so the panel
+   *  renders one minimal single-bar toolbar instead (side-panel revamp).
+   *  When set, `title`, `headerActions`, and `secondaryHeaderActions` are
+   *  ignored. */
+  customHeader?: React.ReactNode
 }
 
 /**
@@ -63,7 +76,7 @@ const maxPanelWidth = (rowWidth: number, reserveWidth?: number) => {
 const clampPanelWidth = (w: number, minWidth: number, rowWidth: number, reserveWidth?: number) =>
   Math.max(minWidth, Math.min(w, maxPanelWidth(rowWidth, reserveWidth)))
 
-export default function DetailPanel({ title, onClose, footer, headerActions, secondaryHeaderActions, initialWidth = 380, minWidth = 300, reserveWidth, storageKey, children, noPadding = false, headerClassName }: DetailPanelProps) {
+export default function DetailPanel({ title, onClose, footer, headerActions, secondaryHeaderActions, initialWidth = 380, minWidth = 300, reserveWidth, storageKey, children, noPadding = false, headerClassName, embedded = false, customHeader }: DetailPanelProps) {
   // Outer wrapper ref, used to measure the panel's flex row (its parent) so the
   // width cap tracks the actual available room rather than the whole viewport.
   const wrapperRef = useRef<HTMLDivElement>(null)
@@ -155,6 +168,54 @@ export default function DetailPanel({ title, onClose, footer, headerActions, sec
     document.addEventListener('mouseup', onUp)
   }, [minWidth, reserveWidth, storageKey])
 
+  const body = (
+    <>
+      {!embedded && (
+        /* Drag-to-resize splitter: pointer-only affordance (no meaningful
+            keyboard gesture for a 6px handle); role="separator" is the correct
+            ARIA role. */
+        /* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */
+        <div role="separator" aria-orientation="vertical" aria-label="Resize panel" className="absolute left-0 top-0 bottom-0 w-[6px] cursor-col-resize z-20 group/drag" onMouseDown={onDragStart}>
+          <div className="absolute left-0 top-0 bottom-0 w-[2px] transition-colors duration-200 bg-transparent group-hover/drag:bg-accent" />
+        </div>
+      )}
+      {customHeader ?? (<>
+      <div className={`flex items-center justify-between px-3 h-12 shrink-0 border-b ${headerClassName ?? 'border-border'}`}>
+        <div className="flex items-center gap-2 min-w-0">
+          <Btn className="p-1.5 shrink-0" onClick={onClose} aria-label="Close panel" title="Close panel"><X size={16} /></Btn>
+          <span className="text-base font-semibold text-text-strong truncate">{title}</span>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {headerActions}
+        </div>
+      </div>
+      {secondaryHeaderActions && (
+        <div className={`flex items-center justify-between px-3 h-10 shrink-0 border-b ${headerClassName ?? 'border-border'} bg-bg-elevated/30`}>
+          {secondaryHeaderActions}
+        </div>
+      )}
+      </>)}
+      <div className={noPadding ? "flex-1 overflow-hidden flex flex-col" : "flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-4"}>
+        {children}
+      </div>
+      {footer && (
+        <div className="shrink-0 border-t border-border px-5 py-3 flex items-center justify-between">
+          {footer}
+        </div>
+      )}
+    </>
+  )
+
+  // Embedded: fill the parent (SidePanel tab body) — no resize handle, no left
+  // border, no width animation. Only the header + content contribute.
+  if (embedded) {
+    return (
+      <div className="h-full w-full min-w-0 bg-bg flex flex-col overflow-hidden relative">
+        {body}
+      </div>
+    )
+  }
+
   return (
     <motion.div
       ref={wrapperRef}
@@ -165,35 +226,7 @@ export default function DetailPanel({ title, onClose, footer, headerActions, sec
       className="shrink-0 overflow-hidden h-full"
     >
       <div className="shrink-0 border-l border-border bg-bg flex flex-col h-full overflow-hidden relative" style={{ width, minWidth }}>
-        {/* Drag-to-resize splitter: pointer-only affordance (no meaningful
-            keyboard gesture for a 6px handle); role="separator" is the correct
-            ARIA role. */}
-        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
-        <div role="separator" aria-orientation="vertical" aria-label="Resize panel" className="absolute left-0 top-0 bottom-0 w-[6px] cursor-col-resize z-20 group/drag" onMouseDown={onDragStart}>
-          <div className="absolute left-0 top-0 bottom-0 w-[2px] transition-colors duration-200 bg-transparent group-hover/drag:bg-accent" />
-        </div>
-        <div className={`flex items-center justify-between px-3 h-12 shrink-0 border-b ${headerClassName ?? 'border-border'}`}>
-          <div className="flex items-center gap-2 min-w-0">
-            <Btn className="p-1.5 shrink-0" onClick={onClose} aria-label="Close panel" title="Close panel"><X size={16} /></Btn>
-            <span className="text-base font-semibold text-text-strong truncate">{title}</span>
-          </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            {headerActions}
-          </div>
-        </div>
-        {secondaryHeaderActions && (
-          <div className={`flex items-center justify-between px-3 h-10 shrink-0 border-b ${headerClassName ?? 'border-border'} bg-bg-elevated/30`}>
-            {secondaryHeaderActions}
-          </div>
-        )}
-        <div className={noPadding ? "flex-1 overflow-hidden flex flex-col" : "flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-4"}>
-          {children}
-        </div>
-        {footer && (
-          <div className="shrink-0 border-t border-border px-5 py-3 flex items-center justify-between">
-            {footer}
-          </div>
-        )}
+        {body}
       </div>
     </motion.div>
   )

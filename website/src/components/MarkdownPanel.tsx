@@ -2,16 +2,19 @@ import { safeSetItem } from '../utils/safeStorage'
 import { memo, useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { RefreshCw, ExternalLink, MoreVertical, Hash, WrapText, Zap, Maximize2, Minimize2, MessageSquare, MessageSquarePlus, Copy, BookOpen, BookmarkPlus, Camera, Check, X, GitBranch, CaseSensitive, ChevronUp, ChevronDown } from 'lucide-react'
+import { RefreshCw, ExternalLink, Ellipsis, ChevronRight, Columns2, Hash, WrapText, Zap, Maximize2, Minimize2, MessageSquare, MessageSquarePlus, Copy, BookOpen, BookmarkPlus, Camera, Check, X, GitBranch, CaseSensitive, ChevronUp, ChevronDown } from 'lucide-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import hljs from 'highlight.js'
 import DOMPurify from 'dompurify'
 import DetailPanel from './DetailPanel'
 import Clickable from './Clickable'
 import { CommentPopover, CommentList, formatCommentsMessage, type InlineComment } from './CommentOverlay'
+import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import SelectionToolbar, { type SelectionAction } from './SelectionToolbar'
 import MarkdownOutlineRail from './MarkdownToc'
 import { useFileWatch } from '../hooks/useFileWatch'
+import { usePersistedBool } from '../hooks/usePersistedBool'
+import { countLines } from './FileChangeChips'
 import { findBestOccurrence } from '../hooks/useMarkdownCommentHighlights'
 import { detectFileType } from './FileRenderers'
 import { ContentRenderer, MD_EXTS, extOf, langFor, wrapCode } from './ContentRenderer'
@@ -154,6 +157,8 @@ interface Props {
   onSubmitComments?: (message: string) => void
   onRefresh?: (filePath: string) => Promise<void>
   reserveWidth?: number
+  /** Render as a SidePanel tab body (fills parent, no resize handle/border). */
+  embedded?: boolean
 }
 
 import { monacoLang, useIsDark } from './MonacoCodeBlock'
@@ -201,71 +206,45 @@ async function downloadFile(filePath: string) {
   } catch (err) { console.error('downloadFile failed', err); alert(DOWNLOAD_FAILED) }
 }
 
-/**
- * Round 8 row-2 icon: artifact toggle. When the file is already saved
- * as an artifact, clicking navigates to the detail page. When not, it
- * triggers the add-to-artifacts mutation directly (no modal — matches
- * the bookmark widget pattern).
- */
-function ArtifactToggleIconButton({ state, onNavigate }: { state: ReturnType<typeof useFileArtifactState>; onNavigate: () => void }) {
-  if (state.existing) {
-    return (
-      <button
-        className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all"
-        onClick={onNavigate}
-        title={`In Artifacts — open ${state.existing.slug}`}
-        aria-label={`In Artifacts — open ${state.existing.slug}`}
-      >
-        <BookmarkPlus size={14} style={{ color: 'var(--ok)' }} />
-      </button>
-    )
-  }
-  return (
-    <button
-      className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all disabled:opacity-50"
-      onClick={() => state.add()}
-      disabled={state.adding}
-      title="Add to artifacts (versioned, persistent)"
-      aria-label="Add to artifacts"
-    >
-      <BookmarkPlus size={14} className={state.added ? 'lucide-inline' : ''} style={state.added ? { color: 'var(--ok)' } : undefined} />
-    </button>
-  )
-}
+/** 26px square icon toggle for the file toolbar (borderless, accent when on). */
+const barIconBtn = (on: boolean) =>
+  `flex items-center justify-center w-[26px] h-[26px] rounded-md cursor-pointer transition-colors border-none shrink-0 ${on ? 'text-accent bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover bg-transparent'}`
 
-/**
- * Round 8 row-2 icon: knowledge library toggle. Hidden by the caller
- * when the file's extension isn't supported (or the library is
- * unconfigured). When already added, renders as a static badge.
- */
-function KnowledgeToggleIconButton({ state }: { state: ReturnType<typeof useFileKnowledgeState> }) {
-  if (state.alreadyAdded) {
-    return (
-      <span
-        className="p-1.5 rounded-md border border-border/40 text-muted inline-flex items-center"
-        title="In Knowledge Library"
-        aria-label="In Knowledge Library"
-      >
-        <BookOpen size={14} style={{ color: 'var(--ok)' }} />
-      </span>
-    )
-  }
-  return (
-    <button
-      className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all disabled:opacity-50"
-      onClick={() => state.add()}
-      disabled={state.adding}
-      title="Add to Knowledge Library"
-      aria-label="Add to Knowledge Library"
-    >
-      <BookOpen size={14} className={state.added ? 'lucide-inline' : ''} style={state.added ? { color: 'var(--ok)' } : undefined} />
-    </button>
-  )
-}
+/** Icon + short label toggle for the source-mode options row. */
+const barLabelBtn = (on: boolean) =>
+  `flex items-center gap-1.5 px-2 h-[26px] rounded-md cursor-pointer transition-colors border-none shrink-0 text-[11.5px] font-medium ${on ? 'text-accent bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover bg-transparent'}`
 
-export function OverflowMenu({ filePath, content, revealOrCopy }: { filePath: string; content: string; revealOrCopy: (path: string, action: 'open' | 'reveal') => void }) {
+export function OverflowMenu({ filePath, content, revealOrCopy, onRefresh, refreshDisabled, refreshTitle, onFullscreen, fullscreen, onSnapshot, snapshotting }: {
+  filePath: string; content: string; revealOrCopy: (path: string, action: 'open' | 'reveal') => void
+  /** View actions folded in from the old header row (side-panel revamp): the
+   *  ⋯ menu is the single home for everything that isn't a mode toggle. */
+  onRefresh?: () => void; refreshDisabled?: boolean; refreshTitle?: string
+  onFullscreen?: () => void; fullscreen?: boolean
+  /** Snapshot the file's artifact (saves first when dirty — parent owns that
+   *  logic). Entry renders only when the file is already an artifact. */
+  onSnapshot?: () => void; snapshotting?: boolean
+}) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  // Keyboard operability (WAI-ARIA menu pattern): roving focus across the
+  // items on open, ArrowUp/Down + Home/End, Escape/Tab closes and returns
+  // focus to the trigger. Shared hook with StyledSelect/AgentSelector.
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  const noInputRef = useRef<HTMLElement>(null)
+  const closeToTrigger = useCallback(() => {
+    setOpen(false)
+    triggerRef.current?.focus()
+  }, [])
+  const { onListKeyDown } = useListboxKeyboard({
+    open,
+    dropdownRef: listRef,
+    inputRef: noInputRef,
+    hasFilterInput: false,
+    filteredCount: 0,
+    onEnterSingleMatch: () => {},
+    closeToTrigger,
+  })
   const closeTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(() => () => { clearTimeout(closeTimerRef.current) }, [])
   const navigate = useNavigate()
@@ -296,26 +275,31 @@ export function OverflowMenu({ filePath, content, revealOrCopy }: { filePath: st
   const canAddToKnowledge = knowledge.formats && knowledge.formats.includes(ext)
   return (
     <div ref={ref} className="relative">
-      <button aria-label="More options" className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all" onClick={() => setOpen(!open)}>
-        <MoreVertical size={14} />
+      <button ref={triggerRef} aria-label="More options" aria-haspopup="menu" aria-expanded={open} className={barIconBtn(open)} onClick={() => setOpen(!open)}>
+        <Ellipsis size={15} />
       </button>
       {open && (
-        <div className="absolute right-0 top-full mt-1 z-50 rounded-lg bg-bg-elevated border border-border shadow-lg py-1 min-w-[160px]">
-          <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { revealOrCopy(filePath, 'reveal'); setOpen(false) }}>
+        <div ref={listRef} role="menu" onKeyDown={onListKeyDown} className="absolute right-0 top-full mt-1 z-50 rounded-lg bg-bg-elevated border border-border shadow-lg py-1 min-w-[180px]">
+          {onRefresh && (
+            <button role="menuitem" data-option tabIndex={-1} className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover focus:bg-bg-hover focus:outline-none disabled:opacity-40" disabled={refreshDisabled} title={refreshTitle} onClick={() => { onRefresh(); setOpen(false) }}>
+              <RefreshCw size={14} className="lucide-inline" /> Refresh
+            </button>
+          )}
+          {onFullscreen && (
+            <button role="menuitem" data-option tabIndex={-1} className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover focus:bg-bg-hover focus:outline-none" onClick={() => { onFullscreen(); setOpen(false) }}>
+              {fullscreen ? <Minimize2 size={14} className="lucide-inline" /> : <Maximize2 size={14} className="lucide-inline" />} {fullscreen ? 'Exit full screen' : 'Full screen'}
+            </button>
+          )}
+          <button role="menuitem" data-option tabIndex={-1} className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover focus:bg-bg-hover focus:outline-none" onClick={() => { revealOrCopy(filePath, 'open'); setOpen(false) }}>
+            <ExternalLink size={14} className="lucide-inline" /> Open with default app
+          </button>
+          <button role="menuitem" data-option tabIndex={-1} className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover focus:bg-bg-hover focus:outline-none" onClick={() => { revealOrCopy(filePath, 'reveal'); setOpen(false) }}>
             Reveal in Finder
           </button>
-          <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { copyToClipboard(filePath); setOpen(false) }}>
-            Copy path
-          </button>
-          <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { copyToClipboard(content); setOpen(false) }}>
-            Copy content
-          </button>
-          <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => { downloadFile(filePath); setOpen(false) }}>
-            Download
-          </button>
+          <div className="h-px bg-border my-1 mx-2" />
           {artifact.existing ? (
             <button
-              className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover"
+              role="menuitem" data-option tabIndex={-1} className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover focus:bg-bg-hover focus:outline-none"
               onClick={() => { navigate(`/artifacts/${encodeURIComponent(artifact.existing!.slug)}`); setOpen(false) }}
               title={`Open artifact ${artifact.existing.slug}`}
             >
@@ -323,7 +307,7 @@ export function OverflowMenu({ filePath, content, revealOrCopy }: { filePath: st
             </button>
           ) : (
             <button
-              className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover disabled:opacity-50"
+              role="menuitem" data-option tabIndex={-1} className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover focus:bg-bg-hover focus:outline-none disabled:opacity-50"
               onClick={() => artifact.add(undefined, { onSuccess: delayedClose })}
               disabled={artifact.adding}
               title="Save this file as an artifact (versioned, persistent, comment-able)"
@@ -335,17 +319,32 @@ export function OverflowMenu({ filePath, content, revealOrCopy }: { filePath: st
                   : <><BookmarkPlus size={14} className="lucide-inline" /> Add to artifacts</>}
             </button>
           )}
+          {onSnapshot && artifact.existing && (
+            <button role="menuitem" data-option tabIndex={-1} className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover focus:bg-bg-hover focus:outline-none disabled:opacity-50" onClick={() => { onSnapshot(); delayedClose() }} disabled={snapshotting} title="Capture the current file content as a new artifact version">
+              <Camera size={14} className="lucide-inline" /> {snapshotting ? 'Snapshotting…' : 'Snapshot version'}
+            </button>
+          )}
           {canAddToKnowledge && (
             knowledge.alreadyAdded ? (
               <span className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-muted">
                 <BookOpen size={14} className="lucide-inline" /> In Library <Check size={14} className="lucide-inline" />
               </span>
             ) : (
-              <button className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover" onClick={() => knowledge.add(undefined, { onSuccess: delayedClose })} disabled={knowledge.adding}>
+              <button role="menuitem" data-option tabIndex={-1} className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover focus:bg-bg-hover focus:outline-none" onClick={() => knowledge.add(undefined, { onSuccess: delayedClose })} disabled={knowledge.adding}>
                 {knowledge.added ? <><BookOpen size={14} className="lucide-inline" style={{color: 'var(--ok)'}} /> {knowledge.addResult === 'exists' ? 'Already in Library' : 'Added!'}</> : knowledge.adding ? 'Adding...' : <><BookOpen size={14} className="lucide-inline" /> Add to Knowledge</>}
               </button>
             )
           )}
+          <div className="h-px bg-border my-1 mx-2" />
+          <button role="menuitem" data-option tabIndex={-1} className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover focus:bg-bg-hover focus:outline-none" onClick={() => { copyToClipboard(filePath); setOpen(false) }}>
+            Copy path
+          </button>
+          <button role="menuitem" data-option tabIndex={-1} className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover focus:bg-bg-hover focus:outline-none" onClick={() => { copyToClipboard(content); setOpen(false) }}>
+            Copy content
+          </button>
+          <button role="menuitem" data-option tabIndex={-1} className="flex items-center gap-2 w-full px-3 py-1.5 text-[13px] text-text cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover focus:bg-bg-hover focus:outline-none" onClick={() => { downloadFile(filePath); setOpen(false) }}>
+            Download
+          </button>
         </div>
       )}
     </div>
@@ -463,9 +462,13 @@ function useFileArtifactState(filePath: string, content: string) {
 let diffThemesRegistered = false
 
 /** Monaco diff editor for side-by-side git diff viewing */
-function DiffEditorBlock({ diffMode, lang, originalContent, content, dark, diffActiveRef, handleChange, editing, lineNums, wordWrap, autocomplete, onSelect }: {
+function DiffEditorBlock({ diffMode, lang, originalContent, content, dark, diffActiveRef, handleChange, editing, lineNums, wordWrap, autocomplete, onSelect, flush, sideBySide = true }: {
   diffMode: boolean; lang: string; originalContent: string; content: string; dark: boolean
   diffActiveRef: React.MutableRefObject<boolean>; handleChange: (v: string) => void; editing: boolean; lineNums: boolean; wordWrap: boolean; autocomplete: boolean
+  /** Monaco renderSideBySide — false = unified inline diff. */
+  sideBySide?: boolean
+  /** Drop the rounded border box — host surface frames the content. */
+  flush?: boolean
   onSelect?: (text: string, rect: DOMRect) => void
 }) {
   const handleChangeRef = useRef(handleChange); handleChangeRef.current = handleChange
@@ -475,11 +478,18 @@ function DiffEditorBlock({ diffMode, lang, originalContent, content, dark, diffA
   useEffect(() => () => { disposableRef.current?.dispose(); selDisposableRef.current?.dispose() }, [])
   if (!diffMode) return null
   return (
-    <div className="w-full h-full border border-border rounded-md overflow-hidden">
+    <div className={`w-full h-full overflow-hidden ${flush ? '' : 'border border-border rounded-md'}`}>
       <Suspense fallback={<div className="p-3 text-muted text-[12px] animate-pulse">Loading diff…</div>}>
         <MonacoDiffEditor height="100%" language={monacoLang(lang)} original={originalContent} modified={content}
           beforeMount={(monaco) => { if (!diffThemesRegistered) { monaco.editor.defineTheme('kirocrew-dark', kirocrewDark); monaco.editor.defineTheme('kirocrew-light', kirocrewLight); diffThemesRegistered = true } }}
           theme={dark ? 'kirocrew-dark' : 'kirocrew-light'} onMount={(editor) => {
+            // Jump to the first change once the diff is computed (fires async).
+            const nav = editor.onDidUpdateDiff(() => {
+              nav.dispose()
+              const changes = editor.getLineChanges()
+              const first = changes?.[0]
+              if (first) editor.getModifiedEditor().revealLineInCenter(first.modifiedStartLineNumber || first.modifiedEndLineNumber || 1)
+            })
             const mod = editor.getModifiedEditor()
             disposableRef.current = mod.onDidChangeModelContent(() => { if (!diffActiveRef.current) return; handleChangeRef.current(mod.getValue()) })
             selDisposableRef.current = mod.onMouseUp(() => {
@@ -497,7 +507,7 @@ function DiffEditorBlock({ diffMode, lang, originalContent, content, dark, diffA
                 onSelectRef.current?.(text.trim(), rect)
               }, 10)
             })
-          }} options={{ minimap: { enabled: false }, readOnly: !editing, renderSideBySide: true, scrollBeyondLastLine: false, fontSize: 13, lineNumbers: lineNums ? 'on' : 'off', wordWrap: wordWrap ? 'on' : 'off', quickSuggestions: autocomplete, automaticLayout: true, hover: { enabled: editing } }} />
+          }} options={{ minimap: { enabled: false }, readOnly: !editing, renderSideBySide: sideBySide, renderValidationDecorations: 'off', guides: { indentation: false }, stickyScroll: { enabled: false }, renderLineHighlight: 'none', scrollBeyondLastLine: false, fontSize: 13, lineNumbers: lineNums ? 'on' : 'off', wordWrap: wordWrap ? 'on' : 'off', quickSuggestions: autocomplete, automaticLayout: true, hover: { enabled: editing } }} />
       </Suspense>
     </div>
   )
@@ -521,10 +531,19 @@ const CommentOverlayBlock = memo(function CommentOverlayBlock({ popover, addComm
   )
 })
 
-export default memo(function MarkdownPanel({ filePath, content, onContentChange, onSave, onClose, liveWatch, onSubmitComments, onRefresh, reserveWidth }: Props) {
+export default memo(function MarkdownPanel({ filePath, content, onContentChange, onSave, onClose, liveWatch, onSubmitComments, onRefresh, reserveWidth, embedded }: Props) {
   const qc = useQueryClient()
-  const [editing, setEditing] = useState(false)
+  // Code files (non-rich, non-markdown) have no meaningful preview — their
+  // "preview" was just a read-only render of the same text. They open
+  // straight in source mode and the View Preview toggle is hidden for them.
+  const [editing, setEditing] = useState(() => {
+    if (MD_EXTS.has(extOf(filePath))) return false
+    return !['image', 'svg', 'csv', 'json', 'jsonl', 'html', 'pdf'].includes(detectFileType(filePath))
+  })
   const [diffMode, setDiffMode] = useState(false)
+  // Unified vs side-by-side diff rendering — persisted, and shares its key
+  // with SidePanel's diff tabs so the preference is app-wide.
+  const [diffSplit, setDiffSplit] = usePersistedBool('mc-diff-split', true)
   const [monacoSelection, setMonacoSelection] = useState<{ text: string; x: number; y: number } | null>(null)
   const diffActiveRef = useRef(false)
   diffActiveRef.current = diffMode && editing
@@ -533,9 +552,10 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
-  const [lineNums, setLineNums] = useState(true)
-  const [wordWrap, setWordWrap] = useState(true)
-  const [autocomplete, setAutocomplete] = useState(true)
+  // Editor view preferences — persisted so they survive tab switches/reloads.
+  const [lineNums, setLineNums] = usePersistedBool('mc-file-linenums', true)
+  const [wordWrap, setWordWrap] = usePersistedBool('mc-file-wordwrap', true)
+  const [autocomplete, setAutocomplete] = usePersistedBool('mc-file-autocomplete', true)
   const { readingWidth, toggle: toggleReadingWidth, previewStyle: mdPreviewStyle } = useReadingWidth()
   // Hydrate pending draft comments for this file from localStorage so they
   // survive panel close, refresh, and crash. Submitting clears them.
@@ -597,12 +617,9 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
   const [hintDismissed, setHintDismissed] = useState(() => localStorage.getItem(HINT_KEY) === '1')
   const [fullscreen, setFullscreen] = useState(false)
   const fileName = filePath.split('/').pop() || filePath
-  // Mesh-1654 round 8: surface artifact / knowledge state in the row 2
-  // toolbar — same hooks the overflow ⋮ uses, so the cache stays warm
-  // across the two views and the button states are coherent.
-  const knowledge = useFileKnowledgeState(filePath)
+  // Artifact state powers the ⋯ menu's Snapshot entry (same query cache as
+  // the OverflowMenu's own hook, so states stay coherent).
   const artifactState = useFileArtifactState(filePath, content)
-  const navigate = useNavigate()
   const previewRef = useRef<HTMLDivElement>(null)
   const sidePanelScrollRef = useRef<HTMLDivElement>(null)
   const fullscreenPreviewRef = useRef<HTMLDivElement>(null)
@@ -782,7 +799,7 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
     catch { return DOMPurify.sanitize(hljs.highlightAuto(content).value) + '\n' }
   }, [content, lang, isMarkdown, editing, isRichType])
 
-  const { status: watchStatus } = useFileWatch(
+  useFileWatch(
     liveWatch && !editing && !dirty ? filePath : null,
     useCallback((c: string) => { onContentChange(c) }, [onContentChange]),
   )
@@ -824,8 +841,11 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
   // Discard pending edits (round 8: matches the artifact detail page's
   // Cancel button). Re-reads the file from disk into the buffer,
   // clearing dirty. Confirms first because edits are gone for good.
+  // Only markdown-ish files have a preview to return to; code files stay in
+  // source mode (Cancel just discards edits).
+  const canPreview = isMarkdown
   const handleCancel = useCallback(async () => {
-    if (!dirty) { setEditing(false); return }
+    if (!dirty) { if (canPreview) setEditing(false); return }
     if (!window.confirm('Discard unsaved changes?')) return
     setRefreshing(true)
     try {
@@ -835,9 +855,9 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
         if (res.ok) onContentChange(await res.text())
       }
       setDirty(false)
-      setEditing(false)
+      if (canPreview) setEditing(false)
     } finally { setRefreshing(false) }
-  }, [dirty, filePath, onContentChange, onRefresh])
+  }, [dirty, filePath, onContentChange, onRefresh, canPreview])
 
   const resolveSelectionCoords = useCallback((fallbackText?: string) => {
     const sel = window.getSelection()
@@ -1163,152 +1183,103 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
     )}
   </>)
 
+  // Breadcrumb: last two directories + filename (full path in tooltip/copy).
+  const crumbs = filePath.replace(/\/+$/, '').split('/').filter(Boolean).slice(-3)
+  // Diff-mode +N/-N stats over the same original/modified pair Monaco shows.
+  const diffStats = useMemo(() => countLines(originalContent, content), [originalContent, content])
+  // Snapshot (⋯ menu): capture current content as a new artifact version;
+  // unsaved edits are persisted first so the snapshot reflects the screen.
+  const handleSnapshot = useCallback(async () => {
+    if (dirty) await handleSave()
+    artifactState.snapshot()
+  }, [dirty, handleSave, artifactState])
+
   return (
     <>
     <DetailPanel
+      embedded={embedded}
       title={fileName}
       onClose={guardedClose}
       initialWidth={480}
       minWidth={420}
       reserveWidth={reserveWidth}
       storageKey="mc-panel-width"
-      headerActions={<>
-        {/* Row 1: identity / view actions — refresh, TOC, fullscreen,
-            external open, overflow ⋮. Stays uncluttered regardless of
-            edit/preview mode. */}
-        <button
-          className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all disabled:opacity-40"
-          onClick={handleRefresh}
-          disabled={refreshing || dirty}
-          title={dirty ? 'Save or discard changes first' : 'Refresh file (re-read from disk)'}
-          aria-label={dirty ? 'Save or discard changes first' : 'Refresh file (re-read from disk)'}
-        ><RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /></button>
-        <button
-          className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all"
-          onClick={() => setFullscreen(f => !f)}
-          title={fullscreen ? 'Exit full screen (Esc)' : 'Full screen'}
-          aria-label={fullscreen ? 'Exit full screen' : 'Full screen'}
-        >{fullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
-        <button
-          className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all"
-          onClick={() => revealOrCopy(filePath, 'open')}
-          title="Open with default application"
-          aria-label="Open with default application"
-        ><ExternalLink size={14} /></button>
-        <OverflowMenu filePath={filePath} content={content} revealOrCopy={revealOrCopy} />
-      </>}
-      secondaryHeaderActions={!isRichType ? (
-        // Row 2: editor controls — formatting toggles (only in edit mode)
-        // on the left, mode toggle + save action on the right. Hidden
-        // entirely for rich types (markdown preview at top of stack only when no editor)
-        // where there's no editor surface to configure.
-        <>
-          <div className="flex items-center gap-1.5">
-            {!editing && (
-              // Round 8: file-level lifecycle shortcuts (Add to artifacts /
-              // Knowledge) live on the left of row 2 when in preview mode
-              // — fast access without opening the overflow ⋮. Hidden in
-              // edit mode so the user focuses on save/cancel/snapshot.
-              <>
-                <ArtifactToggleIconButton state={artifactState} onNavigate={() => navigate(`/artifacts/${encodeURIComponent(artifactState.existing!.slug)}`)} />
-                {(() => {
-                  const ext = '.' + (filePath.split('.').pop() || '').toLowerCase()
-                  const canK = knowledge.formats && knowledge.formats.includes(ext)
-                  if (!canK) return null
-                  return <KnowledgeToggleIconButton state={knowledge} />
-                })()}
-              </>
+      customHeader={
+        /* Single-bar toolbar (side-panel revamp): the tab chip owns
+           identity + close, so this bar carries a static breadcrumb + dirty
+           dot + diff stats on the left, and View Source/Preview toggle, git
+           diff toggle, and the ⋯ overflow on the right. In source mode a
+           second row pops down (grid-rows transition — compositor-friendly
+           in Electron, unlike height auto) with the editor options and
+           Save / Cancel so the main bar never crowds. */
+        <div className="shrink-0 border-b border-border">
+          <div className="flex items-center gap-2 h-[38px] px-3">
+            <span className="flex items-center min-w-0" title={filePath}>
+              {crumbs.map((seg, i) => (
+                <span key={i} className="flex items-center min-w-0 text-[12px]">
+                  {i > 0 && <ChevronRight size={14} className="text-muted opacity-60 shrink-0 mx-0.5" />}
+                  <span className={`truncate ${i === crumbs.length - 1 ? 'text-text-strong font-medium' : 'text-muted'}`}>{seg}</span>
+                </span>
+              ))}
+            </span>
+            {dirty && <span className="text-warn text-[15px] leading-none shrink-0" title="Unsaved changes">●</span>}
+            {diffMode && (diffStats.added > 0 || diffStats.removed > 0) && (
+              <span className="text-[11px] font-mono font-semibold shrink-0">
+                {diffStats.added > 0 && <span className="text-ok">+{diffStats.added}</span>}
+                {diffStats.removed > 0 && <span className="text-danger ml-1.5">-{diffStats.removed}</span>}
+              </span>
             )}
-            {editing && (
-              <>
-                <button
-                  className={`p-1.5 rounded-md border cursor-pointer transition-all ${wordWrap ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`}
-                  onClick={() => setWordWrap(!wordWrap)}
-                  title="Toggle word wrap"
-                  aria-label="Toggle word wrap"
-                  aria-pressed={wordWrap}
-                ><WrapText size={14} /></button>
-                <button
-                  className={`p-1.5 rounded-md border cursor-pointer transition-all ${autocomplete ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`}
-                  onClick={() => setAutocomplete(!autocomplete)}
-                  title="Toggle autocomplete"
-                  aria-label="Toggle autocomplete"
-                  aria-pressed={autocomplete}
-                ><Zap size={14} /></button>
-                <button
-                  className={`p-1.5 rounded-md border cursor-pointer transition-all ${lineNums ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`}
-                  onClick={() => setLineNums(!lineNums)}
-                  title="Toggle line numbers"
-                  aria-label="Toggle line numbers"
-                  aria-pressed={lineNums}
-                ><Hash size={14} /></button>
-              </>
-            )}
-          </div>
-          <div className="flex items-center gap-1.5">
-            {/* Edit-mode action order: Save | Cancel | Snapshot | Diff | Preview */}
-            <button className={`px-2 py-1 rounded-md text-[12px] font-medium border transition-all disabled:opacity-40 ${dirty ? 'border-accent text-accent-fg bg-accent cursor-pointer hover:bg-accent-hover' : 'border-border text-muted cursor-default'}`} disabled={saving || !dirty || !editing} onClick={handleSave} style={!editing ? { display: 'none' } : undefined}>
-              {saving ? 'Saving…' : 'Save'}
-            </button>
-            {editing && (
+            <span className="flex-1 min-w-[8px]" />
+            {canPreview && (
               <button
-                className="px-2 py-1 rounded-md text-[12px] font-medium border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all disabled:opacity-40 inline-flex items-center gap-1"
-                onClick={handleCancel}
-                disabled={refreshing}
-                title="Cancel — discard unsaved edits"
-              >
-                <X size={12} /> Cancel
-              </button>
+                className="px-2.5 h-[26px] rounded-md text-[11.5px] font-medium text-muted hover:text-text hover:bg-bg-hover bg-transparent border-none cursor-pointer transition-colors shrink-0"
+                onClick={() => setEditing(!editing)}
+                aria-pressed={editing}
+              >{editing ? 'View Preview' : 'View Source'}</button>
             )}
-            {artifactState.existing && (
-              <button
-                className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all disabled:opacity-40"
-                disabled={artifactState.snapshotting || (!artifactState.existing.live_dirty && !dirty)}
-                title={
-                  artifactState.snapshotted
-                    ? 'Snapshotted!'
-                    : artifactState.snapshotting
-                      ? 'Snapshotting…'
-                      : dirty
-                        ? 'Save and snapshot — captures the current edits as a new version'
-                        : 'Snapshot — capture the current file content as a new version'
-                }
-                aria-label="Snapshot"
-                onClick={async () => {
-                  if (dirty) {
-                    await handleSave()
-                  }
-                  artifactState.snapshot()
-                }}
-              ><Camera size={14} /></button>
+            {!isRichType && diffMode && (
+              <button className={barIconBtn(!diffSplit)} onClick={() => setDiffSplit(!diffSplit)} title={diffSplit ? 'Switch to unified view' : 'Switch to split view'} aria-label={diffSplit ? 'Switch to unified view' : 'Switch to split view'} aria-pressed={!diffSplit}><Columns2 size={14} /></button>
             )}
-            <button
-              className={`p-1.5 rounded-md border cursor-pointer transition-all ${diffMode ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`}
-              onClick={() => setDiffMode(!diffMode)}
-              title="Toggle git diff"
-              aria-label="Toggle git diff"
-              aria-pressed={diffMode}
-            ><GitBranch size={14} /></button>
-            <button
-              className={`px-2 py-1 rounded-md text-[12px] font-medium border cursor-pointer transition-all ${editing ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`}
-              onClick={() => setEditing(!editing)}
-            >{editing ? 'Preview' : 'Edit'}</button>
+            {!isRichType && (
+              <button className={barIconBtn(diffMode)} onClick={() => setDiffMode(!diffMode)} title="Toggle git diff" aria-label="Toggle git diff" aria-pressed={diffMode}><GitBranch size={14} /></button>
+            )}
+            <OverflowMenu filePath={filePath} content={content} revealOrCopy={revealOrCopy}
+              onRefresh={handleRefresh} refreshDisabled={refreshing || dirty} refreshTitle={dirty ? 'Save or discard changes first' : 'Refresh file (re-read from disk)'}
+              onFullscreen={() => setFullscreen(f => !f)} fullscreen={fullscreen}
+              onSnapshot={artifactState.existing ? handleSnapshot : undefined} snapshotting={artifactState.snapshotting}
+            />
           </div>
-        </>
-      ) : undefined}
-      footer={<>
-        <Clickable className="flex items-center gap-2 text-[11px] text-muted font-mono truncate cursor-pointer hover:text-text transition-colors" title="Click to copy path" onClick={() => copyToClipboard(filePath)}>
-          {watchStatus === 'open' && <span className="inline-block w-1.5 h-1.5 rounded-full bg-ok animate-pulse" title="Live watching" />}
-          {filePath}
-        </Clickable>
-      </>}
+          {/* Source-mode row: always mounted so grid-template-rows animates
+              open/closed without the choppiness of height:auto in Electron. */}
+          {!isRichType && (
+            <div className="grid transition-[grid-template-rows] duration-200 ease-out" style={{ gridTemplateRows: editing ? '1fr' : '0fr' }} aria-hidden={!editing}>
+              <div className="overflow-hidden min-h-0">
+                <div className="flex items-center gap-1.5 h-[36px] px-3 overflow-x-auto scrollbar-none">
+                  <button className={barLabelBtn(wordWrap)} onClick={() => setWordWrap(!wordWrap)} title="Toggle word wrap" aria-pressed={wordWrap} tabIndex={editing ? 0 : -1}><WrapText size={13} /><span>Word wrap</span></button>
+                  <button className={barLabelBtn(autocomplete)} onClick={() => setAutocomplete(!autocomplete)} title="Toggle autocomplete" aria-pressed={autocomplete} tabIndex={editing ? 0 : -1}><Zap size={13} /><span>Autocomplete</span></button>
+                  <button className={barLabelBtn(lineNums)} onClick={() => setLineNums(!lineNums)} title="Toggle line numbers" aria-pressed={lineNums} tabIndex={editing ? 0 : -1}><Hash size={13} /><span>Line numbers</span></button>
+                  <span className="flex-1" />
+                  {/* Cancel/Save appear only once there's something to save;
+                      a clean buffer keeps the row to just the view options. */}
+                  {dirty && (<>
+                    <button className="px-2.5 h-[26px] rounded-md text-[11.5px] font-medium text-muted hover:text-text border border-border bg-transparent cursor-pointer transition-colors disabled:opacity-40 shrink-0" onClick={handleCancel} disabled={refreshing} title="Cancel — discard unsaved edits" tabIndex={editing ? 0 : -1}>Cancel</button>
+                    <button className="px-3 h-[26px] rounded-md text-[11.5px] font-semibold border border-accent text-accent-fg bg-accent cursor-pointer hover:bg-accent-hover transition-all disabled:opacity-40 shrink-0" disabled={saving} onClick={handleSave} tabIndex={editing ? 0 : -1}>{saving ? 'Saving…' : 'Save'}</button>
+                  </>)}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      }
     >
       {saveError && <div className="text-[11px] text-danger">{saveError}</div>}
       {/* Comment hint for markdown files */}
       {isMarkdown && !editing && onSubmitComments && !hintDismissed && (
         <CommentHint onDismiss={dismissHint} />
       )}
-      <div className={`flex-1 overflow-hidden -mx-5 -my-4 py-4 flex pl-4 ${isMarkdown && !editing ? 'pr-0' : 'pr-4'}`}>
+      {/* Code / editor / diff views run flush (edge-to-edge) against the
+          panel — only markdown preview keeps reading padding. */}
+      <div className={`flex-1 overflow-hidden -mx-5 -my-4 flex ${isMarkdown && !editing && !diffMode ? 'py-4 pl-4 pr-0' : ''}`}>
         {!fullscreen && <div data-mc-mdpanel className="relative flex-1 min-w-0 min-h-0">
           {findBar}
           {/* In markdown preview the scroll box runs flush to the panel's right
@@ -1316,9 +1287,9 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
               pr-6 keeps the text clear of the ticks. */}
           <div ref={sidePanelScrollRef} className={`h-full overflow-auto ${isMarkdown && !editing ? 'scrollbar-overlay pr-6' : ''}`}>
             {!diffChecking && !isRichType && (
-              <DiffEditorBlock diffMode={diffMode} lang={lang} originalContent={originalContent} content={content} dark={dark} diffActiveRef={diffActiveRef} handleChange={handleChange} editing={editing} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onSelect={onSubmitComments ? (text, rect) => setMonacoSelection({ text, x: rect.x, y: rect.y }) : undefined} />
+              <DiffEditorBlock flush sideBySide={diffSplit} diffMode={diffMode} lang={lang} originalContent={originalContent} content={content} dark={dark} diffActiveRef={diffActiveRef} handleChange={handleChange} editing={editing} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onSelect={onSubmitComments ? (text, rect) => setMonacoSelection({ text, x: rect.x, y: rect.y }) : undefined} />
             )}
-            {!diffMode && <ContentRenderer isRichType={isRichType} fileType={fileType} filePath={filePath} content={content} editing={editing} lang={lang} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onChange={handleChange}
+            {!diffMode && <ContentRenderer flush isRichType={isRichType} fileType={fileType} filePath={filePath} content={content} editing={editing} lang={lang} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onChange={handleChange}
               previewRef={previewRef} displayContent={displayContent} isMarkdown={isMarkdown} highlightedHtml={highlightedHtml} gutterReadRef={gutterReadRef} markdownClassName="msg-content text-sm leading-relaxed" />}
           </div>
           {isMarkdown && !editing && <MarkdownOutlineRail containerRef={sidePanelScrollRef} />}
@@ -1352,7 +1323,7 @@ export default memo(function MarkdownPanel({ filePath, content, onContentChange,
         <div data-mc-mdpanel className="relative flex-1 overflow-hidden min-h-0">
           {findBar}
           <div ref={fullscreenBodyRef} className="h-full overflow-auto px-16 py-4">
-            {!isRichType && <DiffEditorBlock diffMode={diffMode} lang={lang} originalContent={originalContent} content={content} dark={dark} diffActiveRef={diffActiveRef} handleChange={handleChange} editing={editing} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onSelect={onSubmitComments ? (text, rect) => setMonacoSelection({ text, x: rect.x, y: rect.y }) : undefined} />}
+            {!isRichType && <DiffEditorBlock sideBySide={diffSplit} diffMode={diffMode} lang={lang} originalContent={originalContent} content={content} dark={dark} diffActiveRef={diffActiveRef} handleChange={handleChange} editing={editing} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onSelect={onSubmitComments ? (text, rect) => setMonacoSelection({ text, x: rect.x, y: rect.y }) : undefined} />}
             {!diffMode && <ContentRenderer isRichType={isRichType} fileType={fileType} filePath={filePath} content={content} editing={editing} lang={lang} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onChange={handleChange}
               previewRef={fullscreenPreviewRef} displayContent={displayContent} isMarkdown={isMarkdown} highlightedHtml={highlightedHtml} gutterReadRef={gutterFullscreenRef} previewStyle={mdPreviewStyle} />}
           </div>
