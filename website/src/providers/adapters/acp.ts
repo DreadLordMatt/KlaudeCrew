@@ -1,5 +1,6 @@
 import { api } from '../../api/client'
 import modelTokensRaw from '../../model_tokens.json'
+import { displayModels } from '../modelRegistry'
 import type {
   ProviderAdapter,
   ProviderCapabilities,
@@ -175,12 +176,27 @@ export class AcpAdapter implements ProviderAdapter {
   }
 
   async fetchAvailableModels(): Promise<ModelInfo[]> {
-    const models = await api.models()
-    if (!Array.isArray(models)) return []
-    return models.map((m: RawModel) => ({
-      name: m.model_name,
-      description: m.description || '',
-      contextWindow: MODEL_TOKENS[m.model_name] ?? DEFAULT_CONTEXT,
+    try {
+      const models = await api.models()
+      if (!Array.isArray(models)) return this._defaultModels()
+      const result = models.map((m: RawModel) => ({
+        name: m.model_name,
+        description: m.description || '',
+        contextWindow: MODEL_TOKENS[m.model_name] ?? DEFAULT_CONTEXT,
+      }))
+      return result.length > 0 ? result : this._defaultModels()
+    } catch {
+      return this._defaultModels()
+    }
+  }
+
+  /** Static fallback from the canonical model registry — used when the backend
+   *  is unavailable (gateway restart, kiro-cli cold-start timeout, auth race). */
+  private _defaultModels(): ModelInfo[] {
+    return displayModels().map(m => ({
+      name: m.name,
+      description: m.description,
+      contextWindow: m.contextWindow,
     }))
   }
 
