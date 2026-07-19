@@ -1604,6 +1604,115 @@ async def test_prompt_error_response_raises():
         await _stop_reader(task)
 
 
+@pytest.mark.asyncio
+async def test_prompt_transient_error_sets_transient_flag():
+    """A transient backend 5xx error response (a mid-stream InternalServerError
+    surfaced as JSON-RPC -32603) raises AcpError with transient=True, so the
+    chat_runner / llm_helpers retry ladder fires instead of a bare error card.
+    Regression for the kiro raise site that previously lacked the flag."""
+    from kiro_crew.acp.client import AcpError
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        async def drive():
+            async for _ in handle.prompt("hi", timeout=3.0):
+                pass
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(
+            reader,
+            {
+                "id": req_id,
+                "error": {
+                    "code": -32603,
+                    "message": "Internal error",
+                    "data": (
+                        "Encountered an error in the response stream: "
+                        "CodewhispererChatResponseStream(ServiceError(InternalServerError "
+                        '{ message: "...please try again." }))'
+                    ),
+                },
+            },
+        )
+        with pytest.raises(AcpError) as excinfo:
+            await asyncio.wait_for(driver, timeout=3.0)
+        assert excinfo.value.transient is True
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_prompt_auth_error_not_transient():
+    """An auth error response raises AcpError with transient=False so it fails
+    fast — a retry cannot fix an expired/denied credential."""
+    from kiro_crew.acp.client import AcpError
+
+    rt, reader, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    task = await _start_reader(rt)
+    try:
+        async def drive():
+            async for _ in handle.prompt("hi", timeout=3.0):
+                pass
+
+        driver = asyncio.ensure_future(drive())
+        await asyncio.sleep(0.05)
+        req_id = rt._next_id - 1
+        _feed(
+            reader,
+            {
+                "id": req_id,
+                "error": {
+                    "code": -32603,
+                    "message": "Internal error",
+                    "data": "ExpiredTokenException: signature expired",
+                },
+            },
+        )
+        with pytest.raises(AcpError) as excinfo:
+            await asyncio.wait_for(driver, timeout=3.0)
+        assert excinfo.value.transient is False
+    finally:
+        await _stop_reader(task)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_response_transient_error_sets_flag():
+    """The non-streaming _wait_for_response path also classifies a transient
+    backend 5xx (a -32603 InternalServerError) as transient=True, so
+    request/response turns (session/new, set_mode, cancel, …) share the same
+    retry eligibility. Covers the second kiro raise site."""
+    from kiro_crew.acp.client import AcpError
+
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    q["sA"].put_nowait(
+        JsonRpcMessage.from_dict(
+            {
+                "id": 7,
+                "error": {
+                    "code": -32603,
+                    "message": "Internal error",
+                    "data": (
+                        "Encountered an error in the response stream: "
+                        "InternalServerError ... please try again."
+                    ),
+                },
+            }
+        )
+    )
+    with pytest.raises(AcpError) as excinfo:
+        await handle._wait_for_response(7, timeout=3.0)
+    assert excinfo.value.transient is True
+
+
 # ── Runtime properties ──
 
 

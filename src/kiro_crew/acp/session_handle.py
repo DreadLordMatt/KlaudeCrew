@@ -45,6 +45,7 @@ from kiro_crew.acp.client import (
     AcpTimeoutError,
     _is_safe_oauth_url,
     _is_tool_interrupted_marker,
+    _is_transient_raw_error,
 )
 from kiro_crew.acp.liveness import (
     EVIDENCE_ESTABLISHED_FLAT,
@@ -795,7 +796,17 @@ class AcpSessionHandle:
                     raise AcpProcessDied("Runtime process died while waiting for response")
                 if msg.is_response_for(req_id):
                     if msg.error:
-                        raise AcpError(f"ACP error: {msg.error}")
+                        # Classify the raw JSON-RPC error so the chat_runner /
+                        # llm_helpers retry ladder recognizes transient backend 5xx
+                        # (e.g. a mid-stream InternalServerError surfaced as -32603)
+                        # instead of surfacing a bare error card. The kiro raise
+                        # sites previously lacked the transient= flag, so the string
+                        # fallback classifier missed the raw "InternalServerError"
+                        # dict. Mirrors client._raise_acp_error (Mesh-2356).
+                        raise AcpError(
+                            f"ACP error: {msg.error}",
+                            transient=_is_transient_raw_error(msg.error),
+                        )
                     return msg
                 # Not our response — buffer (do not drop) for re-injection.
                 buffered.append(msg)
@@ -952,7 +963,17 @@ class AcpSessionHandle:
                 # Turn-complete response
                 if msg.is_response_for(req_id):
                     if msg.error:
-                        raise AcpError(f"ACP error: {msg.error}")
+                        # Classify the raw JSON-RPC error so the chat_runner /
+                        # llm_helpers retry ladder recognizes transient backend 5xx
+                        # (e.g. a mid-stream InternalServerError surfaced as -32603)
+                        # instead of surfacing a bare error card. The kiro raise
+                        # sites previously lacked the transient= flag, so the string
+                        # fallback classifier missed the raw "InternalServerError"
+                        # dict. Mirrors client._raise_acp_error (Mesh-2356).
+                        raise AcpError(
+                            f"ACP error: {msg.error}",
+                            transient=_is_transient_raw_error(msg.error),
+                        )
                     result = msg.result or {}
                     reason = ""
                     if isinstance(result, dict):
