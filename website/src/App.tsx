@@ -55,7 +55,7 @@ import ArtifactDetailPage from './pages/ArtifactDetailPage'
 import SettingsPage from './pages/SettingsPage'
 import EmbedSettingsPage from './pages/EmbedSettingsPage'
 import KiroCrewNavBridge from './components/KiroCrewNavBridge'
-import InstanceTabBar from './components/InstanceTabBar'
+import InstanceTabBar, { visibleInstanceTabs } from './components/InstanceTabBar'
 import InstancesViewport from './components/InstancesViewport'
 import EmbedTabStrip from './components/EmbedTabStrip'
 import DeveloperPage from './pages/DeveloperPage'
@@ -764,6 +764,19 @@ export default function App() {
   // (the native dashboard); a non-null id means a remote instance's embedded
   // dashboard is shown instead, so the Local pane is hidden (not unmounted).
   const activeInstanceId = useAppSelector(s => s.instances.activeId)
+  // macOS traffic-light clearance: when the instance tab bar is the topmost
+  // strip (>=1 remote connected) the native lights sit over IT, not the header,
+  // so the 84px header inset must move onto the bar (see .mac-instancebar-inset
+  // in index.css). Reuse the shared visibleInstanceTabs rule and the cache-
+  // shared ['instances'] query so this can't diverge from InstanceTabBar. Only
+  // relevant on macOS Electron, and never while fullscreen (lights are hidden).
+  const instanceWarm = useAppSelector(s => s.instances.warm)
+  const { data: instancesData } = useQuery({
+    queryKey: ['instances'],
+    queryFn: () => api.listInstances(),
+    enabled: isMacElectron,
+    retry: false,
+  })
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
 
   // Dynamic app nav items — all apps (builtin + installed) with UI pages
@@ -1075,6 +1088,13 @@ export default function App() {
     const api = (window as { electronAPI?: { onFullScreenChanged?: (cb: (fs: boolean) => void) => () => void } }).electronAPI
     return api?.onFullScreenChanged?.(setMacFullscreen)
   }, [])
+  // True when the instance tab bar is the topmost strip on macOS and the native
+  // traffic lights therefore sit over it (not the header). Drives the
+  // .mac-instancebar-inset root class that relocates the 84px clearance.
+  const macInstanceBarInset =
+    isMacElectron &&
+    !macFullscreen &&
+    visibleInstanceTabs(instancesData?.instances ?? [], instanceWarm).length > 0
   const { data: sysMetrics, isError: sysMetricsError, dataUpdatedAt: sysMetricsUpdatedAt } = useQuery({ queryKey: ['system-metrics'], queryFn: () => api.system().then(d => ({ memUsed: d.mem_used_gb, memTotal: d.mem_total_gb, cpuPct: d.cpu_pct, diskTotal: d.disk_total_gb, diskFree: d.disk_free_gb })), refetchInterval: metricsOpen ? 30_000 : false, enabled: metricsOpen })
   // Tick every 10s while widget is open so `sysMetricsStale` re-evaluates even when the query stops refetching (backgrounded tab, network drop).
   const [, setStaleTick] = useState(0)
@@ -1240,7 +1260,7 @@ export default function App() {
         </div>
       </div>
     ) : (
-    <div className="h-screen w-screen flex flex-col overflow-hidden bg-bg">
+    <div className={`h-screen w-screen flex flex-col overflow-hidden bg-bg ${macInstanceBarInset ? 'mac-instancebar-inset' : ''}`}>
       {/* Thin instance tab bar — renders null unless >=1 remote is connected, so
           the single-instance experience is unchanged. Everything below it is the
           switchable window: the Local dashboard, or a remote's embedded one. */}

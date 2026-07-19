@@ -18,10 +18,27 @@
 import { useCallback, useMemo } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Home, Server, Loader2 } from 'lucide-react'
-import { api, ApiError } from '../api/client'
+import { api, ApiError, type InstanceView } from '../api/client'
 import { useAppDispatch, useAppSelector } from '../store'
-import { setWarm, setActiveId } from '../store/instancesSlice'
+import { setWarm, setActiveId, type WarmConn } from '../store/instancesSlice'
 import { isEmbeddedPane } from '../lib/embedded'
+
+/**
+ * Instances that get a tab: sticky connect intent (`was_connected`, cleared
+ * only on explicit disconnect) OR currently connected OR warm. Exported as the
+ * single source of truth so App.tsx can decide whether the bar is visible
+ * WITHOUT duplicating the rule — the bar's visibility drives the macOS
+ * traffic-light clearance (when shown, the bar is the topmost strip the native
+ * lights sit over, so the clearance moves off the header onto the bar).
+ */
+export function visibleInstanceTabs(
+  instances: InstanceView[],
+  warm: Record<string, WarmConn>,
+): InstanceView[] {
+  return instances.filter(
+    i => i.was_connected || i.status?.state === 'connected' || !!warm[i.id],
+  )
+}
 
 // Proactive token refresh fires once elapsed reaches this fraction of the TTL
 // (must match InstancesViewport.REFRESH_AT_ELAPSED_FRAC). Drives the countdown
@@ -65,9 +82,7 @@ export default function InstanceTabBar() {
   // per-tab visual state, NOT whether the tab exists, so a tab survives a
   // gateway restart or a failed auto-reconnect (rendered with an error dot)
   // instead of vanishing and forcing the user back to Settings → Instances.
-  const tabInstances = instances.filter(
-    i => i.was_connected || i.status?.state === 'connected' || !!warm[i.id],
-  )
+  const tabInstances = visibleInstanceTabs(instances, warm)
 
   const connectMutation = useMutation({
     mutationFn: (id: string) => api.connectInstance(id),
@@ -144,7 +159,7 @@ export default function InstanceTabBar() {
 
   return (
     <div
-      className="topbar-glass flex items-center gap-2 h-8 px-2 border-b border-border shrink-0 z-[46]"
+      className="topbar-glass instance-tab-bar flex items-center gap-2 h-8 px-2 border-b border-border shrink-0 z-[46]"
       role="tablist"
       aria-label="Instances"
     >
