@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -598,3 +599,109 @@ class TestThresholdClamp:
         c = WeComConfig(soft_threshold_pct=-10, hard_threshold_pct=200)
         assert c.soft_threshold_pct == 0
         assert c.hard_threshold_pct == 100
+
+
+# ------------------------------------------------------------------
+# Tests: malformed frames are isolated from the receive loop
+# ------------------------------------------------------------------
+
+
+class TestMalformedFrames:
+    """Malformed external frames must not terminate the WeCom client."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("payload", [None, [], "text", 5, True])
+    async def test_non_object_json_is_ignored(self, payload: object) -> None:
+        handler = AsyncMock()
+        client = WeComClient(
+            bot_id="bot1",
+            secret="sec1",
+            ws_url="wss://fake",
+            on_message=handler,
+        )
+
+        await client._handle_message(json.dumps(payload))
+
+        handler.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "frame",
+        [
+            {"cmd": "aibot_msg_callback", "headers": None, "body": {}},
+            {"cmd": "aibot_msg_callback", "headers": {}, "body": []},
+            {
+                "cmd": "aibot_msg_callback",
+                "headers": {},
+                "body": {"from": "user", "text": {}},
+            },
+            {
+                "cmd": "aibot_msg_callback",
+                "headers": {},
+                "body": {"from": {}, "text": "message"},
+            },
+        ],
+    )
+    async def test_malformed_nested_objects_are_ignored(self, frame: dict) -> None:
+        handler = AsyncMock()
+        client = WeComClient(
+            bot_id="bot1",
+            secret="sec1",
+            ws_url="wss://fake",
+            on_message=handler,
+        )
+
+        await client._handle_message(json.dumps(frame))
+
+        handler.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handler_error_does_not_abort_receive_loop(self) -> None:
+        fake_ws = FakeWS(["first", "second"])
+
+        class FakeConnection:
+            async def __aenter__(self):
+                return fake_ws
+
+            async def __aexit__(self, *args):
+                return None
+
+        class FakeSession:
+            closed = False
+
+            def ws_connect(self, url, proxy=None):
+                return FakeConnection()
+
+        client = WeComClient(bot_id="bot1", secret="sec1", ws_url="wss://fake")
+        client._session = FakeSession()  # type: ignore[assignment]
+        client._handle_message = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[ValueError("malformed"), None]
+        )
+        client._ping_loop = AsyncMock()  # type: ignore[method-assign]
+
+        await client._connect_and_serve()
+
+        assert client._handle_message.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_non_object_frame_warning_omits_payload(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A dropped non-dict frame logs only its type, never the payload content."""
+        handler = AsyncMock()
+        client = WeComClient(
+            bot_id="bot1",
+            secret="sec1",
+            ws_url="wss://fake",
+            on_message=handler,
+        )
+
+        secret = "sk-live-DEADBEEF-super-secret-scalar-payload"
+        with caplog.at_level(logging.WARNING):
+            await client._handle_message(json.dumps(secret))
+
+        handler.assert_not_awaited()
+        # The scalar payload (potentially a secret) must never reach the
+        # warning log; only safe metadata (the Python type) is recorded.
+        assert secret not in caplog.text
+        assert "type=str" in caplog.text
