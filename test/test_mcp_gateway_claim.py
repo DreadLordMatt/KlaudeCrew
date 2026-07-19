@@ -248,6 +248,186 @@ async def test_claim_retargets_live_connection(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
+async def test_claim_matches_host_pid_for_pidns_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stub inside a PID-namespace sandbox self-reports NAMESPACE-local
+    ancestor pids while the gateway's claim frame carries the runtime's HOST
+    pid — without host-chain indexing the claim silently updates zero
+    connections and the stub stays identity-less for life (orphan subagents,
+    lost completion events — Mesh ticket 8abcd9fe). gatewayd must index the
+    connection under the HOST ancestor chain resolved from the SO_PEERCRED
+    peer pid so the claim still matches."""
+    fb, sel = _patch_env(monkeypatch)
+    ns_pids = [43, 2]  # namespace-local: can never equal a host pid
+    host_chain = [9100, 9050, 9020]  # stub → kiro-cli → sandbox launcher (host)
+    monkeypatch.setattr(socketsec, "get_peer_pid", lambda _w: host_chain[0])
+    monkeypatch.setattr(
+        gw, "_resolve_peer_identity", lambda _pid: ("", list(host_chain))
+    )
+
+    reader = _QueueReader()
+    reader.feed(_register("", ancestor_pids=ns_pids))
+    reader.feed(_CALL)
+    task = asyncio.create_task(_handle(reader, _RecordingWriter()))
+    await asyncio.wait_for(fb.forwarded.wait(), timeout=5.0)
+    assert fb.callers == [None]
+    # The connection must be claim-indexed under BOTH pid sets.
+    for pid in host_chain + ns_pids:
+        assert pid in gw._CONN_INDEX, f"pid {pid} missing from claim index"
+
+    # The gateway claims with the HOST launcher pid (top of the host chain).
+    ack = gw._apply_claim(_claim(host_chain[-1], "dashboard:chat-NS-1"))
+    assert ack["type"] == "claimed" and ack["updated"] == 1
+
+    fb.forwarded.clear()
+    reader.feed(_CALL)
+    await asyncio.wait_for(fb.forwarded.wait(), timeout=5.0)
+    reader.feed({"type": "unregister"})
+    await task
+
+    assert len(fb.callers) == 2
+    assert fb.callers[1] is not None
+    assert fb.callers[1].session_key == "dashboard:chat-NS-1"
+    # Teardown removes every indexed pid (host + namespace alike).
+    for pid in host_chain + ns_pids:
+        assert pid not in gw._CONN_INDEX
+
+
+@pytest.mark.asyncio
+async def test_register_resolves_identity_from_peer_ancestry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the session_pid file already exists at register time (claim
+    happened first), the register path adopts the peer-resolved identity and
+    the very first forwarded call carries it."""
+    fb, sel = _patch_env(monkeypatch)
+    monkeypatch.setattr(socketsec, "get_peer_pid", lambda _w: 9100)
+    monkeypatch.setattr(
+        gw, "_resolve_peer_identity",
+        lambda _pid: ("dashboard:chat-PRE-1", [9100, 9020]),
+    )
+
+    reader = _QueueReader()
+    reader.feed(_register("", ancestor_pids=[43, 2]))
+    reader.feed(_CALL)
+    task = asyncio.create_task(_handle(reader, _RecordingWriter()))
+    await asyncio.wait_for(fb.forwarded.wait(), timeout=5.0)
+    reader.feed({"type": "unregister"})
+    await task
+
+    assert fb.callers and fb.callers[0] is not None
+    assert fb.callers[0].session_key == "dashboard:chat-PRE-1"
+    assert fb.callers[0].session_type == "peer-resolved"
+
+
+@pytest.mark.asyncio
+async def test_no_host_indexing_when_peer_pid_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deny-by-default: without a kernel-attested peer pid (SO_PEERCRED
+    structurally unavailable — the connection proceeds on the owner-only
+    filesystem gate), the host ancestry is never resolved nor indexed — a
+    claim naming a host pid updates nothing. Non-MATCH uids never reach this
+    code: they are rejected at connection level before Register."""
+    fb, sel = _patch_env(monkeypatch)
+    monkeypatch.setattr(socketsec, "PEERCRED_SUPPORTED", False)
+    monkeypatch.setattr(socketsec, "socket_owner_only", lambda _p: True)
+    monkeypatch.setattr(socketsec, "get_peer_pid", lambda _w: None)
+    resolve_calls: list[int] = []
+
+    def _spy_resolve(pid: int) -> tuple[str, list[int]]:
+        resolve_calls.append(pid)
+        return "", [9100, 9020]
+
+    monkeypatch.setattr(gw, "_resolve_peer_identity", _spy_resolve)
+
+    reader = _QueueReader()
+    reader.feed(_register("", ancestor_pids=[43, 2]))
+    reader.feed(_CALL)
+    task = asyncio.create_task(_handle(reader, _RecordingWriter()))
+    await asyncio.wait_for(fb.forwarded.wait(), timeout=5.0)
+
+    assert resolve_calls == []  # never resolved without a kernel-attested pid
+    assert 9100 not in gw._CONN_INDEX and 9020 not in gw._CONN_INDEX
+    ack = gw._apply_claim(_claim(9020, "dashboard:chat-NS-2"))
+    assert ack["updated"] == 0
+
+    reader.feed({"type": "unregister"})
+    await task
+
+
+def test_resolve_peer_identity_returns_key_and_full_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One walk yields the session key AND the complete host ancestor chain
+    (walk continues past the key match so claims at any level hit)."""
+    session_key = "dashboard:chat-7-xyz"
+    (tmp_path / "session_pid_50.txt").write_text(session_key, encoding="utf-8")
+
+    def mock_parent_pid(pid: int) -> int:
+        # stub(100) → kiro-cli(50, has file) → launcher(20) → init
+        return {100: 50, 50: 20, 20: 1}.get(pid, 0)
+
+    monkeypatch.setattr(gw, "_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(gw, "_ppid_fn", mock_parent_pid)
+    key, chain = gw._resolve_peer_identity(100)
+    assert key == session_key
+    assert chain == [100, 50, 20]
+
+
+def test_resolve_peer_identity_no_file_still_returns_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Register-before-claim ordering: no session_pid file exists yet, but
+    the host chain must still come back so the connection gets claim-indexed."""
+    def mock_parent_pid(pid: int) -> int:
+        return {300: 250, 250: 240, 240: 1}.get(pid, 0)
+
+    monkeypatch.setattr(gw, "_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(gw, "_ppid_fn", mock_parent_pid)
+    key, chain = gw._resolve_peer_identity(300)
+    assert key == ""
+    assert chain == [300, 250, 240]
+
+
+def test_resolve_peer_identity_config_dir_error_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """config_dir() raising degrades to ("", []) — no partial state."""
+    def _boom() -> Path:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(gw, "_config_dir", _boom)
+    assert gw._resolve_peer_identity(999) == ("", [])
+
+
+def test_claim_zero_connections_warns_and_audits(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A claim naming a pid with no indexed connection must leave a loud
+    trail (WARN + SEL noop event + distinct ``claim-noop`` ack) instead of a
+    silent {"updated": 0} — the silence is what hid the orphan-subagent bug
+    for three days."""
+    sel_calls: list[dict[str, Any]] = []
+
+    class _FakeSEL:
+        def log_api_access(self, **kwargs: Any) -> None:
+            sel_calls.append(kwargs)
+
+    monkeypatch.setattr(gw, "SecurityEventLog", _FakeSEL)
+    gw._CONN_INDEX.clear()
+    with caplog.at_level("WARNING", logger="kiro_crew.mcp_gateway.gatewayd"):
+        ack = gw._apply_claim(_claim(777777, "dashboard:chat-GHOST"))
+    assert ack == {"type": "claim-noop", "updated": 0, "connections": 0}
+    assert any("ZERO connections" in r.message for r in caplog.records)
+    noop = [
+        e for e in sel_calls
+        if e.get("operation") == "mcp-gateway.caller-claim"
+        and e.get("outcome") == "noop"
+    ]
+    assert len(noop) == 1
+
+
+@pytest.mark.asyncio
 async def test_claim_replaces_existing_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     """Re-claim: unlike the stub recaller (deny-by-default), a gateway claim
     REPLACES an existing identity so a re-claimed pool runtime is never stale."""
@@ -316,7 +496,7 @@ async def test_claim_first_frame_connection_acked(monkeypatch: pytest.MonkeyPatc
     reader = _QueueReader()
     reader.feed(_claim(_PID, "dashboard:chat-CP-9"))
     await _handle(reader, writer)
-    assert writer.frames and writer.frames[0]["type"] == "claimed"
+    assert writer.frames and writer.frames[0]["type"] == "claim-noop"
     assert writer.frames[0]["updated"] == 0  # nothing registered under _PID
 
 

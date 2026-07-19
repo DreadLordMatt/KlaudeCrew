@@ -219,16 +219,28 @@ class CallerContext:
                 # Mirrors mcp_core._resolve_session_key; a single-parent check
                 # silently loses caller identity in deep process trees.
                 cfg_dir = config_dir()
-                pid = os.getppid()
-                seen: set[int] = set()
-                while pid > 1 and pid not in seen:
-                    seen.add(pid)
-                    pid_file = cfg_dir / f"session_pid_{pid}.txt"
+                # Sandbox launcher exports its own HOST pid — the exact pid
+                # the gateway keys session_pid files by. Checking it directly
+                # works even when this process's /proc view of pids diverges
+                # from the host's (PID-namespace sandboxing), where the
+                # ancestor walk below can never match.
+                host_pid = os.environ.get("KIROCREW_HOST_PID", "")
+                if host_pid.isdigit():
+                    pid_file = cfg_dir / f"session_pid_{host_pid}.txt"
                     if pid_file.exists():
                         sk = pid_file.read_text(encoding="utf-8").strip()
                         source = "pidfile"
-                        break
-                    pid = _parent_pid(pid)
+                if not sk:
+                    pid = os.getppid()
+                    seen: set[int] = set()
+                    while pid > 1 and pid not in seen:
+                        seen.add(pid)
+                        pid_file = cfg_dir / f"session_pid_{pid}.txt"
+                        if pid_file.exists():
+                            sk = pid_file.read_text(encoding="utf-8").strip()
+                            source = "pidfile"
+                            break
+                        pid = _parent_pid(pid)
             except Exception:
                 pass
         result = cls(session_key=sk, session_type=source, from_gateway=False)

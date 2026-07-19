@@ -162,6 +162,10 @@ def topo(tmp_path: Path) -> ProcessTopology:
 def _wire_common(monkeypatch: pytest.MonkeyPatch, topo: ProcessTopology, view: str) -> None:
     """Environment every resolver test shares: no env key, patched getppid."""
     monkeypatch.delenv("KIROCREW_SESSION_KEY", raising=False)
+    # A leaked KIROCREW_HOST_PID (e.g. when the test itself runs inside a
+    # sandbox whose launcher exports it) would short-circuit the /proc walk
+    # under test and flip the strict pidns xfails to XPASS.
+    monkeypatch.delenv("KIROCREW_HOST_PID", raising=False)
     monkeypatch.setattr(
         "os.getppid", lambda: topo.observed_ppid(MCP_SERVER, view)
     )
@@ -295,6 +299,68 @@ def test_stub_ancestor_chain_reaches_session_host(topo, monkeypatch, view) -> No
 
 
 # ---------------------------------------------------------------------------
+# Resolution path 5 (CR-290347380): KIROCREW_HOST_PID env shortcut.
+# The sandbox launcher exports its own HOST pid before any fork/namespace
+# work, so every resolver can look the session_pid file up DIRECTLY —
+# this is the namespace-aware path the pidns xfails above point at.
+# ---------------------------------------------------------------------------
+
+#: Unlike VIEWS, no xfail: the env shortcut must resolve under BOTH views.
+VIEWS_ALL_PASS = ["host", "pidns"]
+
+
+@pytest.mark.parametrize("view", VIEWS_ALL_PASS)
+def test_from_env_host_pid_env_resolves_in_any_view(topo, monkeypatch, view) -> None:
+    """KIROCREW_HOST_PID resolution must succeed under BOTH pid views — it
+    bypasses the /proc walk entirely, which is its whole point."""
+    from kiro_crew import mcp_caller
+
+    _wire_common(monkeypatch, topo, view)
+    monkeypatch.setattr(mcp_caller, "_parent_pid", topo.parent_lookup(view))
+    monkeypatch.setattr(
+        "kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir
+    )
+    # The launcher (session host) exported its HOST pid before unshare.
+    monkeypatch.setenv("KIROCREW_HOST_PID", str(SESSION_HOST))
+
+    ctx = mcp_caller.CallerContext.from_env()
+    assert ctx.session_key == SESSION_KEY
+    assert ctx.session_type == "pidfile"
+
+
+@pytest.mark.parametrize("view", VIEWS_ALL_PASS)
+def test_mcp_core_host_pid_env_resolves_in_any_view(topo, monkeypatch, view) -> None:
+    from kiro_crew import mcp_core
+
+    _wire_common(monkeypatch, topo, view)
+    monkeypatch.setattr(mcp_core, "_get_ppid", topo.parent_lookup(view))
+    monkeypatch.setattr(mcp_core, "config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setenv("KIROCREW_HOST_PID", str(SESSION_HOST))
+
+    assert mcp_core._resolve_session_key() == SESSION_KEY
+
+
+# ---------------------------------------------------------------------------
+# Resolution path 6 (CR-290347380): gatewayd server-side peer-identity walk.
+# Runs in gatewayd's OWN pid namespace (host pids via SO_PEERCRED), so it is
+# immune to the client's view by construction — the "view" axis does not
+# apply; what matters is that a host-pid walk from the peer resolves the key
+# and returns the full host chain for claim indexing.
+# ---------------------------------------------------------------------------
+
+
+def test_gatewayd_peer_identity_resolves_via_host_walk(topo, monkeypatch) -> None:
+    from kiro_crew.mcp_gateway import gatewayd as gw
+
+    monkeypatch.setattr(gw, "_config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr(gw, "_ppid_fn", topo.parent_lookup("host"))
+
+    key, chain = gw._resolve_peer_identity(MCP_SERVER)
+    assert key == SESSION_KEY
+    assert chain == [MCP_SERVER, KIRO_CLI, SESSION_HOST, GATEWAY]
+
+
+# ---------------------------------------------------------------------------
 # Call-site registry guard
 # ---------------------------------------------------------------------------
 # Every file referencing the session_pid_<pid>.txt contract must be listed
@@ -317,6 +383,17 @@ _REGISTERED_CALL_SITES: dict[str, str] = {
         "_resolve_excluded_tools — assumes HOST pids"
     ),
     "mcp_gateway/stub.py": "reader via CallerContext.from_env; register-time caller block — assumes HOST pids",
+    "mcp_gateway/gatewayd.py": (
+        "reader: SERVER-side /proc ancestry walk from the SO_PEERCRED peer pid "
+        "(_resolve_peer_identity) — runs in gatewayd's own (host) pid namespace, "
+        "so it is immune to client-side namespace divergence; also indexes the "
+        "host ancestor chain for claim-push matching"
+    ),
+    "sandbox.py": (
+        "writer-adjacent: launcher exports KIROCREW_HOST_PID (its own HOST pid — "
+        "the exact pid the gateway keys the file by) before fork/namespace work, "
+        "so in-namespace readers can look the file up directly without a /proc walk"
+    ),
     "mcp_gateway/claim.py": "docstring reference to the contract (no code reads)",
     "session_pid.py": "stale-file cleanup: globs session_pid_*.txt for dead processes",
 }

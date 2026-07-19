@@ -1671,6 +1671,15 @@ def _resolve_session_key() -> str:
         return sk
     try:
         cfg_dir = config_dir()
+        # Sandbox launcher exports its own HOST pid (the pid the gateway keys
+        # session_pid files by) — direct lookup works even when this
+        # process's pid view diverges from the host's (PID-namespace
+        # sandboxing), where the ancestor walk below can never match.
+        host_pid = os.environ.get("KIROCREW_HOST_PID", "")
+        if host_pid.isdigit():
+            pid_file = cfg_dir / f"session_pid_{host_pid}.txt"
+            if pid_file.exists():
+                return pid_file.read_text(encoding="utf-8").strip()
         pid = os.getppid()
         seen: set[int] = set()
         while pid > 1 and pid not in seen:
@@ -2346,10 +2355,31 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             agent_names.append(a)
 
         spawn_lines: list[str] = []
-        if agent_ids:
+        if not parent_session and agent_ids:
+            # Orphan alert: without a parent session key the subagents cannot
+            # deliver completion events back to this conversation and will
+            # not appear in the Subagents panel for this session. This has
+            # historically failed silently (Mesh ticket 8abcd9fe) — say it
+            # loudly so the agent/user can fall back to spawn_list +
+            # result.txt polling instead of waiting forever.
             spawn_lines.append(
-                f"Spawned {len(agent_ids)} subagent(s). Results will arrive as completion events:"
+                "⚠ parent_session UNRESOLVED — these subagents are orphaned: "
+                "completion events will NOT arrive in this conversation. "
+                "Poll spawn_list and read ~/.kirocrew/subagents/<id>/result.txt "
+                "instead. (Identity plumbing issue — check KIROCREW_HOST_PID / "
+                "session_pid / claim-push.)"
             )
+        if agent_ids:
+            if parent_session:
+                spawn_lines.append(
+                    f"Spawned {len(agent_ids)} subagent(s). Results will arrive as completion events:"
+                )
+            else:
+                # Orphaned (warning above): completion events cannot be
+                # delivered — do not promise them in the same breath.
+                spawn_lines.append(
+                    f"Spawned {len(agent_ids)} subagent(s). Monitor results via polling:"
+                )
             for aid, a, t in zip(agent_ids, agent_names, task_list):
                 label = f"{aid} ({a})" if a else aid
                 spawn_lines.append(f"  {label}: {t[:80]}")
@@ -2358,11 +2388,24 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             for e in errors:
                 spawn_lines.append(f"  - {e}")
         if agent_ids:
-            spawn_lines.append(
-                "\nWait for [Subagent completion event] messages before responding to the user."
-            )
+            if parent_session:
+                spawn_lines.append(
+                    "\nWait for [Subagent completion event] messages before responding to the user."
+                )
+            else:
+                spawn_lines.append(
+                    "\nDo NOT wait for completion events — poll spawn_list and read "
+                    "result.txt files instead."
+                )
         else:
-            spawn_lines.append("All tasks queued — results will arrive as completion events.")
+            if parent_session:
+                spawn_lines.append("All tasks queued — results will arrive as completion events.")
+            else:
+                spawn_lines.append(
+                    "All tasks queued — parent_session UNRESOLVED, so completion "
+                    "events will NOT arrive: poll spawn_list and read "
+                    "~/.kirocrew/subagents/<id>/result.txt instead."
+                )
         return "\n".join(spawn_lines)
 
     if name == "spawn_sub_agents":

@@ -351,6 +351,88 @@ class TestLauncherStdlibShadowing:
             )
 
 
+class TestSignalBroadcastGuard:
+    """seccomp kill(-1) broadcast denial + KIROCREW_HOST_PID export.
+
+    Redo of the reverted PID-namespace isolation (24c320f6 → 14fb9442): the
+    broadcast accident is contained by a static seccomp arg filter instead of
+    a namespace, so the subtree's view of pids — and every host-PID-coupled
+    mechanism (session identity, claim-push, systemd) — stays intact.
+    """
+
+    def test_launcher_script_contains_kill_filter(self):
+        """Static: the generated launcher carries the kill-broadcast filter
+        (arg-inspection block) and per-arch kill syscall numbers."""
+        script = _build_launcher_script("standard")
+        assert "_KILL_NR = 62" in script  # x86_64 kill
+        assert "_KILL_NR = 129" in script  # aarch64 kill
+        # arg-inspection: args[0] LOW word only, at seccomp_data offset 16.
+        # The high word (offset 20) must NOT be matched: pid_t is a 32-bit
+        # int and the x86-64 ABI leaves the upper register half undefined
+        # (glibc zero-extends, so a high==0xFFFFFFFF check never fires).
+        assert "0, 0, 16))" in script
+        assert "0, 0, 20))" not in script
+        assert "0xFFFFFFFF" in script  # 32-bit pid -1 comparison
+
+    def test_launcher_script_exports_host_pid(self):
+        """Static: launcher exports KIROCREW_HOST_PID before fork so the
+        whole subtree can resolve session_pid files by the recorded pid."""
+        script = _build_launcher_script("standard")
+        assert 'os.environ["KIROCREW_HOST_PID"] = str(os.getpid())' in script
+        # Must appear in main() BEFORE the fork so the child inherits it.
+        assert script.index("KIROCREW_HOST_PID") < script.index("os.fork()")
+
+    def test_kill_broadcast_denied_targeted_allowed_e2e(self, tmp_path):
+        """Live e2e through the real launcher: inside the sandbox,
+        ``os.kill(-1, 0)`` must fail with EPERM (seccomp) while a targeted
+        ``os.kill(own_pid, 0)`` succeeds and KIROCREW_HOST_PID is present.
+
+        Safe by construction: signal 0 is a pure permission/existence probe —
+        no signal is ever delivered, even if the filter were absent.
+        """
+        if sys.platform != "linux":
+            pytest.skip("sandbox launcher is Linux-only")
+        import kiro_crew.sandbox as _sb
+
+        if not _sb._probe_unshare():
+            # Probes CLONE_NEWUSER|CLONE_NEWNS — fails closed on CI hosts
+            # (e.g. GitHub Actions) where the mount namespace is blocked.
+            pytest.skip("user+mount namespaces unavailable on this host")
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            "import os, sys\n"
+            "try:\n"
+            "    os.kill(-1, 0)\n"
+            "    print('BROADCAST_ALLOWED')\n"
+            "except PermissionError:\n"
+            "    print('BROADCAST_EPERM')\n"
+            "except OSError as e:\n"
+            "    print(f'BROADCAST_OSERROR_{e.errno}')\n"
+            "os.kill(os.getpid(), 0)\n"
+            "print('TARGETED_OK')\n"
+            "print('HOSTPID_' + ('SET' if os.environ.get('KIROCREW_HOST_PID', '').isdigit() else 'MISSING'))\n"
+        )
+        launcher = tmp_path / "launcher.py"
+        launcher.write_text(_build_launcher_script("standard"))
+        result = subprocess.run(
+            [sys.executable, str(launcher), sys.executable, str(probe)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if (
+            "unshare(NEWUSER) failed" in result.stderr
+            or "unshare(NEWNS) failed" in result.stderr
+        ):
+            pytest.skip("namespaces unavailable on this host")
+        assert result.returncode == 0, result.stderr
+        assert "BROADCAST_EPERM" in result.stdout, (
+            f"kill(-1, 0) not denied: stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "TARGETED_OK" in result.stdout, result.stdout
+        assert "HOSTPID_SET" in result.stdout, result.stdout
+
+
 class TestSandboxExecArgv:
     @patch.dict(os.environ, {"AWS_SECRET_ACCESS_KEY": "fake", "SSH_AUTH_SOCK": "/tmp/ssh"})
     def test_includes_env_unset_flags(self):

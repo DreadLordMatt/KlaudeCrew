@@ -154,15 +154,25 @@ def _resolve_excluded_tools() -> set[str]:
                 return 0
 
             cfg_dir = config_dir()
-            pid = os.getppid()
-            seen: set[int] = set()
-            while pid > 1 and pid not in seen:
-                seen.add(pid)
-                pid_file = cfg_dir / f"session_pid_{pid}.txt"
+            # Sandbox launcher exports its own HOST pid (the pid the gateway
+            # keys session_pid files by) — direct lookup works even when this
+            # process's pid view diverges from the host's (PID-namespace
+            # sandboxing), where the ancestor walk below can never match.
+            host_pid = os.environ.get("KIROCREW_HOST_PID", "")
+            if host_pid.isdigit():
+                pid_file = cfg_dir / f"session_pid_{host_pid}.txt"
                 if pid_file.exists():
                     session_key = pid_file.read_text(encoding="utf-8").strip()
-                    break
-                pid = _get_ppid(pid)
+            if not session_key:
+                pid = os.getppid()
+                seen: set[int] = set()
+                while pid > 1 and pid not in seen:
+                    seen.add(pid)
+                    pid_file = cfg_dir / f"session_pid_{pid}.txt"
+                    if pid_file.exists():
+                        session_key = pid_file.read_text(encoding="utf-8").strip()
+                        break
+                    pid = _get_ppid(pid)
 
         if not session_key:
             # No session key resolvable (startup race — kiro-cli hasn't

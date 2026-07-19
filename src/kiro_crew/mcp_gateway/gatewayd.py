@@ -44,8 +44,10 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from kiro_crew import platform_compat
-from kiro_crew.executors import maintenance_executor
+from kiro_crew.config.loader import config_dir as _config_dir
+from kiro_crew.executors import maintenance_executor, subprocess_executor
 from kiro_crew.mcp_caller import CallerContext
+from kiro_crew.mcp_caller import _parent_pid as _ppid_fn
 from kiro_crew.mcp_gateway import socketsec
 from kiro_crew.mcp_gateway.backend import Backend, BackendGone, spawn_backend
 from kiro_crew.mcp_gateway.breaker import CircuitBreaker
@@ -986,6 +988,90 @@ def _audit_caller_claimed(
         logger.debug("SEL audit emit for gateway caller-claim failed", exc_info=True)
 
 
+def _resolve_peer_identity(peer_pid: int) -> tuple[str, list[int]]:
+    """Walk the peer's real-PID ancestry (server-side): session key + host chain.
+
+    Runs in gatewayd's own PID namespace (real pids), so it works regardless
+    of how the stub sees the world. A single /proc walk returns both:
+
+    * the session_key from the first ancestor with a ``session_pid_<pid>.txt``
+      file (``""`` when none matches — normal at register time for a runtime
+      that has not been claimed yet), and
+    * the full HOST ancestor PID chain (peer first). The register handler
+      indexes the stub connection under this chain so a later ``claim`` frame
+      — which always carries the runtime's HOST pid — matches even when the
+      stub's self-reported ``ancestor_pids`` are namespace-local (sandbox
+      PID-namespace topology). Without the host chain in ``_CONN_INDEX`` the
+      claim-push silently updates zero connections and the stub stays
+      identity-less for life: orphan subagents with empty ``parent_session``
+      and undeliverable completion events (Mesh ticket 8abcd9fe).
+
+    The walk continues past a session-key match so the chain is complete for
+    claim matching at any ancestry level.
+    """
+    session_key = ""
+    chain: list[int] = []
+    try:
+        cfg_dir = _config_dir()
+    except Exception:
+        return "", []
+
+    pid = peer_pid
+    seen: set[int] = set()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        chain.append(pid)
+        if not session_key:
+            pid_file = cfg_dir / f"session_pid_{pid}.txt"
+            try:
+                if pid_file.exists():
+                    session_key = pid_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                pass
+        try:
+            pid = _ppid_fn(pid)
+        except (OSError, ValueError):
+            # Target exited mid-walk (/proc/<pid>/stat gone or malformed).
+            break
+    return session_key, chain
+
+
+def _audit_peer_identity_resolved(caller: str, peer_pid: int, stub_uuid: str) -> None:
+    """SEL audit: gatewayd granted a key-less stub an identity via the
+    SO_PEERCRED + /proc-ancestry mechanism. Granting identity server-side is
+    a permission decision — leave a trail. Wrapped defensively; audit failure
+    must never break the handshake."""
+    try:
+        SecurityEventLog().log_api_access(
+            caller=caller,
+            operation="mcp-gateway.peer-identity-resolved",
+            outcome="allowed",
+            source="gateway",
+            resources=f"peer_pid={peer_pid} stub_uuid={stub_uuid}",
+        )
+    except Exception:  # pragma: no cover — audit must never break the handler
+        logger.debug("SEL audit emit for peer identity resolution failed", exc_info=True)
+
+
+def _audit_peer_identity_denied(
+    reason: str, peer_pid: int | None, stub_uuid: str
+) -> None:
+    """SEL audit: a key-less peer whose credentials could not be positively
+    attested was refused server-side identity resolution (potential
+    unauthorized identity acquisition). Deny arm of
+    :func:`_audit_peer_identity_resolved`."""
+    try:
+        SecurityEventLog().log_api_access(
+            caller="unknown",
+            operation="mcp-gateway.peer-identity-denied",
+            outcome="denied",
+            source="gateway",
+            resources=f"peer_pid={peer_pid} stub_uuid={stub_uuid} reason={reason}",
+        )
+    except Exception:  # pragma: no cover — audit must never break the handler
+        logger.debug("SEL audit emit for peer identity denial failed", exc_info=True)
+
+
 def _apply_claim(frame: dict[str, Any]) -> dict[str, Any]:
     """Apply a ``claim`` frame to every indexed connection of the target PID.
 
@@ -1003,6 +1089,22 @@ def _apply_claim(frame: dict[str, Any]) -> dict[str, Any]:
         _audit_caller_claimed("", "", "pid-index", "denied", reason)
         return {"type": "claim-rejected", "reason": reason}
     conns = _CONN_INDEX.get(pid, set())
+    if not conns:
+        # A claim naming a pid with NO indexed connection is the exact silent
+        # failure that produced orphan subagents (host-pid claim vs
+        # namespace-pid index, Mesh ticket 8abcd9fe). It can also mean the
+        # runtime's stubs disconnected — either way it deserves a loud trail,
+        # not a silent {"updated": 0}.
+        logger.warning(
+            "claim matched ZERO connections: pid=%d session_key=%s — "
+            "stub identity will stay stale (possible pid-index mismatch)",
+            pid, updated_caller.session_key,
+        )
+        _audit_caller_claimed(
+            "", updated_caller.session_key, "pid-index", "noop",
+            f"claim pid={pid} matched no indexed connection",
+        )
+        return {"type": "claim-noop", "updated": 0, "connections": 0}
     updated = 0
     for conn in conns:
         old_key = conn.caller.session_key if conn.caller is not None else ""
@@ -1287,12 +1389,70 @@ async def _handle_connection(
 
     caller = _caller_from_register(register)
 
+    # Server-side peer identity: when the stub self-reports an empty
+    # session_key, resolve it from the peer's REAL pid (SO_PEERCRED) via a
+    # host-side /proc ancestry walk — and capture the host ancestor chain for
+    # claim indexing below. Deny-by-default: never grant an identity (nor
+    # index host pids) without the kernel positively attesting the peer uid.
+    resolved_session_key = ""
+    peer_host_pids: list[int] = []
+    if caller is None or not caller.session_key:
+        peer_pid = socketsec.get_peer_pid(writer)
+        peer_uid_ok = socketsec.check_peer_uid(writer, os.getuid())
+        if peer_pid is None or peer_uid_ok is not socketsec.PeerCredResult.MATCH:
+            _audit_peer_identity_denied(
+                reason=(
+                    "no peer pid (SO_PEERCRED unavailable)"
+                    if peer_pid is None
+                    else f"peer uid not positively verified ({peer_uid_ok.name})"
+                ),
+                peer_pid=peer_pid,
+                stub_uuid=stub_uuid,
+            )
+        else:
+            try:
+                # subprocess_executor: a /proc read can block indefinitely on
+                # a D-state target; isolate it from the default pools.
+                resolved_session_key, peer_host_pids = (
+                    await asyncio.get_running_loop().run_in_executor(
+                        subprocess_executor(), _resolve_peer_identity, peer_pid
+                    )
+                )
+            except Exception:  # graceful degradation: identity stays empty
+                logger.exception(
+                    "peer identity resolution failed for peer_pid=%d", peer_pid
+                )
+                resolved_session_key, peer_host_pids = "", []
+            if resolved_session_key:
+                caller = CallerContext(
+                    session_key=resolved_session_key,
+                    session_type="peer-resolved",
+                    principal_id=str(
+                        register.get("principal_id") or register.get("user_identity") or ""
+                    ),
+                    channel_id=str(register.get("channel_id") or ""),
+                    from_gateway=True,
+                )
+                _audit_peer_identity_resolved(resolved_session_key, peer_pid, stub_uuid)
+                logger.info(
+                    "peer-resolved session_key for stub %s via peer_pid=%d",
+                    stub_uuid, peer_pid,
+                )
+
     # Claim-push index: record the runtime process tree that owns this stub
     # so a ``claim`` frame naming ANY level of that tree re-targets every
     # connection of the claimed runtime. Best-effort — stubs that send no
     # usable PIDs simply keep the recaller-poll fallback.
+    #
+    # The stub's self-reported ``ancestor_pids`` can be namespace-local
+    # (sandbox PID-namespace topology) and then never match a claim frame's
+    # HOST pid, so merge in the host-side ancestor chain resolved from the
+    # SO_PEERCRED peer pid (empty when peer creds were not positively
+    # verified — deny-by-default preserved).
+    stub_pids = _register_pids(register)
+    indexed_pids = stub_pids + [p for p in peer_host_pids if p not in stub_pids]
     conn = _StubConn(
-        stub_uuid, _register_pids(register), pool_key.human_readable(), caller
+        stub_uuid, indexed_pids, pool_key.human_readable(), caller
     )
     _conn_index_add(conn)
 

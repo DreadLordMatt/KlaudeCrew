@@ -506,6 +506,14 @@ def main():
     if not argv:
         sys.exit("sandbox_launcher: no command given")
 
+    # Export this launcher's HOST pid before any fork/namespace work. The
+    # gateway records exactly this pid (its direct Popen child) when it
+    # writes ``session_pid_<pid>.txt`` on session claim, so in-sandbox
+    # identity resolvers can look the file up directly via this env var
+    # instead of walking /proc — which breaks whenever the subtree's view
+    # of pids diverges from the host's (PID-namespace sandboxing).
+    os.environ["KIROCREW_HOST_PID"] = str(os.getpid())
+
     # Two pipes for parent↔child synchronization
     c2p_r, c2p_w = os.pipe()  # child signals "unshare done"
     p2c_r, p2c_w = os.pipe()  # parent signals "maps written"
@@ -672,6 +680,19 @@ def main():
         # Deny mount/umount2/unshare/setns/pivot_root/link/linkat to prevent
         # the sandboxed process from undoing bind-mounts or creating hardlinks
         # to protected credential inodes (P472042777).
+        #
+        # Additionally deny kill(-1, sig) — the signal BROADCAST that reaches
+        # every same-uid process on the host (gateway, other sessions). This
+        # is the accident-containment redo of the reverted PID-namespace
+        # isolation (24c320f6): a static arg filter blocks the hand-slip /
+        # runaway-script broadcast without changing the subtree's view of
+        # pids, so session identity, claim-push, and systemd stay intact.
+        # Only ``kill`` needs arg inspection: tkill/tgkill/pidfd_send_signal
+        # are inherently targeted (no broadcast semantics). pid==0 and
+        # negative process-group targets stay ALLOWED on purpose — the spawn
+        # already setsid()s, so every reachable process group is inside the
+        # sandbox session, and denying killpg breaks legitimate tooling
+        # (timeout(1), shell job control, cleanup traps).
         if _libc.prctl:
             _PR_SET_SECCOMP = 22
             _SECCOMP_MODE_FILTER = 2
@@ -686,17 +707,20 @@ def main():
             _BPF_K = 0x00
             _BPF_RET = 0x06
             # Syscall numbers (x86_64): mount=165, umount2=166, unshare=272,
-            # setns=308, pivot_root=155, link=86, linkat=265
+            # setns=308, pivot_root=155, link=86, linkat=265, kill=62
             # aarch64: mount=40, umount2=39, unshare=97, setns=268,
-            # pivot_root=41, link=N/A(use linkat=37), linkat=37
+            # pivot_root=41, link=N/A(use linkat=37), linkat=37, kill=129
             import platform as _plat
             _machine = _plat.machine()
             if _machine == "x86_64":
                 _DENY_SYSCALLS = (165, 166, 272, 308, 155, 86, 265)
+                _KILL_NR = 62
             elif _machine == "aarch64":
                 _DENY_SYSCALLS = (40, 39, 97, 268, 41, 37)
+                _KILL_NR = 129
             else:
                 _DENY_SYSCALLS = ()  # unknown arch — skip seccomp
+                _KILL_NR = None
 
             if _DENY_SYSCALLS:
                 # Architecture constants for seccomp arch validation
@@ -705,8 +729,26 @@ def main():
                 _SECCOMP_RET_KILL = 0x00000000
                 _expected_arch = _AUDIT_ARCH_X86_64 if _machine == "x86_64" else _AUDIT_ARCH_AARCH64
 
-                # BPF program: validate arch, load syscall number, compare
-                # against deny list, return ERRNO(EPERM) on match, ALLOW otherwise.
+                # BPF program layout (indices relative to start):
+                #   0: LD arch
+                #   1: JEQ expected_arch ? skip 1 : fall through
+                #   2: RET KILL                (unexpected arch)
+                #   3: LD syscall nr
+                #   4..4+n-1: JEQ deny_i -> DENY
+                #   k   = 4+n: JEQ kill_nr ? fall into arg check : jump ALLOW
+                #   k+1: LD args[0] low 32 bits    (seccomp_data offset 16)
+                #   k+2: JEQ 0xFFFFFFFF ? jump DENY : fall through
+                #   ALLOW = k+3: RET ALLOW
+                #   DENY  = k+4: RET ERRNO|EPERM
+                #
+                # Only the LOW 32 bits of args[0] are inspected. pid_t is a
+                # 32-bit int: the kernel truncates the register to 32 bits, so
+                # low==0xFFFFFFFF is exactly "pid == -1" regardless of what the
+                # upper half holds. The upper half MUST NOT be matched — the
+                # x86-64 ABI leaves it undefined for int arguments, and glibc's
+                # ``movl`` zero-extends, so kill(-1) typically arrives as
+                # 0x00000000_FFFFFFFF (a high==0xFFFFFFFF check silently never
+                # fires, which is a filter bypass, not a compat issue).
                 _insns = []
                 # Load arch: BPF_LD | BPF_W | BPF_ABS, offset=4 (seccomp_data.arch)
                 _insns.append(_struct.pack("<HBBI", _BPF_LD | _BPF_W | _BPF_ABS, 0, 0, 4))
@@ -716,12 +758,20 @@ def main():
                 _insns.append(_struct.pack("<HBBI", _BPF_RET | _BPF_K, 0, 0, _SECCOMP_RET_KILL))
                 # Load syscall number: BPF_LD | BPF_W | BPF_ABS, offset=0
                 _insns.append(_struct.pack("<HBBI", _BPF_LD | _BPF_W | _BPF_ABS, 0, 0, 0))
-                # For each denied syscall: JEQ -> deny
+                # For each denied syscall: JEQ -> DENY (at index k+4)
                 _n_deny = len(_DENY_SYSCALLS)
                 for _i, _nr in enumerate(_DENY_SYSCALLS):
-                    _jt = _n_deny - _i  # jumps to the DENY RET
+                    _jt = (_n_deny - _i - 1) + 4  # jumps to the DENY RET at k+4
                     _insns.append(_struct.pack("<HBBI",
                         _BPF_JMP | _BPF_JEQ | _BPF_K, _jt, 0, _nr))
+                # k: nr == kill ? fall into arg check : jump to ALLOW (k+3)
+                _insns.append(_struct.pack("<HBBI",
+                    _BPF_JMP | _BPF_JEQ | _BPF_K, 0, 2, _KILL_NR))
+                # k+1: load args[0] low word (offset 16, little-endian layout)
+                _insns.append(_struct.pack("<HBBI", _BPF_LD | _BPF_W | _BPF_ABS, 0, 0, 16))
+                # k+2: low == 0xFFFFFFFF (pid -1) ? DENY (skip 1) : fall to ALLOW
+                _insns.append(_struct.pack("<HBBI",
+                    _BPF_JMP | _BPF_JEQ | _BPF_K, 1, 0, 0xFFFFFFFF))
                 # ALLOW: return SECCOMP_RET_ALLOW
                 _insns.append(_struct.pack("<HBBI", _BPF_RET | _BPF_K, 0, 0, _SECCOMP_RET_ALLOW))
                 # DENY: return SECCOMP_RET_ERRNO | EPERM
