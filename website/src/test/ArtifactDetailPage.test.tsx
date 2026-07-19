@@ -455,6 +455,35 @@ describe('ArtifactDetailPage', () => {
     expect(screen.getAllByText(/via dashboard/i).length).toBeGreaterThan(0)
   })
 
+  // ── Mesh-2752: comment lifecycle events in the activity timeline ──────
+  it('renders comment lifecycle events with snippet and reason', async () => {
+    vi.mocked(api).artifact = vi.fn().mockResolvedValue(mkArtifact({ kind: 'markdown' }))
+    vi.mocked(api).artifactVersions = vi
+      .fn()
+      .mockResolvedValue({ slug: 'cr-queue', versions: [1, 2] })
+    vi.mocked(api).artifactEvents = vi.fn().mockResolvedValue({
+      slug: 'cr-queue',
+      events: [
+        {
+          ts: '2026-07-13T05:00:00.000Z', type: 'comment', by: 'agent', version: 2,
+          metadata: { action: 'deleted', comment_snippet: 'delete this paragraph', reason: 'applied in v2: paragraph removed' },
+        },
+        {
+          ts: '2026-07-13T05:01:00.000Z', type: 'comment', by: 'agent', version: 2,
+          metadata: { action: 'reviewed', comment_snippet: 'reframe the intro' },
+        },
+      ],
+    })
+    renderRoute()
+    await waitFor(() => expect(screen.getByText('Comment removed')).toBeInTheDocument())
+    expect(screen.getByText('Comment marked for review')).toBeInTheDocument()
+    // Snippet + reason line survives the comment's deletion.
+    expect(screen.getByText(/delete this paragraph/)).toBeInTheDocument()
+    expect(screen.getByText(/applied in v2: paragraph removed/)).toBeInTheDocument()
+    // Comment events carry no version arrow (they don't bump versions).
+    expect(screen.queryByText(/→ v2/)).toBeNull()
+  })
+
   // ── nrb feedback Round 4: Tag editing ─────────────────────────────────
   it('renders the +tag button in the header so tags can be added', async () => {
     vi.mocked(api).artifact = vi.fn().mockResolvedValue(mkArtifact({ tags: ['ops'] }))
