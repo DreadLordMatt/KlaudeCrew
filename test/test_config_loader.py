@@ -2803,3 +2803,46 @@ class TestKnowledgePoolIdleTtl:
     def test_string_falls_back_to_default(self) -> None:
         cfg = _load_from_dict({"knowledge": {"pool_idle_ttl_secs": "60"}})
         assert cfg.knowledge.pool_idle_ttl_secs == 300
+
+
+class TestSaveRoundTripPreservesAllSections:
+    """to_dict() (which save() writes as the ENTIRE config.json) previously
+    omitted knowledge/heartbeat/snapshot_dir/watchdog, so any save silently
+    deleted those sections from disk. save() fires from many routine paths —
+    the theme PUT handler, the AIM auto-update toggle, and (worst) the one-shot
+    write-back migration inside load() itself when a config lacks an "agents"
+    map. So a user who hand-wrote e.g. {"knowledge": {"pool_idle_ttl_secs": 0}}
+    lost it the first time the gateway started."""
+
+    def test_to_dict_includes_previously_dropped_sections(self) -> None:
+        cfg = KiroCrewConfig()
+        td = cfg.to_dict()
+        for key in ("knowledge", "heartbeat", "snapshot_dir", "watchdog"):
+            assert key in td, f"to_dict() dropped {key} — save() would delete it"
+
+    def test_migration_save_preserves_hand_written_sections(self) -> None:
+        # The finding's exact repro: a config with no "agents" key triggers the
+        # write-back migration save() inside load(); the hand-written sections
+        # must survive it.
+        import json
+        import tempfile
+        import unittest.mock
+        from pathlib import Path
+
+        cfg_data = {
+            "knowledge": {"pool_idle_ttl_secs": 0},
+            "heartbeat": {"default_deliver": "dashboard"},
+            "snapshot_dir": "/tmp/snaps",
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(cfg_data, f)
+            tmp = Path(f.name)
+        try:
+            with unittest.mock.patch("kiro_crew.config.loader.config_path", return_value=tmp):
+                KiroCrewConfig.load()  # migration write-back save fires
+            after = json.loads(tmp.read_text())
+            assert after.get("knowledge", {}).get("pool_idle_ttl_secs") == 0
+            assert after.get("heartbeat", {}).get("default_deliver") == "dashboard"
+            assert after.get("snapshot_dir") == "/tmp/snaps"
+        finally:
+            tmp.unlink(missing_ok=True)
