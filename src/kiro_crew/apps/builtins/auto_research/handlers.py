@@ -365,6 +365,54 @@ def validate_campaign(config: dict) -> dict:
     }
 
 
+# --- Cycle finding discovery ---
+
+# The worker is *prompted* to write findings as `cycle_NNN.json` (NNN zero-padded
+# to 3 digits). But it's an LLM driving a file interface, so near-miss filenames
+# happen — especially when a dropped mid-cycle write forces an improvised recovery
+# turn (the agent re-derives the name from scratch and drifts on padding, the
+# `_`/`-` separator, or case). A strict `glob("cycle_*.json")` silently ignores
+# those files, so a campaign that IS producing findings reads as 0/stalled forever.
+# Tolerate the realistic deviations and sort by the captured cycle number (a plain
+# lexical sort also mis-orders unpadded names: `cycle_10` < `cycle_2`).
+_CYCLE_FILE_RE = re.compile(r"^cycle[_-]?(\d+)\.json$", re.IGNORECASE)
+
+
+def _cycle_index(path: Path) -> int:
+    """Cycle number parsed from a finding filename, or -1 if it doesn't match."""
+    m = _CYCLE_FILE_RE.match(path.name)
+    return int(m.group(1)) if m else -1
+
+
+def _cycle_finding_files(findings_dir: Path) -> list[Path]:
+    """All cycle-finding files in a dir, ordered by cycle number (oldest first).
+
+    Matches the canonical `cycle_NNN.json` plus tolerated near-misses
+    (`cycle_7.json`, `cycle-007.json`, `Cycle_007.JSON`). One file per logical
+    cycle: if multiple name variants parse to the same cycle number (e.g.
+    `cycle_001.json` + `cycle-1.json`), only the lexically-first name is kept so
+    duplicates can't inflate cycle counts or surface twice.
+
+    SECURITY: this only widens which files are *discovered*; it does not bypass
+    redaction. Every content-surfacing reader still routes each matched file
+    through `_redact_finding()` (credentials + exfiltration URLs, fail-closed) —
+    `get_findings()` for the dashboard and `_read_finding_file()` for the watchdog
+    SSE feed — so a near-miss-named finding is scrubbed exactly like a canonical
+    one before it reaches any external surface. (`check_stagnation()` reads only
+    the integer `new_findings_count` and surfaces nothing.)
+    """
+    if not findings_dir.exists():
+        return []
+    # Glob ALL entries (not "*.json") so the case-insensitive regex governs the
+    # match — Path.glob is case-sensitive, so "*.json" would miss "Cycle_002.JSON".
+    matched = [(p, _cycle_index(p)) for p in findings_dir.glob("*") if p.is_file()]
+    matched = [(p, i) for p, i in matched if i >= 0]
+    by_cycle: dict[int, Path] = {}
+    for p, i in sorted(matched, key=lambda t: (t[1], t[0].name)):
+        by_cycle.setdefault(i, p)
+    return [by_cycle[i] for i in sorted(by_cycle)]
+
+
 # --- Stagnation ---
 
 
@@ -375,7 +423,7 @@ def check_stagnation(campaign_id: str) -> bool:
     findings_dir = d / "findings"
     if not findings_dir.exists():
         return False
-    files = sorted(findings_dir.glob("cycle_*.json"))
+    files = _cycle_finding_files(findings_dir)
     if len(files) < 5:
         return False
     for f in files[-5:]:
@@ -442,7 +490,7 @@ def get_findings(campaign_id: str) -> list[dict]:
     if not findings_dir.exists():
         return []
     results = []
-    for f in sorted(findings_dir.glob("cycle_*.json")):
+    for f in _cycle_finding_files(findings_dir):
         try:
             results.append(_redact_finding(json.loads(f.read_text())))
         except (json.JSONDecodeError, OSError):
@@ -451,7 +499,8 @@ def get_findings(campaign_id: str) -> list[dict]:
 
 
 def _list_cycle_files(campaign_id: str) -> list[Path]:
-    """Return sorted cycle_*.json paths (newest last) WITHOUT reading them.
+    """Return cycle finding paths ordered by cycle number (newest last) WITHOUT
+    reading them.
 
     Used by the watchdog for a cheap O(1)-read count on every poll; the actual
     file is only parsed (via _read_finding_file) when the count advances.
@@ -460,7 +509,7 @@ def _list_cycle_files(campaign_id: str) -> list[Path]:
     findings_dir = (safe_dir / "findings") if safe_dir else None
     if not findings_dir or not findings_dir.exists():
         return []
-    return sorted(findings_dir.glob("cycle_*.json"))
+    return _cycle_finding_files(findings_dir)
 
 
 def _read_finding_file(path: Path) -> dict:

@@ -2000,6 +2000,11 @@ automatically. The Research Lab app drives you; the nudge names the campaign and
 4. Orient (compact): skim only the one-line `summary`/`key_insight` of existing
    `findings/cycle_*.json` and the `## Research State` section of `FINDINGS.md` —
    NOT the full findings. Note what's answered, what's weak, and which leads are open.
+   RECOVERY: if the dir looks emptier than the conversation implies (e.g. you
+   recall completing a cycle but no matching `cycle_*.json` is on disk), a prior
+   cycle's write was dropped mid-turn (connection loss / gateway restart). Re-derive
+   that lost finding from context and write it to disk THIS cycle under the correct
+   `cycle_NNN.json` name — do NOT invent a new naming scheme to "save" the work.
 5. Decide direction: choose the single highest-value next step toward the question —
    a sub-question, a follow-up a prior finding surfaced, or shoring up weak evidence.
    Steer toward closing the goal; don't just walk the list.
@@ -2007,11 +2012,15 @@ automatically. The Research Lab app drives you; the nudge names the campaign and
 7. Record: write `findings/cycle_NNN.json` where **NNN = the count of existing
    `findings/cycle_*.json` files, zero-padded to 3 digits** (first cycle ->
    `cycle_000.json`, next -> `cycle_001.json`, ...). NEVER reuse or overwrite an
-   existing cycle file. Keys: `cycle` (= NNN), `summary, sources_checked,
-   sources_empty, new_findings_count, evidence_strength, key_insight,
-   sub_question`; append the cycle to `FINDINGS.md` with citations;
-   then rewrite its short `## Research State` (open questions, leads, dead-ends,
-   weak spots) for the next cycle.
+   existing cycle file. The filename pattern is a HARD contract: the Research Lab
+   counts findings and detects completion by matching `cycle_NNN.json` ONLY. A
+   finding written under any other name (e.g. a descriptive `01-topic.md`) is
+   INVISIBLE — the campaign will show 0 findings and appear stalled even though
+   your work is on disk. When in doubt, match `cycle_NNN.json` exactly. Keys:
+   `cycle` (= NNN), `summary, sources_checked, sources_empty, new_findings_count,
+   evidence_strength, key_insight, sub_question`; append the cycle to `FINDINGS.md`
+   with citations; then rewrite its short `## Research State` (open questions,
+   leads, dead-ends, weak spots) for the next cycle.
 8. End the turn.
 
 ## Evidence strength

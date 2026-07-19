@@ -173,6 +173,103 @@ class TestStagnation:
             assert not check_stagnation("a1b2c3d4")
 
 
+class TestCycleFileMatching:
+    """Tolerant `cycle_NNN.json` discovery: near-miss filenames the LLM worker
+    produces (esp. during dropped-write recovery) must still be counted, and
+    ordering must be by cycle NUMBER not lexical filename."""
+
+    def _findings_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "a1b2c3d4" / "findings"
+        d.mkdir(parents=True)
+        return d
+
+    def test_canonical_names_matched(self, tmp_path: Path):
+        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+            d = self._findings_dir(tmp_path)
+            (d / "cycle_000.json").write_text(json.dumps({"cycle": 0, "new_findings_count": 1}))
+            (d / "cycle_001.json").write_text(json.dumps({"cycle": 1, "new_findings_count": 1}))
+            assert [f["cycle"] for f in get_findings("a1b2c3d4")] == [0, 1]
+
+    def test_near_miss_names_matched(self, tmp_path: Path):
+        # Unpadded, dash separator, and mixed case all map to a real cycle.
+        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+            d = self._findings_dir(tmp_path)
+            (d / "cycle_0.json").write_text(json.dumps({"cycle": 0, "new_findings_count": 1}))
+            (d / "cycle-1.json").write_text(json.dumps({"cycle": 1, "new_findings_count": 1}))
+            (d / "Cycle_002.JSON").write_text(json.dumps({"cycle": 2, "new_findings_count": 1}))
+            assert [f["cycle"] for f in get_findings("a1b2c3d4")] == [0, 1, 2]
+
+    def test_duplicate_name_variants_deduped_by_cycle_number(self, tmp_path: Path):
+        # Two name variants of the SAME logical cycle must count once, not twice
+        # (else total_cycles/cycle_offset inflate and a finding surfaces twice).
+        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+            d = self._findings_dir(tmp_path)
+            (d / "cycle_001.json").write_text(json.dumps({"cycle": 1, "new_findings_count": 1}))
+            (d / "cycle-1.json").write_text(json.dumps({"cycle": 1, "new_findings_count": 1}))
+            (d / "cycle_2.json").write_text(json.dumps({"cycle": 2, "new_findings_count": 1}))
+            findings = get_findings("a1b2c3d4")
+            assert [f["cycle"] for f in findings] == [1, 2]
+
+    def test_non_cycle_files_ignored(self, tmp_path: Path):
+        # A descriptive name (the 02dfaefd incident) and unrelated json are skipped.
+        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+            d = self._findings_dir(tmp_path)
+            (d / "cycle_000.json").write_text(json.dumps({"cycle": 0, "new_findings_count": 1}))
+            (d / "01-kiroom-vs-kirocrew.md").write_text("# not a cycle file")
+            (d / "notes.json").write_text(json.dumps({"cycle": 99}))
+            assert [f["cycle"] for f in get_findings("a1b2c3d4")] == [0]
+
+    def test_orders_by_cycle_number_not_lexically(self, tmp_path: Path):
+        # Regression: lexical sort puts cycle_10 before cycle_2; integer sort fixes it.
+        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+            d = self._findings_dir(tmp_path)
+            for n in (2, 10, 1):
+                (d / f"cycle_{n}.json").write_text(
+                    json.dumps({"cycle": n, "new_findings_count": 1})
+                )
+            assert [f["cycle"] for f in get_findings("a1b2c3d4")] == [1, 2, 10]
+
+    def test_stagnation_counts_near_miss_names(self, tmp_path: Path):
+        # 5 zero-finding cycles under near-miss names still trips stagnation.
+        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+            d = self._findings_dir(tmp_path)
+            for i in range(5):
+                (d / f"cycle-{i}.json").write_text(json.dumps({"new_findings_count": 0}))
+            assert check_stagnation("a1b2c3d4")
+
+    def test_near_miss_findings_are_redacted_before_surfacing(self, tmp_path: Path):
+        # SECURITY INVARIANT (AutoSDE f-d59673cd): broadening the matcher must NOT
+        # widen the exfiltration surface — a finding under a near-miss name is
+        # still LLM-authored content, so get_findings() must run the SAME
+        # credential + exfil-URL redaction on it as on a canonical-named file.
+        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+            d = self._findings_dir(tmp_path)
+            # 40+ char base64-ish blob in the query = exfil-shaped URL, which the
+            # URL leg redacts wholesale (domain included). A plain source URL is
+            # deliberately NOT redacted — findings legitimately cite sources.
+            exfil_url = (
+                "https://evil.example.com/exfil?blob="
+                "QUtJQUlPU0ZPRE5ON0VYQU1QTEVBQkNERUZHSElKS0w"
+            )
+            (d / "cycle-1.json").write_text(json.dumps({
+                "cycle": 1,
+                "new_findings_count": 1,
+                "summary": "key AKIAIOSFODNN7EXAMPLE leaked",
+                "sources_checked": [exfil_url],
+            }))
+            findings = get_findings("a1b2c3d4")
+            assert len(findings) == 1
+            blob = json.dumps(findings[0])
+            # Leg 1: the raw credential must not survive into the surfaced payload.
+            assert "AKIAIOSFODNN7EXAMPLE" not in blob
+            # Leg 2: the exfil-shaped URL must be redacted wholesale — path and
+            # payload gone, replaced by the redaction marker. (The marker itself
+            # names the domain by design, so assert on the URL body, not the domain.)
+            assert "exfil?blob=" not in blob
+            assert "QUtJQUlPU0ZPRE5ON0VYQU1QTEVBQkNERUZHSElKS0w" not in blob
+            assert "[REDACTED: suspicious URL" in blob
+
+
 class TestFileInterface:
     def test_write_status(self, tmp_path: Path):
         with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
