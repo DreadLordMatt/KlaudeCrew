@@ -282,7 +282,16 @@ def _apply_security_headers(
        on published artifacts fails with a permissions-policy violation
        (crbug.com/414348233).
     """
-    if path.startswith(_IMMUTABLE_PATH_PREFIXES):
+    # Immutable only on success — during cold-start a request to /assets/*
+    # may get 404 (static route not mounted) or 503 (SPA fallback answering).
+    # Caching that error with max-age=31536000 would be a permanent black
+    # screen, the same bug class sw.js fixes for the cache layer.
+    # 206 (range) and 304 (conditional) are also valid static-handler
+    # responses for hashed assets: a 304's headers merge into the stored
+    # cache entry, so answering it with no-store would degrade the cached
+    # immutable bundle.
+    status = getattr(resp, "status", None)
+    if status in (200, 206, 304) and path.startswith(_IMMUTABLE_PATH_PREFIXES):
         resp.headers.setdefault("Cache-Control", _IMMUTABLE_CACHE_CONTROL)
     else:
         resp.headers.setdefault("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")

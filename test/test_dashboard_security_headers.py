@@ -63,6 +63,31 @@ class TestApplySecurityHeaders:
         assert "Content-Security-Policy" in resp.headers
         assert "Permissions-Policy" in resp.headers
 
+    def test_non_200_under_assets_stays_no_store(self) -> None:
+        """During cold-start, /assets/* may return 404 or 503. Caching that
+        with immutable would be a permanent black screen. Only success
+        statuses get the immutable treatment."""
+        for status in (404, 503):
+            resp = web.Response(text="error", status=status)
+            _apply_security_headers(
+                resp, _make_app(), path="/assets/index-D9K94z8J.js"
+            )
+            assert "no-store" in resp.headers["Cache-Control"], f"status={status}"
+            assert "immutable" not in resp.headers["Cache-Control"], f"status={status}"
+
+    def test_conditional_and_range_under_assets_stay_immutable(self) -> None:
+        """aiohttp's static handler answers 304 (conditional) and 206 (range)
+        for hashed assets. A 304's headers merge into the browser's stored
+        cache entry — answering it with no-store would degrade the cached
+        immutable bundle back to uncacheable."""
+        for status in (206, 304):
+            resp = web.Response(status=status)
+            _apply_security_headers(
+                resp, _make_app(), path="/assets/index-D9K94z8J.js"
+            )
+            assert "immutable" in resp.headers["Cache-Control"], f"status={status}"
+            assert "no-store" not in resp.headers["Cache-Control"], f"status={status}"
+
     def test_shell_and_api_paths_stay_no_store(self) -> None:
         for path in ("/", "/index.html", "/api/health", "/apps/dev-fleet"):
             resp = _make_response()
