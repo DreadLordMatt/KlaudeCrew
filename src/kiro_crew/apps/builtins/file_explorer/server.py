@@ -112,7 +112,13 @@ SENSITIVE_DIRS = {
     ".pypirc",
     ".netrc",
     ".git-credentials",
-    ".kirocrew",
+}
+
+# .kirocrew subdirectories that are safe for the file explorer to access.
+# Everything else under .kirocrew/ is blocked (keys, tokens, DB, sessions).
+_KIROCREW_SAFE_SUBDIRS = {
+    "workspace", "uploads", "skills", "artifacts", "apps",
+    "app-sources", "workflows", "pods", "logs", "crons",
 }
 
 # Binary extensions short-circuited from /read content fetch
@@ -219,10 +225,42 @@ def _is_sensitive(p: Path) -> bool:
     Uses both the shared ``is_sensitive_path()`` helper AND the module-level
     ``SENSITIVE_DIRS`` set so the access-deny gate can never be narrower than
     the listing-hide filter.
+
+    For ``.kirocrew/``, a granular policy applies: only subdirectories listed in
+    ``_KIROCREW_SAFE_SUBDIRS`` are accessible; everything else (keys, tokens,
+    DB, sessions) is blocked.
     """
     if any(part in SENSITIVE_DIRS for part in p.parts):
         return True
+    # Granular .kirocrew policy: block unless the path descends into a safe subdir.
+    if ".kirocrew" in p.parts:
+        idx = list(p.parts).index(".kirocrew")
+        # .kirocrew/ root itself is blocked (deny-by-default). Listing endpoints
+        # use _kirocrew_safe_children() to enumerate only safe subdirs.
+        if idx + 1 >= len(p.parts):
+            return True
+        next_part = p.parts[idx + 1]
+        if next_part not in _KIROCREW_SAFE_SUBDIRS:
+            return True
     return is_sensitive_path(str(p))
+
+
+def _kirocrew_safe_children(kirocrew_dir: Path) -> list[dict]:
+    """Return entry metadata for only the safe subdirs of a .kirocrew/ directory.
+
+    This is the single enforcement point for deny-by-default .kirocrew listing:
+    callers get back only entries that are in ``_KIROCREW_SAFE_SUBDIRS``.
+    Sensitive file names (config.json, *.key, memory.db) are never exposed.
+    """
+    out: list[dict] = []
+    try:
+        children = sorted(kirocrew_dir.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+    except (OSError, PermissionError):
+        return out
+    for child in children:
+        if child.name in _KIROCREW_SAFE_SUBDIRS and child.is_dir():
+            out.append(_entry_meta(child))
+    return out
 
 
 def _sel_audit(operation: str, resources: str, outcome: str = "granted") -> None:
@@ -307,6 +345,11 @@ def _list_dir(p: Path, depth: int = 1, ignore: bool = True) -> tuple[list[dict],
                 )
                 break
             if child.name in SENSITIVE_DIRS:
+                continue
+            # Deny-by-default for .kirocrew root listings: show ONLY the safe
+            # subdirs. Even exposing the *names* of credential material
+            # (config.json, *.key, memory.db) is an information leak.
+            if d.name == ".kirocrew" and child.name not in _KIROCREW_SAFE_SUBDIRS:
                 continue
             if ignore and child.name in IGNORE_DIRS:
                 continue
@@ -478,6 +521,17 @@ def _search_rg(root: Path, query: str, include: str, exclude: str) -> list[dict]
     # Sensitive exclusions LAST — always enforced, cannot be overridden by user globs
     for sd in SENSITIVE_DIRS:
         cmd += ["--glob", f"!**/{sd}"]
+    # .kirocrew handling. NOTE: in ripgrep, the presence of ANY non-negated
+    # --glob turns the glob set into an allowlist (only matching files are
+    # searched), so we must use ONLY negated globs here or every file outside
+    # .kirocrew would be silently excluded from results.
+    #  - Root inside a .kirocrew safe subdir: no glob needed — the request-path
+    #    gate (_is_sensitive) already confirmed the subtree is safe.
+    #  - Root outside .kirocrew: exclude the whole .kirocrew tree
+    #    (deny-by-default; safe subdirs are reachable by searching them
+    #    directly, which takes the branch above).
+    if ".kirocrew" not in root.parts:
+        cmd += ["--glob", "!**/.kirocrew/**"]
     cmd += ["--", query, str(root)]
     try:
         wrapped_cmd, _ = wrap_argv(cmd)
@@ -540,6 +594,18 @@ def _search_python(root: Path, query: str, include: str, exclude: str) -> list[d
             break
         # In-place prune ignored dirs
         dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS and d not in SENSITIVE_DIRS]
+        # .kirocrew deny-by-default: match rg behavior.
+        # - If search root is OUTSIDE .kirocrew: skip entirely (rg blocks all).
+        # - If search root is INSIDE a safe subdir: allow safe subdirs only.
+        dp = Path(dirpath)
+        if dp.name == ".kirocrew":
+            if ".kirocrew" not in root.parts:
+                # Root is outside — deny-by-default, match rg behavior
+                dirnames[:] = []
+            else:
+                # Root is inside .kirocrew — allow safe subdirs only
+                dirnames[:] = [d for d in dirnames if d in _KIROCREW_SAFE_SUBDIRS]
+            filenames[:] = []  # never surface .kirocrew root files
         for fn in filenames:
             if len(out) >= MAX_SEARCH_RESULTS:
                 return out
@@ -550,7 +616,7 @@ def _search_python(root: Path, query: str, include: str, exclude: str) -> list[d
                 continue
             if fp.suffix.lower() in BINARY_EXTS:
                 continue
-            if is_sensitive_path(str(fp)):
+            if _is_sensitive(fp):
                 continue
             try:
                 raw = safe_read_file_bytes(str(fp))
@@ -661,6 +727,21 @@ class FileExplorerHandler(BaseHTTPRequestHandler):
         depth = int((qs.get("depth") or ["1"])[0])
         depth = max(1, min(depth, 4))
         ignore = (qs.get("ignore") or ["1"])[0] not in {"0", "false"}
+        # Special case: .kirocrew/ root — deny-by-default blocks it in _safe_path,
+        # but we expose only safe children via the dedicated helper.
+        # SECURITY: still enforce ALLOWED_ROOTS to prevent path traversal via
+        # crafted paths like /tmp/attacker/.kirocrew or symlinks.
+        expanded = _expand(raw)
+        if expanded.name == ".kirocrew" and expanded.exists() and expanded.is_dir():
+            # Resolve symlinks before checking ALLOWED_ROOTS — prevents a symlink
+            # named .kirocrew (inside allowed root) pointing outside.
+            resolved = expanded.resolve()
+            if not any(_is_within(resolved, root) for root in ALLOWED_ROOTS):
+                _sel_audit("tree_list", str(expanded), outcome="denied")
+                raise PathError(f"path not allowed: {expanded}", 403)
+            _sel_audit("tree_list", str(resolved))
+            entries = _kirocrew_safe_children(resolved)
+            return self._json(200, {"path": str(resolved), "entries": entries, "truncated": False})
         p = _safe_path(raw, must_exist=True)
         if not p.is_dir():
             raise PathError(f"not a directory: {p}", 400)
@@ -816,6 +897,10 @@ class FileExplorerHandler(BaseHTTPRequestHandler):
             if name in IGNORE_DIRS:
                 continue
             if name in SENSITIVE_DIRS:
+                continue
+            # Deny-by-default for .kirocrew root: only safe subdir names may
+            # appear in completions (see _list_dir for rationale).
+            if parent.name == ".kirocrew" and name not in _KIROCREW_SAFE_SUBDIRS:
                 continue
             if plower and not name.lower().startswith(plower):
                 continue

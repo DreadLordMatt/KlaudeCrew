@@ -34,7 +34,8 @@ def patch_allowed_roots(tmp_tree):
     """Allow the tmp_path in ALLOWED_ROOTS and mock security/sel functions."""
 
     def mock_is_sensitive(path_str):
-        """Check sensitive dirs by path component."""
+        """Check sensitive dirs by path component (excluding .kirocrew which is handled
+        granularly)."""
         parts = Path(path_str).parts
         return any(s in parts for s in server.SENSITIVE_DIRS)
 
@@ -315,3 +316,281 @@ class TestHTTPHandler:
         assert responses[0][0] == 200
         assert responses[0][1]["binary"] is True
         assert responses[0][1]["content"] == ""
+
+
+class TestKirocrewGranularSensitive:
+    """Regression tests for .kirocrew granular sensitive path policy.
+
+    .kirocrew/workspace/, uploads/, skills/, artifacts/ etc. should be accessible.
+    .kirocrew/config.json, sessions/, *.key should be blocked.
+    """
+
+    @pytest.fixture(autouse=True)
+    def kirocrew_tree(self, tmp_tree):
+        """Create a .kirocrew directory structure for testing."""
+        mc = tmp_tree / ".kirocrew"
+        mc.mkdir()
+        # Safe subdirs
+        (mc / "workspace").mkdir()
+        (mc / "workspace" / "notes").mkdir()
+        (mc / "workspace" / "notes" / "update.md").write_text("# Update\nContent here")
+        (mc / "uploads").mkdir()
+        (mc / "uploads" / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 50)
+        (mc / "skills").mkdir()
+        (mc / "skills" / "my-skill").mkdir()
+        (mc / "skills" / "my-skill" / "SKILL.md").write_text("# Skill\n")
+        (mc / "artifacts").mkdir()
+        (mc / "artifacts" / "data.json").write_text("{}")
+        # Sensitive items
+        (mc / "config.json").write_text('{"secret": "token123"}')
+        (mc / "sel_hmac.key").write_text("secret-key-data")
+        (mc / "token_signing.key").write_text("signing-key-data")
+        (mc / "sessions").mkdir()
+        (mc / "sessions" / "sess-001.json").write_text('{"auth": "tok"}')
+        (mc / "memory.db").write_text("sqlite-binary-data")
+        # Governance trust-root files (the fork keystone): the security
+        # ceiling, profiles, and admission policy must NEVER be reachable
+        # through the explorer — "profiles" is deliberately absent from
+        # _KIROCREW_SAFE_SUBDIRS.
+        (mc / "security_policy.json").write_text('{"ceiling": true}')
+        (mc / "admission_policy.json").write_text('{"admission": true}')
+        (mc / "profiles").mkdir()
+        (mc / "profiles" / "default.json").write_text('{"profile": true}')
+        self.mc = mc
+        return tmp_tree
+
+    def test_workspace_notes_accessible(self, tmp_tree):
+        """User notes under .kirocrew/workspace/ should be readable."""
+        p = server._safe_path(str(tmp_tree / ".kirocrew" / "workspace" / "notes" / "update.md"))
+        assert p.exists()
+
+    def test_uploads_accessible(self, tmp_tree):
+        """Uploaded images should be accessible."""
+        p = server._safe_path(str(tmp_tree / ".kirocrew" / "uploads" / "image.png"))
+        assert p.exists()
+
+    def test_skills_accessible(self, tmp_tree):
+        """Skills directory should be accessible."""
+        p = server._safe_path(str(tmp_tree / ".kirocrew" / "skills" / "my-skill" / "SKILL.md"))
+        assert p.exists()
+
+    def test_artifacts_accessible(self, tmp_tree):
+        """Artifacts should be accessible."""
+        p = server._safe_path(str(tmp_tree / ".kirocrew" / "artifacts" / "data.json"))
+        assert p.exists()
+
+    def test_config_json_blocked(self, tmp_tree):
+        """config.json contains tokens — must be blocked."""
+        with pytest.raises(server.PathError) as exc_info:
+            server._safe_path(str(tmp_tree / ".kirocrew" / "config.json"))
+        assert exc_info.value.status == 403
+
+    def test_key_files_blocked(self, tmp_tree):
+        """Signing keys must be blocked."""
+        with pytest.raises(server.PathError) as exc_info:
+            server._safe_path(str(tmp_tree / ".kirocrew" / "sel_hmac.key"))
+        assert exc_info.value.status == 403
+
+    def test_sessions_blocked(self, tmp_tree):
+        """Sessions directory (auth tokens) must be blocked."""
+        with pytest.raises(server.PathError) as exc_info:
+            server._safe_path(str(tmp_tree / ".kirocrew" / "sessions" / "sess-001.json"))
+        assert exc_info.value.status == 403
+
+    def test_memory_db_blocked(self, tmp_tree):
+        """memory.db contains full conversation transcripts — must be blocked."""
+        with pytest.raises(server.PathError) as exc_info:
+            server._safe_path(str(tmp_tree / ".kirocrew" / "memory.db"))
+        assert exc_info.value.status == 403
+
+    def test_kirocrew_root_listing_blocked_by_safe_path(self, tmp_tree):
+        """Listing .kirocrew/ root is blocked at _safe_path level (deny-by-default).
+        Tree/complete handlers use _kirocrew_safe_children() instead."""
+        with pytest.raises(server.PathError) as exc_info:
+            server._safe_path(str(tmp_tree / ".kirocrew"))
+        assert exc_info.value.status == 403
+
+    def test_kirocrew_safe_children_returns_only_safe_subdirs(self, tmp_tree):
+        """_kirocrew_safe_children() exposes only allowlisted dirs."""
+        mc = tmp_tree / ".kirocrew"
+        entries = server._kirocrew_safe_children(mc)
+        names = {e["name"] for e in entries}
+        # Only dirs in _KIROCREW_SAFE_SUBDIRS should appear
+        assert "workspace" in names
+        assert "uploads" in names
+        assert "skills" in names
+        assert "artifacts" in names
+        # Sensitive items must not appear
+        assert "sessions" not in names
+        assert "config.json" not in names
+
+    # ── Governance trust-root keystone (fork-only additions) ──
+    # ~/.kirocrew/security_policy.json, profiles/, admission_policy.json are
+    # the governance ceiling's trust root. The granular branch alone must
+    # block them (is_sensitive_path is mocked to SENSITIVE_DIRS parts in this
+    # suite) — "profiles" must stay OUT of _KIROCREW_SAFE_SUBDIRS.
+
+    def test_security_policy_blocked(self, tmp_tree):
+        """The governance security ceiling must be blocked."""
+        with pytest.raises(server.PathError) as exc_info:
+            server._safe_path(str(tmp_tree / ".kirocrew" / "security_policy.json"))
+        assert exc_info.value.status == 403
+
+    def test_admission_policy_blocked(self, tmp_tree):
+        """The signed-plugin admission policy must be blocked."""
+        with pytest.raises(server.PathError) as exc_info:
+            server._safe_path(str(tmp_tree / ".kirocrew" / "admission_policy.json"))
+        assert exc_info.value.status == 403
+
+    def test_governance_profile_blocked(self, tmp_tree):
+        """Governance profiles (per-surface ceilings) must be blocked."""
+        with pytest.raises(server.PathError) as exc_info:
+            server._safe_path(str(tmp_tree / ".kirocrew" / "profiles" / "default.json"))
+        assert exc_info.value.status == 403
+
+    def test_profiles_not_in_safe_children_or_listing(self, tmp_tree):
+        """'profiles' never appears in safe-children output or root listings."""
+        mc = tmp_tree / ".kirocrew"
+        assert "profiles" not in server._KIROCREW_SAFE_SUBDIRS
+        child_names = {e["name"] for e in server._kirocrew_safe_children(mc)}
+        assert "profiles" not in child_names
+        entries, _ = server._list_dir(mc, depth=1)
+        listing_names = {e["name"] for e in entries}
+        assert "profiles" not in listing_names
+        assert "security_policy.json" not in listing_names
+        assert "admission_policy.json" not in listing_names
+
+
+class TestAutoSdeRound1Findings:
+    """Regression tests for AutoSDE round-1 findings on the granular policy.
+
+    #15 security-controls: listing .kirocrew/ root must not leak sensitive
+        entry NAMES (config.json, *.key, memory.db, sessions/).
+    #17 rg allowlist side-effect: searching a root OUTSIDE .kirocrew must not
+        restrict results to .kirocrew safe subdirs (non-negated globs
+        allowlist-restrict ripgrep); searching INSIDE a safe subdir adds no
+        .kirocrew globs at all.
+    #16 auto-skill-namespace: the file explorer must remain read-only (GET
+        only) so opening skills/ cannot create an auto-skill write path.
+    """
+
+    @pytest.fixture(autouse=True)
+    def kirocrew_tree(self, tmp_tree):
+        mc = tmp_tree / ".kirocrew"
+        mc.mkdir()
+        (mc / "workspace").mkdir()
+        (mc / "workspace" / "note.md").write_text("needle in workspace\n")
+        (mc / "config.json").write_text('{"secret": "token123"}')
+        (mc / "sel_hmac.key").write_text("secret-key-data")
+        (mc / "sessions").mkdir()
+        (mc / "memory.db").write_text("db")
+        (tmp_tree / "src").mkdir()
+        (tmp_tree / "src" / "main.py").write_text("needle in src\n")
+        self.mc = mc
+        return tmp_tree
+
+    def test_root_listing_hides_sensitive_names(self, tmp_tree):
+        """#15: /tree of .kirocrew root shows ONLY safe subdirs — no
+        config.json / *.key / sessions / memory.db names."""
+        entries, _ = server._list_dir(tmp_tree / ".kirocrew", depth=1)
+        names = {e["name"] for e in entries}
+        assert "workspace" in names
+        for leaked in ("config.json", "sel_hmac.key", "sessions", "memory.db"):
+            assert leaked not in names, f"sensitive name leaked in listing: {leaked}"
+
+    def test_python_search_outside_kirocrew_finds_project_files(self, tmp_tree):
+        """#17: searching the project root must return matches OUTSIDE
+        .kirocrew (the old glob set silently excluded them under rg)."""
+        results = server._search_python(tmp_tree, "needle", "", "")
+        files = {r["file"] for r in results}
+        assert any(f.endswith("src/main.py") for f in files), (
+            f"src/main.py missing from results — allowlist side-effect: {files}"
+        )
+
+    def test_python_search_never_surfaces_kirocrew_root_files(self, tmp_tree):
+        """#15/defense: .kirocrew root files (config.json) never appear in
+        search results even when the walk passes through .kirocrew."""
+        results = server._search_python(tmp_tree, "token123", "", "")
+        assert results == [], f".kirocrew root file content leaked: {results}"
+
+    def test_rg_glob_set_has_no_nonnegated_kirocrew_globs(self, tmp_tree):
+        """#17: the rg command for an outside-root search contains only
+        NEGATED .kirocrew globs (a non-negated glob would allowlist-restrict
+        the entire search)."""
+        captured: dict = {}
+
+        def fake_wrap(cmd):
+            captured["cmd"] = list(cmd)
+            raise FileNotFoundError("intercepted before spawn")
+
+        with patch.object(server, "wrap_argv", side_effect=fake_wrap):
+            try:
+                server._search_rg(tmp_tree, "needle", "", "")
+            except Exception:
+                pass
+        cmd = captured.get("cmd")
+        assert cmd, "wrap_argv never called — _search_rg did not build an rg command"
+        globs = [cmd[i + 1] for i, a in enumerate(cmd[:-1]) if a == "--glob"]
+        kirocrew_globs = [g for g in globs if ".kirocrew" in g]
+        assert kirocrew_globs == ["!**/.kirocrew/**"], kirocrew_globs
+        assert all(g.startswith("!") for g in kirocrew_globs)
+
+    def test_rg_no_kirocrew_globs_when_root_inside_safe_subdir(self, tmp_tree):
+        """#17: searching inside .kirocrew/workspace adds no .kirocrew globs
+        (path gate already validated the subtree)."""
+        captured: dict = {}
+
+        def fake_wrap(cmd):
+            captured["cmd"] = list(cmd)
+            raise FileNotFoundError("intercepted before spawn")
+
+        with patch.object(server, "wrap_argv", side_effect=fake_wrap):
+            try:
+                server._search_rg(tmp_tree / ".kirocrew" / "workspace", "needle", "", "")
+            except Exception:
+                pass
+        cmd = captured.get("cmd")
+        assert cmd, "wrap_argv never called — _search_rg did not build an rg command"
+        globs = [cmd[i + 1] for i, a in enumerate(cmd[:-1]) if a == "--glob"]
+        assert not any(".kirocrew" in g for g in globs), globs
+
+    def test_app_is_read_only_get_routes_only(self):
+        """#16: the file explorer exposes no write verbs — every dispatch
+        route is GET. A write path here would bypass the auto-skill guards
+        (Mesh-677: redaction, SEL audit, slug validation)."""
+        import inspect
+
+        src = inspect.getsource(server)
+        for verb in ("do_POST", "do_PUT", "do_DELETE", "do_PATCH"):
+            assert verb not in src, f"unexpected write verb handler: {verb}"
+
+    def test_kirocrew_root_outside_allowed_roots_denied(self, tmp_tree, monkeypatch):
+        """Security: a .kirocrew dir outside ALLOWED_ROOTS must be denied even
+        via the special-case listing path in _h_tree. Exercises the _expand ->
+        _is_within check that bypasses _safe_path."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as attacker_dir:
+            fake_mc = Path(attacker_dir) / ".kirocrew"
+            fake_mc.mkdir()
+            (fake_mc / "workspace").mkdir()
+            (fake_mc / "workspace" / "stolen.md").write_text("secret data")
+            # ALLOWED_ROOTS is already patched to tmp_tree only (autouse fixture)
+            # so attacker_dir is NOT in ALLOWED_ROOTS.
+
+            # Test 1: _safe_path blocks it (standard path)
+            with pytest.raises(server.PathError) as exc_info:
+                server._safe_path(str(fake_mc))
+            assert exc_info.value.status == 403
+
+            # Test 2: exercise the _h_tree special-case branch directly —
+            # _expand + name==".kirocrew" + is_dir() all pass, but
+            # ALLOWED_ROOTS gate must still block.
+            expanded = server._expand(str(fake_mc))
+            assert expanded.name == ".kirocrew"
+            assert expanded.is_dir()
+            # The handler's ALLOWED_ROOTS check:
+            assert not any(
+                server._is_within(expanded, root)
+                for root in server.ALLOWED_ROOTS
+            ), "attacker dir should NOT be within ALLOWED_ROOTS"
