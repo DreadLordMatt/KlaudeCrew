@@ -235,6 +235,46 @@ via a follow-up `update()`.
 versions may be unavailable; callers must handle `ArtifactNotFoundError` for
 out-of-range versions.
 
+## Comments & Lifecycle
+
+Comments live in a per-artifact `comments.json` sidecar (`ArtifactComment`
+dataclass; threads are one level deep — replies carry the root's id as
+`thread_id`). `status` is `open | review | resolved`; `sync_state` tracks
+provider push status (`local_only | pending_push | synced | push_failed`).
+Provider push/reconcile itself is companion-edition-only behavior behind the
+CPP publish seam — the open-source core carries the `sync_state` field and
+enforces the provider-origin guards, but ships no remote reconcile loop.
+
+**Agent disposition contract** (owner decision 2026-07-13; rubric ships in
+the builtin `artifacts` skill):
+
+- `artifact_delete_comment` (MCP) — for comments that were unambiguous
+  directives, fully applied. Requires a `reason` (≤ 500 chars) recorded in
+  the SEL audit and the activity feed. Root deletes cascade to replies.
+- `artifact_mark_review` — for comments addressed with judgment; human
+  verifies and resolves.
+- Resolution stays human-only: the resolve endpoint returns 403 for any
+  MCP-originated request (actor inferred from the `X-Internal-Secret`
+  header, never from a body flag).
+- Agents may not delete provider-synced comments (403) — provider
+  reconciliation (companion edition) would resurrect or desync them; mark
+  REVIEW instead.
+
+**Orphaned anchors** — every content write through `update()` (agent
+iterations, dashboard saves, reverts, upstream pulls) rescans open anchored
+comments with a plain-substring check (`anchor_quote in content` — the same
+exactness contract as the frontend highlighter). Threads whose quote is
+gone get `anchor_orphaned=true` (a dedicated field, deliberately not a
+`sync_state` value so push status is never clobbered); the flag clears if
+the text returns (e.g. a revert). The UI shows a warning and de-emphasizes
+orphaned threads.
+
+**Activity feed** — comment lifecycle changes append a `comment` event
+(`ALLOWED_EVENT_TYPES`) to the artifact's audit log with
+`metadata.action ∈ deleted | reviewed | resolved`, a ≤ 100-char
+`comment_snippet`, and the agent's `reason` on deletes, so a deleted
+comment never disappears without a trace.
+
 ## Knowledge Library Auto-Ingest
 
 Content-bearing local artifacts (markdown/text documents) are automatically

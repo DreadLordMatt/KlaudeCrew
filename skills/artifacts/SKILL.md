@@ -206,6 +206,34 @@ Critical: **never tell the user "the widget wasn't saved, so I can't
 iterate"** — that contradicts the entire point of the feature. Save it
 yourself, iterate on it, and tell them what slug you assigned.
 
+## Comment triage when addressing feedback
+
+Comments delegate work: once a comment's directive is carried out, the
+comment has done its job. When you address artifact comments (the user asked
+you to iterate / "address the comments"), triage EVERY open comment as part
+of the same pass — never leave the human to re-read and clean up stale
+annotations by hand.
+
+| Case | Action |
+|---|---|
+| Unambiguous directive, fully applied ("delete this", "fix typo", a clear reframe) | `artifact_delete_comment` with a reason ("applied in vN: <what you did>") |
+| Applied with interpretation or judgment the human may want to check | `artifact_mark_review` + short `artifact_reply_comment` stating what was done |
+| Not applied / you disagree / needs discussion | `artifact_reply_comment` with your reasoning; leave the thread open |
+| Anchor text deleted *as part of* applying the comment | Same as row 1 — delete |
+
+Rules:
+
+- Delete means the comment's job is done and re-reading it adds zero value.
+  When in doubt between delete and REVIEW, choose REVIEW.
+- Never delete provider-synced comments (the tool refuses); mark those
+  REVIEW instead.
+- Resolution (`resolved` status) is human-only — never attempt it.
+- Do the triage in the SAME turn as the `artifact_update`, comment by
+  comment. Deletions are audited and appear in the artifact's activity feed
+  with your reason, so nothing disappears without a trace.
+- In your summary to the user, account for the comments in one line:
+  "Applied 5 comments (4 deleted as done, 1 marked for your review)."
+
 ## Naming and slugs
 
 - The user-facing **name** is human-readable: "CR Queue Dashboard".

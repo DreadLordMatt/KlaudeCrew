@@ -642,6 +642,58 @@ ARTIFACT_REVERT_SCHEMA = ToolSchema(
     ],
 )
 
+# Artifact comments (Mesh-1880). Comment ids are local UUIDs or provider-origin
+# ids (e.g. Artifactory's "<ts>-<uuid>"); allow alphanumerics + - . : _ .
+_ARTIFACT_COMMENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$")
+_ARTIFACT_SCOPE_RE = re.compile(r"^(private|shared)$")
+ARTIFACT_COMMENT_TEXT_MAX = 10_000
+
+ARTIFACT_GET_COMMENTS_SCHEMA = ToolSchema(
+    tool_name="artifact_get_comments",
+    fields=[
+        FieldSpec("slug", str, required=True, max_len=80, pattern=_ARTIFACT_SLUG_RE),
+    ],
+)
+
+ARTIFACT_POST_COMMENT_SCHEMA = ToolSchema(
+    tool_name="artifact_post_comment",
+    fields=[
+        FieldSpec("slug", str, required=True, max_len=80, pattern=_ARTIFACT_SLUG_RE),
+        FieldSpec("text", str, required=True, max_len=ARTIFACT_COMMENT_TEXT_MAX),
+        FieldSpec("scope", str, max_len=10, pattern=_ARTIFACT_SCOPE_RE),
+    ],
+)
+
+ARTIFACT_REPLY_COMMENT_SCHEMA = ToolSchema(
+    tool_name="artifact_reply_comment",
+    fields=[
+        FieldSpec("slug", str, required=True, max_len=80, pattern=_ARTIFACT_SLUG_RE),
+        FieldSpec("parent_id", str, required=True, max_len=128, pattern=_ARTIFACT_COMMENT_ID_RE),
+        FieldSpec("text", str, required=True, max_len=ARTIFACT_COMMENT_TEXT_MAX),
+    ],
+)
+
+ARTIFACT_MARK_REVIEW_SCHEMA = ToolSchema(
+    tool_name="artifact_mark_review",
+    fields=[
+        FieldSpec("slug", str, required=True, max_len=80, pattern=_ARTIFACT_SLUG_RE),
+        FieldSpec("comment_id", str, required=True, max_len=128, pattern=_ARTIFACT_COMMENT_ID_RE),
+    ],
+)
+
+#: Cap on the one-line justification an agent must record when deleting a
+#: comment it has applied (surfaced in the SEL audit + activity timeline).
+ARTIFACT_DELETE_COMMENT_REASON_MAX = 500
+
+ARTIFACT_DELETE_COMMENT_SCHEMA = ToolSchema(
+    tool_name="artifact_delete_comment",
+    fields=[
+        FieldSpec("slug", str, required=True, max_len=80, pattern=_ARTIFACT_SLUG_RE),
+        FieldSpec("comment_id", str, required=True, max_len=128, pattern=_ARTIFACT_COMMENT_ID_RE),
+        FieldSpec("reason", str, required=True, max_len=ARTIFACT_DELETE_COMMENT_REASON_MAX),
+    ],
+)
+
 # Artifact folders (Mesh-2720). A folder reference is a folder id OR a
 # ``/``-separated human path, so it can't share the slug regex — only bound
 # the length. Folder names cap at 100 chars (matches ArtifactFolderStore).
@@ -949,6 +1001,11 @@ MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "artifact_list": ARTIFACT_LIST_SCHEMA,
     "artifact_versions": ARTIFACT_VERSIONS_SCHEMA,
     "artifact_revert": ARTIFACT_REVERT_SCHEMA,
+    "artifact_get_comments": ARTIFACT_GET_COMMENTS_SCHEMA,
+    "artifact_post_comment": ARTIFACT_POST_COMMENT_SCHEMA,
+    "artifact_reply_comment": ARTIFACT_REPLY_COMMENT_SCHEMA,
+    "artifact_mark_review": ARTIFACT_MARK_REVIEW_SCHEMA,
+    "artifact_delete_comment": ARTIFACT_DELETE_COMMENT_SCHEMA,
     "artifact_folder_list": ARTIFACT_FOLDER_LIST_SCHEMA,
     "artifact_folder_create": ARTIFACT_FOLDER_CREATE_SCHEMA,
     "artifact_folder_rename": ARTIFACT_FOLDER_RENAME_SCHEMA,

@@ -9,7 +9,10 @@ HTTP call shape, and result formatting.
 from __future__ import annotations
 
 import json
+import re
 from unittest.mock import patch
+
+import pytest
 
 from kiro_crew.mcp_core import _call_tool_inner
 
@@ -669,3 +672,316 @@ class TestSchemas:
 
         result = _call_tool("artifact_get", {"slug": "BAD/PATH"})
         assert "error" in result.lower() or "invalid" in result.lower()
+
+
+class TestArtifactGetCommentsFullBody:
+    """Body text is returned in full — no [:200] truncation (Mesh-2503)."""
+
+    def test_short_body_returned_in_full(self) -> None:
+        body = "Fix the typo in section 3."
+        with patch(
+            "kiro_crew.mcp_core._get",
+            return_value={"comments": [
+                {"author": "alice", "body": body, "status": "open"},
+            ]},
+        ) as get:
+            result = _call_tool_inner("artifact_get_comments", {"slug": "my-doc"})
+        assert get.call_args.args[0] == "/api/artifacts/my-doc/comments"
+        assert body in result
+
+    def test_long_body_not_truncated(self) -> None:
+        # 500-char body — previously would be cut to 200
+        body = "A" * 250 + " MIDDLE " + "B" * 242
+        assert len(body) == 500
+        with patch(
+            "kiro_crew.mcp_core._get",
+            return_value={"comments": [
+                {"author": "bob", "body": body, "status": "open"},
+            ]},
+        ):
+            result = _call_tool_inner("artifact_get_comments", {"slug": "doc"})
+        # Full body present, including the middle marker
+        assert " MIDDLE " in result
+        assert "B" * 242 in result
+
+    def test_very_long_body_preserved(self) -> None:
+        # Near the ARTIFACT_COMMENT_TEXT_MAX (10_000) ceiling
+        body = "X" * 5000
+        with patch(
+            "kiro_crew.mcp_core._get",
+            return_value={"comments": [
+                {"author": "eve", "body": body, "status": "open"},
+            ]},
+        ):
+            result = _call_tool_inner("artifact_get_comments", {"slug": "doc"})
+        assert "X" * 5000 in result
+
+
+class TestArtifactGetCommentsAnchorFormatting:
+    """Anchor quotes: short shown in full, long bookended with TRUNCATED marker (Mesh-2503)."""
+
+    def test_short_anchor_shown_in_full(self) -> None:
+        quote = "Callers / Sources"
+        with patch(
+            "kiro_crew.mcp_core._get",
+            return_value={"comments": [
+                {
+                    "author": "alice",
+                    "body": "comment",
+                    "status": "open",
+                    "anchor": {"quote": quote, "start_offset": 42, "end_offset": 59},
+                },
+            ]},
+        ):
+            result = _call_tool_inner("artifact_get_comments", {"slug": "doc"})
+        # Full quote present
+        assert f'"{quote}"' in result
+        # Offsets included
+        assert "chars 42:59" in result
+        # No TRUNCATED marker
+        assert "TRUNCATED" not in result
+
+    def test_anchor_at_300_chars_shown_in_full(self) -> None:
+        quote = "Z" * 300
+        with patch(
+            "kiro_crew.mcp_core._get",
+            return_value={"comments": [
+                {
+                    "author": "bob",
+                    "body": "lgtm",
+                    "status": "open",
+                    "anchor": {"quote": quote, "start_offset": 0, "end_offset": 300},
+                },
+            ]},
+        ):
+            result = _call_tool_inner("artifact_get_comments", {"slug": "doc"})
+        # 300 chars exactly = still shown in full (threshold is ≤300)
+        assert "Z" * 300 in result
+        assert "TRUNCATED" not in result
+
+    def test_anchor_over_300_chars_is_bookended(self) -> None:
+        # 500-char anchor — should be truncated with bookending
+        head = "H" * 100
+        middle = "M" * 300
+        tail = "T" * 100
+        quote = head + middle + tail
+        assert len(quote) == 500
+        with patch(
+            "kiro_crew.mcp_core._get",
+            return_value={"comments": [
+                {
+                    "author": "carol",
+                    "body": "needs work",
+                    "status": "open",
+                    "anchor": {"quote": quote, "start_offset": 100, "end_offset": 600},
+                },
+            ]},
+        ):
+            result = _call_tool_inner("artifact_get_comments", {"slug": "doc"})
+        # Bookended: first 100 and last 100 chars present
+        assert "H" * 100 in result
+        assert "T" * 100 in result
+        # Middle NOT fully present (it's 300 chars, omitted)
+        assert "M" * 300 not in result
+        # TRUNCATED marker with char count
+        assert "TRUNCATED" in result
+        assert "300 chars omitted" in result
+        # Offsets included
+        assert "chars 100:600" in result
+
+    def test_anchor_without_offsets(self) -> None:
+        quote = "some text"
+        with patch(
+            "kiro_crew.mcp_core._get",
+            return_value={"comments": [
+                {
+                    "author": "dave",
+                    "body": "fix this",
+                    "status": "open",
+                    "anchor": {"quote": quote},
+                },
+            ]},
+        ):
+            result = _call_tool_inner("artifact_get_comments", {"slug": "doc"})
+        assert f'"{quote}"' in result
+        # No offset info when not provided
+        assert "chars" not in result
+
+    def test_long_anchor_without_offsets(self) -> None:
+        quote = "A" * 400
+        with patch(
+            "kiro_crew.mcp_core._get",
+            return_value={"comments": [
+                {
+                    "author": "eve",
+                    "body": "too long",
+                    "status": "open",
+                    "anchor": {"quote": quote},
+                },
+            ]},
+        ):
+            result = _call_tool_inner("artifact_get_comments", {"slug": "doc"})
+        # Still bookended
+        assert "TRUNCATED" in result
+        assert "200 chars omitted" in result
+        # No "chars X:Y" offset info when offsets not provided
+        assert not re.search(r"chars \d+:\d+", result)
+
+
+class TestArtifactGetCommentsEdgeCases:
+    """Edge cases: no comments, errors, agent comments, replies (Mesh-2503)."""
+
+    def test_no_comments_message(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._get",
+            return_value={"comments": []},
+        ) as get:
+            result = _call_tool_inner("artifact_get_comments", {"slug": "empty"})
+        assert get.call_args.args[0] == "/api/artifacts/empty/comments"
+        assert "No comments" in result
+
+    def test_error_response(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._get",
+            return_value={"error": "artifact not found"},
+        ):
+            result = _call_tool_inner("artifact_get_comments", {"slug": "gone"})
+        assert "Error" in result
+        assert "artifact not found" in result
+
+    def test_agent_comment_prefix(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._get",
+            return_value={"comments": [
+                {"author": "kiro", "body": "auto-review", "status": "open", "is_agent": True},
+            ]},
+        ):
+            result = _call_tool_inner("artifact_get_comments", {"slug": "doc"})
+        assert "🤖" in result
+
+    def test_reply_indent(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._get",
+            return_value={"comments": [
+                {"author": "alice", "body": "parent", "status": "open"},
+                {"author": "bob", "body": "child reply", "status": "open", "parent_id": "c1"},
+            ]},
+        ):
+            result = _call_tool_inner("artifact_get_comments", {"slug": "doc"})
+        assert "↳" in result
+
+    def test_comment_count_in_header(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._get",
+            return_value={"comments": [
+                {"author": "a", "body": "one", "status": "open"},
+                {"author": "b", "body": "two", "status": "open"},
+                {"author": "c", "body": "three", "status": "resolved"},
+            ]},
+        ):
+            result = _call_tool_inner("artifact_get_comments", {"slug": "doc"})
+        assert "(3)" in result
+
+
+class TestArtifactCommentWriteTools:
+    """Thin dispatch tests: post/reply/mark_review hit the right routes with
+    the agent watermark + provenance flags (the full behavior is covered by
+    the handler suites)."""
+
+    def test_post_comment_posts_watermarked_body(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._post",
+            return_value={"comment": {"id": "c1", "sync_state": "local_only"}},
+        ) as po:
+            result = _call_tool_inner(
+                "artifact_post_comment", {"slug": "doc", "text": "note"}
+            )
+        po.assert_called_once()
+        path, payload = po.call_args.args
+        assert path == "/api/artifacts/doc/comments"
+        assert payload["text"] == "\U0001f916 note"
+        assert payload["is_agent"] is True
+        assert payload["scope"] == "private"
+        assert "posted" in result.lower()
+
+    def test_reply_comment_posts_to_parent_thread(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._post",
+            return_value={"comment": {"id": "c2", "sync_state": "local_only"}},
+        ) as po:
+            result = _call_tool_inner(
+                "artifact_reply_comment",
+                {"slug": "doc", "parent_id": "c1", "text": "done"},
+            )
+        po.assert_called_once()
+        path, payload = po.call_args.args
+        assert path == "/api/artifacts/doc/comments/c1/reply"
+        assert payload["text"] == "\U0001f916 done"
+        assert payload["is_agent"] is True
+        assert "posted" in result.lower()
+
+    def test_mark_review_posts_review_route(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._post",
+            return_value={"comment": {"id": "c1", "status": "review"}},
+        ) as po:
+            result = _call_tool_inner(
+                "artifact_mark_review", {"slug": "doc", "comment_id": "c1"}
+            )
+        po.assert_called_once()
+        assert po.call_args.args[0] == "/api/artifacts/doc/comments/c1/review"
+        assert "REVIEW" in result
+
+    def test_mark_review_surfaces_backend_error(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._post",
+            return_value={"error": "comment not found"},
+        ):
+            result = _call_tool_inner(
+                "artifact_mark_review", {"slug": "doc", "comment_id": "gone"}
+            )
+        assert result.startswith("Error:")
+
+
+class TestArtifactDeleteCommentTool:
+    """The artifact_delete_comment MCP tool DELETEs the comment route with the
+    required reason in the body (redacted before sending — it lands in the SEL
+    audit and activity feed)."""
+
+    def test_delete_comment_hits_delete_route_with_reason(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._delete",
+            return_value={"deleted": True},
+        ) as dl:
+            result = _call_tool_inner(
+                "artifact_delete_comment",
+                {"slug": "doc", "comment_id": "c1", "reason": "applied in v3: typo fixed"},
+            )
+        dl.assert_called_once()
+        path, payload = dl.call_args.args
+        assert path == "/api/artifacts/doc/comments/c1"
+        assert payload["reason"] == "applied in v3: typo fixed"
+        assert "deleted" in result.lower()
+
+    def test_delete_comment_surfaces_backend_error(self) -> None:
+        with patch(
+            "kiro_crew.mcp_core._delete",
+            return_value={"error": "agents cannot delete provider-synced comments"},
+        ):
+            result = _call_tool_inner(
+                "artifact_delete_comment",
+                {"slug": "doc", "comment_id": "c1", "reason": "applied"},
+            )
+        assert result.startswith("Error:")
+        assert "provider-synced" in result
+
+    def test_delete_comment_requires_reason(self) -> None:
+        from kiro_crew.validation import ValidationError
+
+        with patch("kiro_crew.mcp_core._delete") as dl:
+            with pytest.raises(ValidationError):
+                _call_tool_inner(
+                    "artifact_delete_comment",
+                    {"slug": "doc", "comment_id": "c1"},
+                )
+        dl.assert_not_called()

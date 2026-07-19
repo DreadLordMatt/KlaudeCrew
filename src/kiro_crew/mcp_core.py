@@ -60,15 +60,20 @@ from kiro_crew.subagent import resolve_max_subagents
 from kiro_crew.subagent_persistence import _agent_dir
 from kiro_crew.validation import (
     _SLACK_TS_RE,
+    ARTIFACT_DELETE_COMMENT_SCHEMA,
     ARTIFACT_DELETE_SCHEMA,
     ARTIFACT_FOLDER_CREATE_SCHEMA,
     ARTIFACT_FOLDER_DELETE_SCHEMA,
     ARTIFACT_FOLDER_LIST_SCHEMA,
     ARTIFACT_FOLDER_MOVE_SCHEMA,
     ARTIFACT_FOLDER_RENAME_SCHEMA,
+    ARTIFACT_GET_COMMENTS_SCHEMA,
     ARTIFACT_GET_SCHEMA,
     ARTIFACT_LIST_SCHEMA,
+    ARTIFACT_MARK_REVIEW_SCHEMA,
     ARTIFACT_MOVE_SCHEMA,
+    ARTIFACT_POST_COMMENT_SCHEMA,
+    ARTIFACT_REPLY_COMMENT_SCHEMA,
     ARTIFACT_REVERT_SCHEMA,
     ARTIFACT_SAVE_SCHEMA,
     ARTIFACT_UPDATE_SCHEMA,
@@ -866,6 +871,131 @@ def _list_tools() -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["slug"],
+            },
+        },
+        {
+            "name": "artifact_get_comments",
+            "description": (
+                "Get all comments on an artifact (local + provider-synced). "
+                "Use to read feedback, review comments, or discussion threads "
+                "on an artifact before addressing them."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "Artifact slug to get comments for.",
+                    },
+                },
+                "required": ["slug"],
+            },
+        },
+        {
+            "name": "artifact_post_comment",
+            "description": (
+                "Post a comment on an artifact. Agent comments are watermarked "
+                "and SEL-audited. Use scope='shared' to sync to the provider."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "Artifact slug.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Comment body text.",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "private (local only) or shared (syncs to provider).",
+                    },
+                },
+                "required": ["slug", "text"],
+            },
+        },
+        {
+            "name": "artifact_reply_comment",
+            "description": (
+                "Reply to an existing comment thread on an artifact. "
+                "If the parent is provider-origin, the reply posts back."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "Artifact slug.",
+                    },
+                    "parent_id": {
+                        "type": "string",
+                        "description": "ID of the comment to reply to.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Reply body text.",
+                    },
+                },
+                "required": ["slug", "parent_id", "text"],
+            },
+        },
+        {
+            "name": "artifact_mark_review",
+            "description": (
+                "Advance a comment thread to REVIEW status, signaling "
+                "the issue is addressed and awaiting human verification. "
+                "Agent can mark_review but NEVER resolve."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "Artifact slug.",
+                    },
+                    "comment_id": {
+                        "type": "string",
+                        "description": "ID of the root comment to advance.",
+                    },
+                },
+                "required": ["slug", "comment_id"],
+            },
+        },
+        {
+            "name": "artifact_delete_comment",
+            "description": (
+                "Delete a comment thread you have demonstrably applied — an "
+                "unambiguous directive ('delete this', 'fix typo') that was "
+                "fully executed. Root deletes cascade to replies. For "
+                "judgment calls the human may want to verify, use "
+                "artifact_mark_review instead. Provider-synced comments "
+                "cannot be deleted by agents (the tool refuses) — mark those "
+                "REVIEW. Deletion is SEL-audited and recorded in the "
+                "artifact's activity feed with your reason."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "Artifact slug.",
+                    },
+                    "comment_id": {
+                        "type": "string",
+                        "description": "ID of the comment to delete (root deletes its replies too).",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "One-line justification recorded in the audit log and "
+                            "activity feed, e.g. 'applied in v12: deleted the "
+                            "flagged paragraph'."
+                        ),
+                    },
+                },
+                "required": ["slug", "comment_id", "reason"],
             },
         },
         {
@@ -3254,6 +3384,118 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         if d.get("error"):
             return f"Error: {d['error']}"
         return f"Deleted artifact: {slug}"
+
+    def _format_anchor(anchor: dict) -> str:
+        """Format an anchor quote for the artifact_get_comments output (Mesh-2503).
+
+        Short quotes (≤300 chars) are shown in full. Longer quotes are bookended
+        with the first and last 100 chars plus an explicit TRUNCATED marker
+        (never ambiguous with literal user text). Offsets are always included
+        when available so the agent can locate the range in the document.
+        """
+        quote = anchor.get("quote", "")
+        start = anchor.get("start_offset")
+        end = anchor.get("end_offset")
+        offset_info = ""
+        if start is not None and end is not None:
+            offset_info = f", chars {start}:{end}"
+        if len(quote) <= 300:
+            return f' [on: "{quote}"{offset_info}]'
+        head = quote[:100]
+        tail = quote[-100:]
+        omitted = len(quote) - 200
+        return (
+            f' [on: "{head}" [TRUNCATED: {omitted} chars omitted'
+            f"{offset_info}] \"{tail}\"]"
+        )
+
+    if name == "artifact_get_comments":
+        args = validate_tool_args(args, ARTIFACT_GET_COMMENTS_SCHEMA)
+        slug = args["slug"]
+        d = _get(f"/api/artifacts/{slug}/comments")
+        if d.get("error"):
+            return f"Error: {d['error']}"
+        comments = d.get("comments", [])
+        if not comments:
+            return f"No comments on artifact `{slug}`."
+        lines = []
+        for c in comments:
+            prefix = "🤖 " if c.get("is_agent") else ""
+            anchor = ""
+            if c.get("anchor") and c["anchor"].get("quote"):
+                anchor = _format_anchor(c["anchor"])
+            indent = "  ↳ " if c.get("parent_id") else "• "
+            lines.append(
+                f"{indent}{prefix}{c.get('author', '?')}: {c.get('body', '')}"
+                f"{anchor} [{c.get('status', 'open')}]"
+            )
+        result_str = f"Comments on `{slug}` ({len(comments)}):\n" + "\n".join(lines)
+        result_str, _ = redact_credentials(result_str)
+        result_str, _ = redact_exfiltration_urls(result_str)
+        return result_str
+
+    if name == "artifact_post_comment":
+        args = validate_tool_args(args, ARTIFACT_POST_COMMENT_SCHEMA)
+        slug = args["slug"]
+        text = args["text"]
+        scope = args.get("scope") or "private"
+        # Never trust LLM output — redact before posting to the dashboard.
+        text, _ = redact_credentials(text)
+        text, _ = redact_exfiltration_urls(text)
+        d = _post(f"/api/artifacts/{slug}/comments", {
+            "text": f"\U0001f916 {text}",
+            "scope": scope,
+            "is_agent": True,
+            "author": "agent",
+        })
+        if d.get("error"):
+            return f"Error: {d['error']}"
+        cmt = d.get("comment", {})
+        return f"Comment posted (id={cmt.get('id', '?')}, sync={cmt.get('sync_state', '?')})"
+
+    if name == "artifact_reply_comment":
+        args = validate_tool_args(args, ARTIFACT_REPLY_COMMENT_SCHEMA)
+        slug = args["slug"]
+        parent_id = args["parent_id"]
+        text = args["text"]
+        # Never trust LLM output — redact before posting to the dashboard.
+        text, _ = redact_credentials(text)
+        text, _ = redact_exfiltration_urls(text)
+        d = _post(f"/api/artifacts/{slug}/comments/{parent_id}/reply", {
+            "text": f"\U0001f916 {text}",
+            "is_agent": True,
+            "author": "agent",
+        })
+        if d.get("error"):
+            return f"Error: {d['error']}"
+        cmt = d.get("comment", {})
+        return f"Reply posted (id={cmt.get('id', '?')}, sync={cmt.get('sync_state', '?')})"
+
+    if name == "artifact_mark_review":
+        args = validate_tool_args(args, ARTIFACT_MARK_REVIEW_SCHEMA)
+        slug = args["slug"]
+        comment_id = args["comment_id"]
+        d = _post(f"/api/artifacts/{slug}/comments/{comment_id}/review", {})
+        if d.get("error"):
+            return f"Error: {d['error']}"
+        return f"Comment {comment_id} advanced to REVIEW status."
+
+    if name == "artifact_delete_comment":
+        args = validate_tool_args(args, ARTIFACT_DELETE_COMMENT_SCHEMA)
+        slug = args["slug"]
+        comment_id = args["comment_id"]
+        reason = args["reason"]
+        # Never trust LLM output — the reason lands in the SEL audit and the
+        # activity feed, so redact before sending.
+        reason, _ = redact_credentials(reason)
+        reason, _ = redact_exfiltration_urls(reason)
+        d = _delete(
+            f"/api/artifacts/{slug}/comments/{comment_id}",
+            {"reason": reason},
+        )
+        if d.get("error"):
+            return f"Error: {d['error']}"
+        return f"Comment {comment_id} deleted (reason recorded in activity feed)."
 
     if name == "artifact_folder_list":
         validate_tool_args(args, ARTIFACT_FOLDER_LIST_SCHEMA)
