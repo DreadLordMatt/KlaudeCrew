@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -126,6 +131,13 @@ class TestFillWarmPool:
         with patch("kiro_crew.session._sync_kill_provider") as mock_kill:
             with pytest.raises(asyncio.CancelledError):
                 await mgr._fill_warm_pool()
+            # The hard kill is dispatched fire-and-forget to the subprocess
+            # executor (a cancellation handler can neither await nor block the
+            # loop) — give the worker thread a beat to run it.
+            for _ in range(100):
+                if mock_kill.call_count:
+                    break
+                await asyncio.sleep(0.01)
             mock_kill.assert_called_once_with(provider)
         assert mgr._warm_pool.qsize() == 0
 
@@ -1063,3 +1075,235 @@ class TestPoolCwd:
 
         factory.assert_called_once()
         assert factory.call_args.kwargs.get("cwd") is None
+
+
+# ---------------------------------------------------------------------------
+# Discard reaping — a discarded provider's OS process must actually die
+# ---------------------------------------------------------------------------
+
+class TestDiscardReaping:
+    """A discard removes the provider from all pool bookkeeping, so the
+    discard path is the last chance to signal the process. These tests pin
+    the escalation contract: bounded graceful shutdown, hard-kill fallback
+    on failure, and post-shutdown liveness verification.
+    """
+
+    @staticmethod
+    def _expired_entry(mgr, provider):
+        mgr._warm_pool.put_nowait((provider, time.monotonic() - 10_000))
+
+    @pytest.mark.asyncio
+    async def test_survivor_after_noop_shutdown_is_hard_killed(self):
+        """Graceful shutdown returning cleanly is not proof the process died —
+        a still-alive process must be hard-killed."""
+        mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=1)
+        survivor = _make_provider()
+        survivor.is_process_alive = MagicMock(return_value=True)
+        self._expired_entry(mgr, survivor)
+
+        with patch("kiro_crew.session._sync_kill_provider") as mock_kill:
+            pooled = await mgr._drain_and_claim("kirocrew")
+
+        assert pooled is None
+        survivor.shutdown.assert_awaited_once()
+        mock_kill.assert_called_once_with(survivor)
+
+    @pytest.mark.asyncio
+    async def test_exited_process_is_not_hard_killed(self):
+        """No hard kill when the process actually exited — its PID may already
+        be recycled by an unrelated process."""
+        mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=1)
+        clean = _make_provider()
+        clean.is_process_alive = MagicMock(return_value=False)
+        self._expired_entry(mgr, clean)
+
+        with patch("kiro_crew.session._sync_kill_provider") as mock_kill:
+            await mgr._drain_and_claim("kirocrew")
+
+        clean.shutdown.assert_awaited_once()
+        mock_kill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_failure_falls_back_to_hard_kill(self):
+        """A raising shutdown must not be swallowed into a leak."""
+        mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=1)
+        broken = _make_provider()
+        broken.is_process_alive = MagicMock(return_value=True)
+        broken.shutdown = AsyncMock(side_effect=RuntimeError("protocol close failed"))
+        self._expired_entry(mgr, broken)
+
+        with patch("kiro_crew.session._sync_kill_provider") as mock_kill:
+            pooled = await mgr._drain_and_claim("kirocrew")
+
+        assert pooled is None
+        mock_kill.assert_called_once_with(broken)
+
+    @pytest.mark.asyncio
+    async def test_wedged_shutdown_is_bounded_and_hard_killed(self, monkeypatch):
+        """A shutdown that never returns must not stall the discard path
+        (the health sweep is a single task — a wedge would disable TTL
+        enforcement for the whole pool)."""
+        from kiro_crew.session import SessionManager
+
+        monkeypatch.setattr(SessionManager, "_POOL_DISCARD_TIMEOUT", 0.05)
+        mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=1)
+        wedged = _make_provider()
+        wedged.is_process_alive = MagicMock(return_value=True)
+
+        async def _never_returns() -> None:
+            await asyncio.sleep(3600)
+
+        wedged.shutdown = _never_returns
+        self._expired_entry(mgr, wedged)
+
+        with patch("kiro_crew.session._sync_kill_provider") as mock_kill:
+            pooled = await asyncio.wait_for(mgr._drain_and_claim("kirocrew"), timeout=5)
+
+        assert pooled is None
+        mock_kill.assert_called_once_with(wedged)
+
+    @pytest.mark.asyncio
+    async def test_health_sweep_hard_kills_expired_survivor(self):
+        """The periodic sweep applies the same escalation as the claim path."""
+        mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=1)
+        survivor = _make_provider()
+        survivor.is_process_alive = MagicMock(return_value=True)
+        self._expired_entry(mgr, survivor)
+
+        with patch("kiro_crew.session._sync_kill_provider") as mock_kill:
+            await mgr._sweep_warm_pool_once()
+
+        survivor.shutdown.assert_awaited_once()
+        mock_kill.assert_called_once_with(survivor)
+        assert mgr._warm_pool.qsize() == 0
+
+    @pytest.mark.asyncio
+    async def test_hard_kill_never_signals_mock_or_sentinel_pids(self):
+        """A provider stand-in whose pid resolves to a non-int (Mock coerces
+        to 1 via __index__) or to pid<=1 must never be signaled — an unguarded
+        kill would SIGTERM init / the CI container entrypoint."""
+        from kiro_crew.session_pid import _sync_kill_provider
+
+        mock_provider = _make_provider()  # _client._pid auto-resolves to a Mock
+        pid_one = _make_provider()
+        pid_one._client = SimpleNamespace(_pid=1)
+
+        with patch("kiro_crew.session_pid.platform_compat.kill_pid") as mock_kill:
+            _sync_kill_provider(mock_provider)
+            _sync_kill_provider(pid_one)
+
+        mock_kill.assert_not_called()
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX signal semantics")
+    @pytest.mark.asyncio
+    async def test_survivor_reaped_even_when_provider_bookkeeping_says_dead(self):
+        """The ACP provider's is_process_alive() self-reports dead once its
+        kill path has run — even when signal delivery silently failed and the
+        OS process survived. Verification must probe the OS via the tracked
+        PID, not trust provider bookkeeping."""
+        proc = subprocess.Popen(["sleep", "300"])
+        try:
+            provider = _make_provider()
+            provider._client = SimpleNamespace(_pid=proc.pid)
+            # Bookkeeping lies: claims dead while the OS process is alive
+            provider.is_process_alive = MagicMock(return_value=False)
+            provider.shutdown = AsyncMock()  # "ran" but killed nothing
+
+            mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=1)
+            self._expired_entry(mgr, provider)
+
+            await mgr._drain_and_claim("kirocrew")
+
+            deadline = time.monotonic() + 5
+            while proc.poll() is None and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+            assert proc.poll() is not None, "survivor leaked behind lying bookkeeping"
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX signal semantics")
+    @pytest.mark.asyncio
+    async def test_discard_kills_real_process_when_graceful_shutdown_is_noop(self):
+        """End-to-end: the OS process behind a discarded provider is gone even
+        when the graceful shutdown does nothing (child ignores the protocol
+        close). Exercises the real hard-kill fallback, not a mock."""
+        proc = subprocess.Popen(["sleep", "300"])
+        try:
+            provider = _make_provider()
+            # Mimic an ACP provider: the tracked PID lives at provider._client._pid
+            provider._client = SimpleNamespace(_pid=proc.pid)
+            provider.is_process_alive = MagicMock(side_effect=lambda: proc.poll() is None)
+            provider.shutdown = AsyncMock()  # graceful close that kills nothing
+
+            mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=1)
+            self._expired_entry(mgr, provider)
+
+            pooled = await mgr._drain_and_claim("kirocrew")
+            assert pooled is None
+
+            deadline = time.monotonic() + 5
+            while proc.poll() is None and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+            assert proc.poll() is not None, "discarded provider process leaked"
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_hard_kill_never_runs_inline_when_executor_down(self):
+        """When the subprocess executor is already shut down (gateway
+        teardown), the fallback must carry the kill on a dedicated thread —
+        never inline on the event loop, where ``_sync_kill_provider`` blocks
+        (``os.waitpid`` / ``taskkill``) and can trip the loop watchdog."""
+        from kiro_crew.session import SessionManager
+
+        dead_executor = ThreadPoolExecutor(max_workers=1)
+        dead_executor.shutdown(wait=True)
+
+        called_on: list[threading.Thread] = []
+        done = threading.Event()
+
+        def _record_thread(_provider) -> None:
+            called_on.append(threading.current_thread())
+            done.set()
+
+        provider = _make_provider()
+        with patch("kiro_crew.session.subprocess_executor", return_value=dead_executor), \
+                patch("kiro_crew.session._sync_kill_provider", side_effect=_record_thread):
+            SessionManager._dispatch_hard_kill(provider)
+
+        assert done.wait(timeout=5), "fallback kill was never dispatched"
+        assert called_on[0] is not threading.main_thread(), (
+            "fallback kill ran inline on the event-loop thread"
+        )
+
+    @pytest.mark.asyncio
+    async def test_one_failing_hard_kill_does_not_abort_batch_discard(self):
+        """The health sweep discards several providers in one pass — a
+        hard-kill failure for one provider must not escape and skip the
+        discard of the remaining providers (that would re-leak them)."""
+        mgr, _ = _make_manager(pool_agent="kirocrew", pool_ttl_secs=1)
+        first = _make_provider()
+        first.is_process_alive = MagicMock(return_value=True)
+        second = _make_provider()
+        second.is_process_alive = MagicMock(return_value=True)
+        self._expired_entry(mgr, first)
+        self._expired_entry(mgr, second)
+
+        attempted: list[object] = []
+
+        def _kill(provider) -> None:
+            attempted.append(provider)
+            if provider is first:
+                raise RuntimeError("kill blew up")
+
+        with patch("kiro_crew.session._sync_kill_provider", side_effect=_kill):
+            await mgr._sweep_warm_pool_once()
+
+        assert first in attempted and second in attempted, (
+            "a failing hard kill aborted the batch and leaked later providers"
+        )
+        assert mgr._warm_pool.qsize() == 0

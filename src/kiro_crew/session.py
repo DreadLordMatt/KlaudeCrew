@@ -69,6 +69,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -540,10 +541,7 @@ class SessionManager:
                         provider, _ = self._warm_pool.get_nowait()
                     except asyncio.QueueEmpty:
                         break
-                    try:
-                        await provider.shutdown()
-                    except Exception:
-                        logger.debug("Failed to shut down stale pool provider", exc_info=True)
+                    await self._discard_pool_provider(provider, "Stale pool drain")
                 # Clear all existing sessions (they use the old provider)
                 stale = list(self._sessions.items())
                 self._sessions.clear()
@@ -1058,13 +1056,115 @@ class SessionManager:
                     break
                 finally:
                     if p is not None:
-                        try:
-                            await p.shutdown()
-                        except Exception:
-                            pass
-                        except BaseException:
-                            _sync_kill_provider(p)
-                            raise
+                        await self._discard_pool_provider(p, "Warm pool fill cleanup")
+
+    # Bound on the graceful shutdown attempt during a pool discard. The pool
+    # health sweep is a single long-lived task: an unbounded await on a wedged
+    # shutdown would freeze every future sweep, silently disabling TTL
+    # enforcement for the whole pool.
+    _POOL_DISCARD_TIMEOUT = 10.0
+
+    @staticmethod
+    def _dispatch_hard_kill(provider: LLMProvider) -> None:
+        """Fire-and-forget ``_sync_kill_provider`` on the subprocess executor.
+
+        For cancellation handlers, where neither alternative works: awaiting
+        the offload re-raises ``CancelledError`` at the ``await`` and skips the
+        kill, while calling ``_sync_kill_provider`` inline blocks the event
+        loop (``os.waitpid`` on POSIX, a ``taskkill`` subprocess on Windows).
+        Submission itself is synchronous and non-blocking, so the kill is
+        guaranteed to be dispatched before the handler re-raises; it then
+        completes on a worker thread. If the executor is already shut down
+        (gateway teardown), a dedicated daemon thread carries the kill instead
+        — the loop must never run ``_sync_kill_provider`` inline, because it
+        blocks (``os.waitpid`` on POSIX, a ``taskkill`` subprocess on Windows)
+        and a blocked loop can trip the watchdog; a daemon thread dying with
+        the process is the acceptable trade.
+        """
+        try:
+            asyncio.get_running_loop().run_in_executor(
+                subprocess_executor(), _sync_kill_provider, provider,
+            )
+        except RuntimeError:
+            threading.Thread(
+                target=_sync_kill_provider, args=(provider,), daemon=True,
+            ).start()
+
+    async def _discard_pool_provider(self, provider: LLMProvider, context: str) -> None:
+        """Shut down a discarded pool provider and verify its process is gone.
+
+        A discard removes the provider from all pool bookkeeping, so this is
+        the LAST code path that will ever signal the process — a shutdown that
+        fails (or silently fails to kill) leaks the full provider process tree
+        until the next gateway restart. The orphan sweep cannot backstop this:
+        it only reaps *reparented* processes, and a leaked pool child stays
+        parented to its live launcher. Three guarantees:
+
+        1. **Bounded** — the graceful shutdown is capped so a wedged provider
+           can't stall the caller.
+        2. **Loud** — shutdown failures are logged, never swallowed.
+        3. **Verified against the OS** — liveness is re-checked after shutdown
+           and any survivor is hard-killed via its tracked PID. The PID is
+           captured BEFORE shutdown and probed with ``pid_exists`` because the
+           provider's own bookkeeping (``is_process_alive``) self-reports dead
+           once its kill path has *run* — even when signal delivery silently
+           failed and the OS process is still alive.
+        """
+        # Resolve the OS handle before shutdown mutates provider state.
+        # ``_client`` first (the attribute _sync_kill_provider kills through),
+        # falling back to the public ``client`` accessor the pool sweep reads —
+        # on real providers ``client`` is a passthrough property for
+        # ``_client``, so probing both spellings guarantees this verification
+        # can never resolve a different PID than either of those paths.
+        _client = getattr(provider, "_client", None) or getattr(provider, "client", None)
+        pid = getattr(_client, "_pid", None)
+        try:
+            await asyncio.wait_for(provider.shutdown(), timeout=self._POOL_DISCARD_TIMEOUT)
+        except asyncio.CancelledError:
+            # Cancellation handler: cannot await (the await would re-raise and
+            # skip the kill) and must not block the loop — dispatch the kill
+            # to a worker thread and re-raise immediately.
+            self._dispatch_hard_kill(provider)
+            raise
+        except Exception:
+            logger.warning(
+                "%s: provider shutdown failed — falling back to hard kill",
+                context, exc_info=True,
+            )
+        except BaseException:
+            self._dispatch_hard_kill(provider)  # same rationale as the CancelledError arm
+            raise
+        # OS-truth probe on the pre-captured PID; fall back to the provider's
+        # own view when no PID was resolvable (e.g. providers without a
+        # tracked client PID).
+        if isinstance(pid, int):
+            still_alive = platform_compat.pid_exists(pid)
+        else:
+            try:
+                still_alive = hasattr(provider, "is_process_alive") and provider.is_process_alive()
+            except Exception:
+                still_alive = False
+        if still_alive:
+            logger.warning(
+                "%s: provider process (pid=%s) still alive after shutdown — hard-killing",
+                context, pid,
+            )
+            # Normal (non-cancellation) path: offload — on Windows kill_pid
+            # shells out to taskkill, a blocking call that must not run on the
+            # event loop. Isolated so one provider's failure (e.g. an executor
+            # shutdown race) can never abort a caller iterating a batch of
+            # discards — the health sweep discards several providers in one
+            # pass, and an escaping exception here would leak the rest.
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    subprocess_executor(), _sync_kill_provider, provider,
+                )
+            except Exception:
+                logger.warning(
+                    "%s: executor hard kill failed (pid=%s) — dispatching to a "
+                    "dedicated thread", context, pid, exc_info=True,
+                )
+                self._dispatch_hard_kill(provider)
 
     def _claim_from_pool(self, agent: str | None) -> tuple[LLMProvider, float] | None:
         """Try to claim a pre-warmed provider if the agent matches.
@@ -1097,13 +1197,7 @@ class SessionManager:
                     self._pool_ttl_secs,
                 )
                 discarded = True
-                try:
-                    await provider.shutdown()
-                except Exception:
-                    pass
-                except BaseException:
-                    _sync_kill_provider(provider)
-                    raise
+                await self._discard_pool_provider(provider, "Warm pool discard")
                 claimed = self._claim_from_pool(agent)
                 continue
             # Check liveness — use process-level check, not is_alive/is_responsive
@@ -1117,13 +1211,7 @@ class SessionManager:
                     "Warm pool: claimed provider is dead (returncode=%s), discarding", rc
                 )
                 discarded = True
-                try:
-                    await provider.shutdown()
-                except Exception:
-                    pass
-                except BaseException:
-                    _sync_kill_provider(provider)
-                    raise
+                await self._discard_pool_provider(provider, "Warm pool discard")
                 claimed = self._claim_from_pool(agent)
                 continue
             return provider
@@ -1208,92 +1296,93 @@ class SessionManager:
         while True:
             await asyncio.sleep(self._POOL_HEALTH_INTERVAL)
             try:
-                if not self._pool_size:
-                    continue
-                qsize = self._warm_pool.qsize()
-                if not qsize:
-                    continue
-                logger.debug(
-                    "Pool health: sweeping %d providers (target=%d, ttl=%ds)",
-                    qsize,
-                    self._pool_size,
-                    self._pool_ttl_secs,
-                )
-                # Drain entire queue, keep healthy entries, discard the rest
-                healthy: list[tuple[LLMProvider, float]] = []
-                to_shutdown: list[LLMProvider] = []
-                now = time.monotonic()
-                try:
-                    for _ in range(qsize):
-                        try:
-                            provider, spawn_time = self._warm_pool.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                        age = now - spawn_time
-                        pid = getattr(getattr(provider, "client", None), "_pid", None)
-                        if isinstance(pid, int):
-                            self._pool_sweep_pids.add(pid)
-                        if self._pool_ttl_secs and age > self._pool_ttl_secs:
-                            logger.warning(
-                                "Pool health: %.0fs old provider (pid=%s) exceeds TTL %ds, discarding",
-                                age,
-                                pid,
-                                self._pool_ttl_secs,
-                            )
-                            to_shutdown.append(provider)
-                            continue
-                        try:
-                            alive = (
-                                hasattr(provider, "is_process_alive")
-                                and provider.is_process_alive()
-                            )
-                        except Exception:
-                            alive = False
-                        if not alive:
-                            rc = provider.exit_code if hasattr(provider, "exit_code") else None
-                            logger.warning(
-                                "Pool health: dead provider (pid=%s, returncode=%s, age=%.0fs), discarding",
-                                pid,
-                                rc,
-                                age,
-                            )
-                            to_shutdown.append(provider)
-                            continue
-                        logger.debug("Pool health: provider pid=%s alive (age=%.0fs)", pid, age)
-                        healthy.append((provider, spawn_time))
-                finally:
-                    # Re-enqueue survivors first, then shut down dead providers.
-                    # This avoids an empty-queue window where _drain_and_claim()
-                    # would fall back to cold start.  CancelledError during
-                    # shutdown may skip remaining providers in to_shutdown —
-                    # acceptable because they're already dead/expired and their
-                    # PIDs are tracked in kiro_session_pids.txt for startup
-                    # cleanup.  Sweep PIDs are cleared in a nested finally so
-                    # they can't go stale regardless of how we exit.
-                    try:
-                        for entry in healthy:
-                            self._warm_pool.put_nowait(entry)
-                        for p in to_shutdown:
-                            try:
-                                await p.shutdown()
-                            except Exception:
-                                pass
-                    finally:
-                        self._pool_sweep_pids.clear()
-                removed = qsize - len(healthy)
-                if removed:
-                    logger.info(
-                        "Pool health: removed %d dead/expired, %d healthy remain",
-                        removed,
-                        len(healthy),
-                    )
-                    self._schedule_replenish()
-                else:
-                    logger.debug("Pool health: all %d providers healthy", len(healthy))
+                await self._sweep_warm_pool_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Pool health sweep failed")
+
+    async def _sweep_warm_pool_once(self) -> None:
+        """One health sweep: drain the pool, keep healthy entries, reap the rest."""
+        if not self._pool_size:
+            return
+        qsize = self._warm_pool.qsize()
+        if not qsize:
+            return
+        logger.debug(
+            "Pool health: sweeping %d providers (target=%d, ttl=%ds)",
+            qsize,
+            self._pool_size,
+            self._pool_ttl_secs,
+        )
+        # Drain entire queue, keep healthy entries, discard the rest
+        healthy: list[tuple[LLMProvider, float]] = []
+        to_shutdown: list[LLMProvider] = []
+        now = time.monotonic()
+        try:
+            for _ in range(qsize):
+                try:
+                    provider, spawn_time = self._warm_pool.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                age = now - spawn_time
+                pid = getattr(getattr(provider, "client", None), "_pid", None)
+                if isinstance(pid, int):
+                    self._pool_sweep_pids.add(pid)
+                if self._pool_ttl_secs and age > self._pool_ttl_secs:
+                    logger.warning(
+                        "Pool health: %.0fs old provider (pid=%s) exceeds TTL %ds, discarding",
+                        age,
+                        pid,
+                        self._pool_ttl_secs,
+                    )
+                    to_shutdown.append(provider)
+                    continue
+                try:
+                    alive = (
+                        hasattr(provider, "is_process_alive")
+                        and provider.is_process_alive()
+                    )
+                except Exception:
+                    alive = False
+                if not alive:
+                    rc = provider.exit_code if hasattr(provider, "exit_code") else None
+                    logger.warning(
+                        "Pool health: dead provider (pid=%s, returncode=%s, age=%.0fs), discarding",
+                        pid,
+                        rc,
+                        age,
+                    )
+                    to_shutdown.append(provider)
+                    continue
+                logger.debug("Pool health: provider pid=%s alive (age=%.0fs)", pid, age)
+                healthy.append((provider, spawn_time))
+        finally:
+            # Re-enqueue survivors first, then shut down dead providers.
+            # This avoids an empty-queue window where _drain_and_claim()
+            # would fall back to cold start.  CancelledError during
+            # shutdown may skip remaining providers in to_shutdown —
+            # acceptable because they're already dead/expired and their
+            # PIDs are tracked in kiro_session_pids.txt for startup
+            # cleanup.  Sweep PIDs are cleared in a nested finally so
+            # they can't go stale regardless of how we exit.
+            try:
+                for entry in healthy:
+                    self._warm_pool.put_nowait(entry)
+                for p in to_shutdown:
+                    await self._discard_pool_provider(p, "Pool health discard")
+            finally:
+                self._pool_sweep_pids.clear()
+        removed = qsize - len(healthy)
+        if removed:
+            logger.info(
+                "Pool health: removed %d dead/expired, %d healthy remain",
+                removed,
+                len(healthy),
+            )
+            self._schedule_replenish()
+        else:
+            logger.debug("Pool health: all %d providers healthy", len(healthy))
 
     def context_info(self) -> list[dict[str, object]]:
         """Return context usage for all active sessions."""

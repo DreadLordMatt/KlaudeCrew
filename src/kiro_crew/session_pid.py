@@ -413,6 +413,14 @@ def _sync_kill_provider(provider: LLMProvider) -> None:
             pid = proc.pid
     if pid is None:
         return
+    # Only ever signal a real, positive, non-init PID. Test stand-ins are the
+    # sharp edge: a Mock attribute passes the None check and coerces to 1 via
+    # __index__, so an unguarded os.kill would SIGTERM init / the container
+    # entrypoint (observed as a CI sandbox dying with exit 143). pid <= 1 also
+    # excludes the kill(0)/kill(-n) process-group semantics outright.
+    if not isinstance(pid, int) or pid <= 1:
+        logger.debug("_sync_kill_provider: refusing to signal invalid pid %r", pid)
+        return
     # On Windows there is no SIGTERM/SIGKILL distinction (taskkill /F is a hard
     # kill) and no os.waitpid for non-child PIDs, so a single kill suffices.
     if platform_compat.IS_WINDOWS:

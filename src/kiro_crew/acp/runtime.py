@@ -493,6 +493,11 @@ class AcpRuntime:
                 )
             raise
 
+    # Grace window for SIGTERM before escalating, and the post-SIGKILL reap
+    # window. Class attributes so tests can shrink them.
+    _KILL_TERM_TIMEOUT = 5.0
+    _KILL_REAP_TIMEOUT = 2.0
+
     async def kill(self) -> None:
         """Kill the subprocess and clean up all state."""
         # Fail pending futures + poison session queues FIRST. _mark_dead sets
@@ -535,7 +540,7 @@ class AcpRuntime:
             except (OSError, ProcessLookupError):
                 pass
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                await asyncio.wait_for(self._process.wait(), timeout=self._KILL_TERM_TIMEOUT)
             except asyncio.TimeoutError:
                 try:
                     await loop.run_in_executor(
@@ -544,18 +549,36 @@ class AcpRuntime:
                     )
                 except (OSError, ProcessLookupError):
                     pass
+                # Reap the child so a delivered SIGKILL doesn't leave a zombie
+                # that the liveness probe below would misread as a survivor.
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=self._KILL_REAP_TIMEOUT)
+                except asyncio.TimeoutError:
+                    pass
             self._process = None
-            logger.info("AcpRuntime killed (PID %d)", pid)
+            if platform_compat.pid_exists(pid):
+                # Both kill_process_tree calls above swallow OSError by design
+                # (racing a normal exit), which makes a signal-delivery failure
+                # (EPERM through a launcher wrapper, pgid drift) look identical
+                # to success. Verify instead of assuming: a survivor must stay
+                # PID-tracked so the startup/periodic sweeps keep a handle on
+                # it — untracking here would leak the process until reboot.
+                logger.warning(
+                    "AcpRuntime kill: PID %d survived SIGTERM/SIGKILL escalation; "
+                    "leaving PID tracked for sweep", pid,
+                )
+            else:
+                logger.info("AcpRuntime killed (PID %d)", pid)
 
-            # Untrack the PID so the orphan sweep doesn't chase a dead entry
-            # (mirrors AcpClient._reset_state). Best-effort — a leftover entry
-            # is only pruned lazily otherwise.
-            try:
-                _untrack_pid(pid)
-                _untrack_session_pid(pid)
-                unregister_protected_pid(pid)
-            except Exception:
-                logger.debug("AcpRuntime: PID untracking failed for %s", pid, exc_info=True)
+                # Untrack the PID so the orphan sweep doesn't chase a dead entry
+                # (mirrors AcpClient._reset_state). Best-effort — a leftover entry
+                # is only pruned lazily otherwise.
+                try:
+                    _untrack_pid(pid)
+                    _untrack_session_pid(pid)
+                    unregister_protected_pid(pid)
+                except Exception:
+                    logger.debug("AcpRuntime: PID untracking failed for %s", pid, exc_info=True)
 
         if self._sandbox_cleanup:
             try:
