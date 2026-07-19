@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { screen, waitFor, fireEvent } from '@testing-library/react'
-import { Routes, Route } from 'react-router-dom'
+import { Routes, Route, useNavigate } from 'react-router-dom'
 import ArtifactDetailPage from '../pages/ArtifactDetailPage'
 import { renderWithProviders } from './helpers'
 import { api } from '../api/client'
@@ -48,6 +48,13 @@ describe('ArtifactDetailPage', () => {
     vi.mocked(api).artifactEvents = vi
       .fn()
       .mockResolvedValue({ slug: 'cr-queue', events: [] })
+    // Default to no comments. beforeEach uses clearAllMocks (call history only,
+    // not implementations), so a test that reassigns artifactComments would
+    // otherwise leak its mock into later tests. Resetting the default here keeps
+    // every test's comment count at 0 unless it explicitly overrides.
+    vi.mocked(api).artifactComments = vi
+      .fn()
+      .mockResolvedValue({ comments: [] })
   })
 
   it('renders artifact metadata and iframe', async () => {
@@ -66,6 +73,89 @@ describe('ArtifactDetailPage', () => {
     // the blob URL (async); findByTitle waits for it. A synchronous getByTitle
     // races the effect under coverage instrumentation (CI-only flake).
     expect(await screen.findByTitle(/Artifact: cr-queue/)).toBeInTheDocument()
+  })
+
+  it('keeps the comment sidebar collapsed when the artifact has no comments', async () => {
+    vi.mocked(api).artifact = vi.fn().mockResolvedValue(mkArtifact())
+    vi.mocked(api).artifactVersions = vi
+      .fn()
+      .mockResolvedValue({ slug: 'cr-queue', versions: [1, 2] })
+    vi.mocked(api).artifactComments = vi.fn().mockResolvedValue({ comments: [] })
+    renderRoute()
+    await waitFor(() => expect(screen.getByText('CR Queue')).toBeInTheDocument())
+    // Empty comment panel = wasted space on a dashboard/infographic, so the
+    // sidebar stays collapsed by default.
+    const toggle = screen.getByLabelText('Toggle comments')
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'false'))
+  })
+
+  it('auto-opens the comment sidebar when the artifact has comments', async () => {
+    vi.mocked(api).artifact = vi.fn().mockResolvedValue(mkArtifact())
+    vi.mocked(api).artifactVersions = vi
+      .fn()
+      .mockResolvedValue({ slug: 'cr-queue', versions: [1, 2] })
+    vi.mocked(api).artifactComments = vi.fn().mockResolvedValue({
+      comments: [
+        {
+          id: 'c1', author: 'joe', is_agent: false, body: 'first review note',
+          thread_id: 'c1', status: 'open', scope: 'private',
+          origin: 'local', sync_state: 'local_only',
+          created_at: '', updated_at: '',
+        },
+      ],
+    })
+    renderRoute()
+    // The comment body appears because the sidebar auto-reveals on comments.
+    await waitFor(() => expect(screen.getByText('first review note')).toBeInTheDocument())
+    expect(screen.getByLabelText('Toggle comments')).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('clears the manual sidebar override when navigating to another artifact', async () => {
+    // Both artifacts have a comment. The component instance is reused across the
+    // parameterized route, so without a per-navigation reset a manual close on
+    // one artifact would permanently suppress auto-reveal on the next.
+    const mkComment = (s: string) => ({
+      comments: [
+        {
+          id: `${s}-c1`, author: 'joe', is_agent: false, body: `${s} note`,
+          thread_id: `${s}-c1`, status: 'open', scope: 'private',
+          origin: 'local', sync_state: 'local_only',
+          created_at: '', updated_at: '',
+        },
+      ],
+    })
+    vi.mocked(api).artifact = vi.fn((s: string) =>
+      Promise.resolve(mkArtifact({ slug: s, name: s === 'art-a' ? 'Artifact A' : 'Artifact B' })),
+    ) as any
+    vi.mocked(api).artifactVersions = vi.fn((s: string) =>
+      Promise.resolve({ slug: s, versions: [1] }),
+    ) as any
+    vi.mocked(api).artifactComments = vi.fn((s: string) => Promise.resolve(mkComment(s))) as any
+
+    function Nav() {
+      const navigate = useNavigate()
+      return <button onClick={() => navigate('/artifacts/art-b')}>go-b</button>
+    }
+    renderWithProviders(
+      <>
+        <Nav />
+        <Routes>
+          <Route path="/artifacts/:slug" element={<ArtifactDetailPage />} />
+        </Routes>
+      </>,
+      { route: '/artifacts/art-a' },
+    )
+    // Artifact A auto-opens on its comment; the user then closes it.
+    await waitFor(() => expect(screen.getByText('art-a note')).toBeInTheDocument())
+    const toggleA = screen.getByLabelText('Toggle comments')
+    expect(toggleA).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(toggleA)
+    expect(screen.getByLabelText('Toggle comments')).toHaveAttribute('aria-pressed', 'false')
+    // Navigate to B (same route, different param). The override must reset so B
+    // — which also has a comment — auto-reveals its sidebar again.
+    fireEvent.click(screen.getByText('go-b'))
+    await waitFor(() => expect(screen.getByText('art-b note')).toBeInTheDocument())
+    expect(screen.getByLabelText('Toggle comments')).toHaveAttribute('aria-pressed', 'true')
   })
 
   it('shows version dropdown with Live default and changes selected version', async () => {
