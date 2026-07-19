@@ -1,0 +1,353 @@
+"""Identity-resolution topology tests (pre-work for the pid-namespace re-raise).
+
+Background (2026-07-18 incident): the PID-namespace sandbox change (24c320f6,
+reverted in CR-290268609; this fork ported then reverted it in ab96394b) broke
+subagent identity resolution in live deployments while the full unit gate
+stayed green. Session hosts ran inside a PID namespace where
+``os.getpid()``/``os.getppid()`` return namespace-local pids renumbered from 1,
+but the on-disk ``session_pid_<pid>.txt`` files are written by the gateway and
+keyed by HOST pids — so every client-side /proc ancestry walk resolved to an
+empty session key. Subagents registered with no parent session: invisible in
+the dashboard, completion events unroutable.
+
+Why the gate stayed green: the ancestry walk is implemented in FOUR
+independent copies (``mcp_caller.CallerContext.from_env``,
+``mcp_core._resolve_session_key``, the inline walk in
+``mcp_shared._resolve_excluded_tools``, ``mcp_gateway/stub.py``), each tested
+with hand-rolled per-file mocks that encode their author's topology
+assumptions. Mocks cannot detect that the assumption itself changed.
+
+This file provides the three unit-level defenses:
+
+1. **ProcessTopology** — a single shared model of the real process tree
+   (gateway -> session host -> kiro-cli -> MCP server), the session_pid file
+   contract, and a pluggable pid *view* (``host`` vs ``pidns``). Identity
+   tests consume this instead of hand-rolled ``_ppid_fn`` maps, so a future
+   change to process topology is modeled once and re-checked everywhere.
+2. **pid-view parametrized tests** for each of the four resolution paths.
+   The ``host`` view passes today. The ``pidns`` view is ``xfail(strict)`` —
+   an executable archive of the known breakage. A pid-namespace re-raise CR
+   must flip these to pass (and the strict marker forces the author to
+   consciously remove it).
+3. **Call-site registry guard** — scans ``src/`` for ``session_pid_``
+   references and fails when an unregistered file appears, so a fifth copy
+   of the walk cannot land silently.
+
+Ticket: https://taskei.amazon.dev/tasks/cbb12036-7452-4dcb-a293-d6a078510b6a
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Callable, Optional
+from unittest.mock import MagicMock
+
+import pytest
+
+# ---------------------------------------------------------------------------
+# The shared topology model
+# ---------------------------------------------------------------------------
+
+SESSION_KEY = "dashboard:chat-42-topofix"
+
+#: pid views. ``host``: every process sees real host pids (status quo after
+#: the pidns revert). ``pidns``: the session subtree runs inside a PID
+#: namespace — processes inside see ns-local pids; session_pid files keep
+#: HOST-pid keys because the gateway writes them from outside.
+VIEWS = [
+    "host",
+    pytest.param(
+        "pidns",
+        marks=pytest.mark.xfail(
+            strict=True,
+            reason=(
+                "session_pid_<pid>.txt files are keyed by HOST pids; a "
+                "namespace-local pid view cannot resolve them (2026-07-18 "
+                "incident, commit 24c320f6 reverted in CR-290268609). A "
+                "pid-namespace re-raise CR must make identity resolution "
+                "namespace-aware and flip this to pass."
+            ),
+        ),
+    ),
+]
+
+
+class ProcessTopology:
+    """Single source of truth for the session process tree in identity tests.
+
+    Models three things the four resolver copies all depend on:
+
+    * the host-pid parent chain (``/proc``-walk semantics),
+    * the ``session_pid_<host_pid>.txt`` files the gateway writes,
+    * the pid *view* of a process — what ``os.getpid()/getppid()`` and a
+      ``/proc`` read return from inside that process. Under ``pidns`` the
+      in-namespace processes observe ns-local pids and can only see other
+      in-namespace processes.
+
+    Tests must consume this instead of hand-rolling ``_ppid_fn`` dicts: when
+    the real topology changes (e.g. a sandbox adds a namespace layer), the
+    change is modeled here once and every consumer test re-runs against it.
+    """
+
+    def __init__(self, cfg_dir: Path) -> None:
+        self.cfg_dir = cfg_dir
+        self._parent: dict[int, int] = {}  # host pid -> host ppid
+        self._ns_pid: dict[int, int] = {}  # host pid -> ns-local pid
+
+    def add(self, pid: int, ppid: int, ns_pid: Optional[int] = None) -> None:
+        self._parent[pid] = ppid
+        if ns_pid is not None:
+            self._ns_pid[pid] = ns_pid
+
+    def write_session_pid(self, host_pid: int, session_key: str = SESSION_KEY) -> None:
+        """The gateway-side contract: files keyed by HOST pid, always."""
+        (self.cfg_dir / f"session_pid_{host_pid}.txt").write_text(
+            session_key, encoding="utf-8"
+        )
+
+    # -- what a given process observes under a view ------------------------
+
+    def observed_ppid(self, host_pid: int, view: str) -> int:
+        """What ``os.getppid()`` returns inside process *host_pid*."""
+        parent = self._parent[host_pid]
+        if view == "pidns" and host_pid in self._ns_pid:
+            # inside the namespace, the parent is seen by its ns-local pid
+            # (or is invisible if it lives outside the namespace).
+            return self._ns_pid.get(parent, 0)
+        return parent
+
+    def parent_lookup(self, view: str) -> Callable[[int], int]:
+        """A ``_parent_pid(pid) -> ppid`` function as seen under *view*.
+
+        ``host``: real-pid chain (gatewayd / un-namespaced processes).
+        ``pidns``: the in-namespace ``/proc`` remount — keys and values are
+        ns-local pids; anything outside the namespace does not exist (0).
+        """
+        if view == "host":
+            return lambda pid: self._parent.get(pid, 0)
+
+        host_of_ns = {ns: host for host, ns in self._ns_pid.items()}
+
+        def _ns_lookup(ns_pid: int) -> int:
+            host = host_of_ns.get(ns_pid)
+            if host is None:
+                return 0
+            return self._ns_pid.get(self._parent.get(host, 0), 0)
+
+        return _ns_lookup
+
+
+# Canonical subagent tree. Host pids are chosen above any real test-host
+# process range concern because all lookups are routed through the fixture.
+GATEWAY = 100          # writes session_pid files; outside any namespace
+SESSION_HOST = 110     # ns PID 1 when the sandbox adds a pid namespace
+KIRO_CLI = 120         # ns PID 2
+MCP_SERVER = 130       # ns PID 3 — the process running the resolvers below
+
+
+@pytest.fixture()
+def topo(tmp_path: Path) -> ProcessTopology:
+    t = ProcessTopology(tmp_path)
+    t.add(GATEWAY, 1)
+    t.add(SESSION_HOST, GATEWAY, ns_pid=1)
+    t.add(KIRO_CLI, SESSION_HOST, ns_pid=2)
+    t.add(MCP_SERVER, KIRO_CLI, ns_pid=3)
+    # The gateway writes the mapping for the session host it spawned —
+    # keyed by the HOST pid, which is the crux of the incident.
+    t.write_session_pid(SESSION_HOST)
+    return t
+
+
+def _wire_common(monkeypatch: pytest.MonkeyPatch, topo: ProcessTopology, view: str) -> None:
+    """Environment every resolver test shares: no env key, patched getppid."""
+    monkeypatch.delenv("KIROCREW_SESSION_KEY", raising=False)
+    monkeypatch.setattr(
+        "os.getppid", lambda: topo.observed_ppid(MCP_SERVER, view)
+    )
+    # Reset the fork's process-lifetime from_env cache: a previously-resolved
+    # identity from an earlier test (or the host-view run of this test) would
+    # otherwise short-circuit the walk and XPASS the strict pidns variants.
+    monkeypatch.setattr("kiro_crew.mcp_caller._FROM_ENV_CACHE", None)
+
+
+# ---------------------------------------------------------------------------
+# Walk copy 1: mcp_caller.CallerContext.from_env
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_from_env_resolves_session_key(topo, monkeypatch, view) -> None:
+    from kiro_crew import mcp_caller
+
+    _wire_common(monkeypatch, topo, view)
+    monkeypatch.setattr(mcp_caller, "_parent_pid", topo.parent_lookup(view))
+    # from_env imports config_dir lazily from the loader module.
+    monkeypatch.setattr(
+        "kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir
+    )
+
+    ctx = mcp_caller.CallerContext.from_env()
+    assert ctx.session_key == SESSION_KEY
+    assert ctx.session_type == "pidfile"
+
+
+# ---------------------------------------------------------------------------
+# Walk copy 2: mcp_core._resolve_session_key
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_mcp_core_resolves_session_key(topo, monkeypatch, view) -> None:
+    from kiro_crew import mcp_core
+
+    _wire_common(monkeypatch, topo, view)
+    monkeypatch.setattr(mcp_core, "_get_ppid", topo.parent_lookup(view))
+    monkeypatch.setattr(mcp_core, "config_dir", lambda: topo.cfg_dir)
+
+    assert mcp_core._resolve_session_key() == SESSION_KEY
+
+
+# ---------------------------------------------------------------------------
+# Walk copy 3: the inline walk in mcp_shared._resolve_excluded_tools
+# ---------------------------------------------------------------------------
+# The policy session-key walk is inlined in ``_resolve_excluded_tools`` and
+# its deep-walk step is a nested function reading the real /proc, so it
+# cannot be patched. Model the resolvable case with the file on the DIRECT
+# parent (kiro-cli): under the host view the very first ancestor matches and
+# the nested /proc read is never reached; under the pidns view getppid()
+# yields an ns-local pid whose session_pid file does not exist and whose
+# real-/proc chain terminates without a match, so the resolver fail-opens
+# WITHOUT ever calling the policy endpoint.
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_mcp_shared_policy_walk_reaches_gateway(topo, monkeypatch, view) -> None:
+    from kiro_crew import mcp_shared
+
+    # Reset the module-lifetime policy caches so a prior test (or the
+    # host-view run) cannot leak a cached/negative-cached result in.
+    monkeypatch.setattr(mcp_shared, "_excluded_tools", None)
+    monkeypatch.setattr(mcp_shared, "_last_failure_time", 0.0)
+    monkeypatch.setattr(mcp_shared, "_last_startup_race_time", 0.0)
+    monkeypatch.setattr(mcp_shared, "_failure_count", 0)
+
+    cfg = MagicMock()
+    cfg.dashboard.url = "http://localhost:5476/"
+    monkeypatch.setattr(
+        mcp_shared.KiroCrewConfig, "load", classmethod(lambda cls: cfg)
+    )
+    monkeypatch.setattr(mcp_shared, "parse_dashboard_url", lambda url: ("localhost", 5476))
+    monkeypatch.setattr(mcp_shared, "config_dir", lambda: topo.cfg_dir)
+    (topo.cfg_dir / ".local_secret").write_text("s")
+
+    topo.write_session_pid(KIRO_CLI)  # direct parent of MCP_SERVER
+    _wire_common(monkeypatch, topo, view)
+
+    response = MagicMock()
+    response.read.return_value = b'{"exclude": []}'
+    response.__enter__ = MagicMock(return_value=response)
+    response.__exit__ = MagicMock(return_value=False)
+    urlopen = MagicMock(return_value=response)
+    monkeypatch.setattr(mcp_shared.urllib.request, "urlopen", urlopen)
+
+    assert mcp_shared._resolve_excluded_tools() == set()
+    # The walk must have RESOLVED a session key and reached the gateway —
+    # under pidns it resolves empty and fail-opens without the call.
+    assert urlopen.called
+    request = urlopen.call_args[0][0]
+    assert request.get_header("X-session-key") == SESSION_KEY
+
+
+# ---------------------------------------------------------------------------
+# Walk copy 4: mcp_gateway.stub — register-time caller block + ancestor chain
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_stub_caller_block_carries_session_key(topo, monkeypatch, view) -> None:
+    from kiro_crew import mcp_caller
+    from kiro_crew.mcp_gateway import stub
+
+    _wire_common(monkeypatch, topo, view)
+    monkeypatch.setattr(mcp_caller, "_parent_pid", topo.parent_lookup(view))
+    monkeypatch.setattr(
+        "kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir
+    )
+
+    caller = stub._build_caller_block(None)
+    assert caller["session_key"] == SESSION_KEY
+    assert caller["session_type"] == "dashboard"
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_stub_ancestor_chain_reaches_session_host(topo, monkeypatch, view) -> None:
+    """The claim-push index keys stub connections by REAL ancestor pids; a
+    claim naming the session host must find this stub's connection."""
+    from kiro_crew.mcp_gateway import stub
+
+    _wire_common(monkeypatch, topo, view)
+    # stub imports _parent_pid by value — patch the stub-module binding.
+    monkeypatch.setattr(stub, "_parent_pid", topo.parent_lookup(view))
+
+    chain = stub._ancestor_pids()
+    assert SESSION_HOST in chain
+
+
+# ---------------------------------------------------------------------------
+# Call-site registry guard
+# ---------------------------------------------------------------------------
+# Every file referencing the session_pid_<pid>.txt contract must be listed
+# here with its declared role and namespace assumption. If this test fails
+# on your change: prefer REUSING one of the registered resolvers over adding
+# a new copy of the /proc walk; if a new reference is genuinely needed, add
+# it here with its role, and add pid-view parametrized tests above for any
+# new resolution path.
+
+_SESSION_PID_TOKEN = re.compile(r"session_pid_(\{|\*|<)")
+
+#: file (relative to src/kiro_crew) -> declared role / namespace assumption
+_REGISTERED_CALL_SITES: dict[str, str] = {
+    "dashboard/chat_runner.py": "writer: keys the file by the HOST pid of the spawned session process",
+    "slack/handler.py": "writer: keys the file by the HOST pid of the spawned session process",
+    "mcp_caller.py": "reader: client-side /proc ancestry walk — assumes caller sees HOST pids",
+    "mcp_core.py": "reader: /proc ancestry walk + stale-file cleanup glob — assumes HOST pids",
+    "mcp_shared.py": (
+        "reader: policy session-key /proc ancestry walk inline in "
+        "_resolve_excluded_tools — assumes HOST pids"
+    ),
+    "mcp_gateway/stub.py": "reader via CallerContext.from_env; register-time caller block — assumes HOST pids",
+    "mcp_gateway/claim.py": "docstring reference to the contract (no code reads)",
+    "session_pid.py": "stale-file cleanup: globs session_pid_*.txt for dead processes",
+}
+
+
+def _src_root() -> Path:
+    return Path(__file__).resolve().parent.parent / "src" / "kiro_crew"
+
+
+def test_session_pid_call_sites_are_registered() -> None:
+    src = _src_root()
+    found = {
+        str(p.relative_to(src))
+        for p in src.rglob("*.py")
+        if _SESSION_PID_TOKEN.search(p.read_text(encoding="utf-8", errors="replace"))
+    }
+    registered = set(_REGISTERED_CALL_SITES)
+
+    unregistered = found - registered
+    stale = registered - found
+    assert not unregistered, (
+        "New session_pid_<pid>.txt call site(s) detected: "
+        f"{sorted(unregistered)}.\n"
+        "The session_pid contract is HOST-pid-keyed and namespace-sensitive "
+        "(see the 2026-07-18 pid-namespace incident). Prefer reusing an "
+        "existing registered resolver over adding another copy of the /proc "
+        "walk. If the reference is intentional, register it in "
+        "_REGISTERED_CALL_SITES with its role, and add pid-view parametrized "
+        "tests in this file for any new resolution path."
+    )
+    assert not stale, (
+        f"Registered session_pid call site(s) no longer reference the token: "
+        f"{sorted(stale)}. Remove them from _REGISTERED_CALL_SITES."
+    )
