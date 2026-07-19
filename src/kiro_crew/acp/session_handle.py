@@ -55,6 +55,7 @@ from kiro_crew.acp.liveness import (
     LivenessOracle,
     ToolCallState,
 )
+from kiro_crew.acp.prompt_content import build_prompt_content
 from kiro_crew.acp.types import (
     EVENT_AGENT_SWITCHED,
     EVENT_CLEAR_STATUS,
@@ -373,7 +374,14 @@ class AcpSessionHandle:
         try:
             req_id = await self._runtime.send_request(
                 METHOD_PROMPT,
-                {"sessionId": self._session_id, "prompt": [{"type": "text", "text": message}]},
+                {
+                    "sessionId": self._session_id,
+                    # Inline referenced local images as base64 blocks (shared
+                    # with AcpClient._send_prompt). Without this the dashboard
+                    # runtime path sent a single text block, so uploaded images
+                    # never reached the model as image content.
+                    "prompt": build_prompt_content(message),
+                },
             )
         except Exception:
             self._turn_done.set()
