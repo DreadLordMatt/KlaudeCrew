@@ -2,7 +2,8 @@
 import { defineConfig, type Plugin } from 'vite'
 /// <reference types="vitest" />
 import react from '@vitejs/plugin-react'
-import { readFileSync } from 'fs'
+import { readFileSync, writeFileSync } from 'fs'
+import { execSync } from 'child_process'
 import http from 'http'
 import path from 'path'
 import { TAILWIND_RUNTIME_PATH, TAILWIND_RUNTIME_SRC } from './src/lib/vendorPaths'
@@ -116,8 +117,51 @@ function tailwindRuntimePlugin(): Plugin {
   }
 }
 
+/**
+ * Post-build plugin: replaces %%SW_BUILD_HASH%% in the copied public/sw.js
+ * with a stable build-time identifier (version + git SHA). This runs during
+ * `vite build` only (not dev server). The public/ directory is copied
+ * verbatim by Vite so `define` replacements don't apply to it.
+ */
+function swVersionPlugin(): Plugin {
+  return {
+    name: 'kirocrew-sw-version',
+    apply: 'build',
+    closeBundle() {
+      const swPath = path.resolve(__dirname, 'dist/sw.js')
+      try {
+        let content = readFileSync(swPath, 'utf-8')
+        if (!content.includes('%%SW_BUILD_HASH%%')) {
+          // Already injected by an earlier pass (vite may run multiple
+          // rollup passes per build; dist/sw.js can also be a previous
+          // build's output when this pass doesn't copy publicDir).
+          // Idempotent skip — but if the const line is missing entirely,
+          // the placeholder was renamed/removed in sw.js: fail loudly.
+          if (!/const CACHE_VERSION = '[^'%]+'/.test(content)) {
+            throw new Error(
+              'swVersionPlugin: neither placeholder %%SW_BUILD_HASH%% nor an injected CACHE_VERSION found in dist/sw.js'
+            )
+          }
+          return
+        }
+        // Use version + git SHA for reproducibility: identical source = identical hash.
+        // Falls back to version alone if git is unavailable (CI edge case).
+        let sha = ''
+        try { sha = execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim() } catch {}
+        const buildHash = sha ? `${pkg.version}-${sha}` : pkg.version
+        content = content.replace('%%SW_BUILD_HASH%%', buildHash)
+        writeFileSync(swPath, content)
+      } catch (e: unknown) {
+        // Only tolerate sw.js not existing (library mode, test builds).
+        // Anything else is a real bug — surface it.
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
+      }
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [react(), tokenProxyPlugin(), appImportMapPlugin(), tailwindRuntimePlugin()],
+  plugins: [react(), tokenProxyPlugin(), appImportMapPlugin(), tailwindRuntimePlugin(), swVersionPlugin()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
