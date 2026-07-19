@@ -1,5 +1,62 @@
 import { describe, it, expect } from 'vitest'
-import { findBestOccurrence } from '../hooks/useMarkdownCommentHighlights'
+import { findBestOccurrence, indexTextNodes, rangeForAnchor } from '../hooks/useMarkdownCommentHighlights'
+
+/** Build a detached DOM tree from an HTML snippet (ACAT-safe, no innerHTML). */
+function mount(html: string): HTMLDivElement {
+  const root = document.createElement('div')
+  root.appendChild(document.createRange().createContextualFragment(html))
+  return root
+}
+
+describe('rangeForAnchor occurrence matching (startOffset)', () => {
+  /** Absolute start offset of a Range within the joined text-node index. */
+  const startOf = (r: Range, idx: ReturnType<typeof indexTextNodes>) =>
+    idx.nodes.find(n => n.node === r.startContainer)!.start + r.startOffset
+
+  it('picks the occurrence nearest startOffset when prefix/suffix are absent', () => {
+    // "foo" at offsets 0, 8, 16. This is the reported bug: without a stored
+    // offset the first match always won; the offset pins the real selection.
+    const root = mount('<p>foo bar foo baz foo</p>')
+    const idx = indexTextNodes(root)
+    const second = idx.text.indexOf('foo', 1) // 8
+    const r = rangeForAnchor(idx, { id: 'c1', quote: 'foo', prefix: '', suffix: '', startOffset: second })
+    expect(r).not.toBeNull()
+    expect(startOf(r!, idx)).toBe(second)
+  })
+
+  it('picks a later repeat with identical surrounding context via startOffset', () => {
+    // Identical sentences → prefix/suffix can't disambiguate; only the offset can.
+    const root = mount('<p>pick me. pick me. pick me.</p>')
+    const idx = indexTextNodes(root)
+    const third = idx.text.lastIndexOf('pick me') // 18
+    const r = rangeForAnchor(idx, { id: 'c1', quote: 'pick me', prefix: '', suffix: '', startOffset: third })
+    expect(r).not.toBeNull()
+    expect(startOf(r!, idx)).toBe(third)
+  })
+
+  it('lets prefix/suffix override a stale offset (content shifted since capture)', () => {
+    // Offset points at the FIRST occurrence, but the stored prefix matches the
+    // SECOND. Prefix/suffix is the primary key, so the second still wins — a
+    // stale positional guess never beats a content match.
+    const root = mount('<p>we set the value. later we set the value.</p>')
+    const idx = indexTextNodes(root)
+    const first = idx.text.indexOf('set the value')
+    const second = idx.text.indexOf('set the value', first + 1)
+    const r = rangeForAnchor(idx, { id: 'c1', quote: 'set the value', prefix: 'later we ', suffix: '', startOffset: first })
+    expect(r).not.toBeNull()
+    expect(startOf(r!, idx)).toBe(second)
+  })
+
+  it('falls back to the nearest occurrence when startOffset is out of range', () => {
+    // Offset past the end (content shrank) → nearest is the last occurrence.
+    const root = mount('<p>foo bar foo baz foo</p>')
+    const idx = indexTextNodes(root)
+    const last = idx.text.lastIndexOf('foo') // 16
+    const r = rangeForAnchor(idx, { id: 'c1', quote: 'foo', prefix: '', suffix: '', startOffset: 9999 })
+    expect(r).not.toBeNull()
+    expect(startOf(r!, idx)).toBe(last)
+  })
+})
 
 describe('MarkdownPanel inline highlight matching (startOffset)', () => {
   it('returns first occurrence when no startOffset is stored (backward compat)', () => {
