@@ -555,14 +555,13 @@ def _load_steering_resources() -> str:
 
 
 # Critical rules reinforced every session (supplements the system prompt)
+# NOTE: The diff-block output rule is stated authoritatively in the base system
+# prompt (config/prompt.md, "## Output Format") and is intentionally NOT repeated
+# here — restating it duplicated ~7 lines into every dashboard turn. Keep this
+# block scoped to the rules that are NOT in prompt.md (absolute-path + [OPTIONS:]).
+# Do not re-add the diff-block rule here; edit prompt.md instead.
 _CRITICAL_RULES = (
     "[CRITICAL RULES — always follow these]\n"
-    "After ANY file change (create, edit, append, delete), you MUST show a "
-    "```diff code block with the change using standard unified diff format "
-    "including `--- old_path` / `+++ new_path` headers and an `@@` hunk line "
-    "(use /dev/null for new files / deletions). The headers are required so "
-    "the dashboard's diff viewer can link to the file. No exceptions — even "
-    "single-line changes MUST get a diff block.\n"
     "When referencing file paths in your response, ALWAYS use the absolute path "
     "inside inline `code` backticks (e.g. `/home/user/project/src/main.py`). "
     "Never use relative paths or bare filenames. This enables the UI file viewer panel.\n"

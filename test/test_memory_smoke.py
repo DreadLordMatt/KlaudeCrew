@@ -121,7 +121,10 @@ class TestMemoryInjectionAllAgents:
         builder = _builder(tmp_path)
         ctx = builder.build_session_context(agent="my-custom-agent")
         assert "[CRITICAL RULES" in ctx
-        assert "diff" in ctx
+        # The diff-block rule is authoritative in the base system prompt
+        # (config/prompt.md), not restated in the injected _CRITICAL_RULES block;
+        # assert a rule that legitimately remains in the injected block.
+        assert "absolute path" in ctx
 
     def test_custom_agent_skips_skills(self, tmp_path: Path) -> None:
         skills_dir = tmp_path / "skills" / "test"
