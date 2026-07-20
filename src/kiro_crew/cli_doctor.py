@@ -161,6 +161,7 @@ def _doctor_model_url_reachable(issues: list[str]) -> None:
     url = _resolve_model_url()
     try:
         req = urllib.request.Request(url, method="HEAD")
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- _resolve_model_url enforces https://; HEAD-only reachability probe
         with urllib.request.urlopen(req, timeout=5) as resp:
             print(f"  model url:   ✅ reachable ({resp.status}) {url}")
     except urllib.error.HTTPError as exc:

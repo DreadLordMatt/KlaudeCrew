@@ -548,19 +548,32 @@ def _resolve_model_url() -> str:
     deployments), then a non-empty ``memory.embed_model_url`` in
     ``config.json``, then the public CDN default. The config file is read
     raw (not via the full loader) so the download thread never depends on
-    the config dataclass import graph. Whatever the source, the download is
-    only trusted after the streaming sha256 matches ``_GGUF_SHA256``.
+    the config dataclass import graph. Overrides must be ``https://`` —
+    other schemes (``file://``, ``http://``) are rejected so an
+    operator-controlled value can't read local files or fetch plaintext.
+    Whatever the source, the download is only trusted after the streaming
+    sha256 matches ``_GGUF_SHA256``.
     """
     env_url = os.environ.get(_MODEL_URL_ENV, "").strip()
     if env_url:
-        return env_url
+        if env_url.lower().startswith("https://"):
+            return env_url
+        logger.warning(
+            "%s must be an https:// URL (got %r) — using the CDN default",
+            _MODEL_URL_ENV, env_url[:64],
+        )
     try:
         path = config_path()
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
             cfg_url = str(data.get("memory", {}).get("embed_model_url", "") or "").strip()
             if cfg_url:
-                return cfg_url
+                if cfg_url.lower().startswith("https://"):
+                    return cfg_url
+                logger.warning(
+                    "memory.embed_model_url must be an https:// URL (got %r) — "
+                    "using the CDN default", cfg_url[:64],
+                )
     except Exception:
         logger.debug("Could not read embed_model_url from config", exc_info=True)
     return _DEFAULT_MODEL_URL
@@ -707,6 +720,7 @@ class ModelDownloadManager:
             logger.info("Downloading embedding model from %s", url)
             req = urllib.request.Request(url, method="GET")
             ctx = _make_ssl_context()
+            # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- _resolve_model_url enforces https:// and the payload is sha256-pinned
             with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_SECS, context=ctx) as resp:
                 total = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0
