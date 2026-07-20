@@ -28,7 +28,6 @@ from typing import Optional
 
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.config.paths import config_dir
-from kiro_crew.metrics.local_exporter import JsonlMetricExporter
 from kiro_crew.metrics.recorder import MetricsRecorder
 
 # Mesh-2829: KiroCrew declares opentelemetry-sdk as a required dependency, so
@@ -39,6 +38,13 @@ from kiro_crew.metrics.recorder import MetricsRecorder
 # brick the ENTIRE gateway (and `kirocrew --version`) even though telemetry
 # defaults off. Degrade to the existing no-op MetricsRecorder(None) path instead
 # of crashing at import time.
+#
+# local_exporter is imported INSIDE the guard: its JsonlMetricExporter
+# subclasses the OTel SDK's MetricExporter base class, so the module itself
+# cannot load without opentelemetry. It is only used on the enabled path
+# (after the _OTEL_AVAILABLE check in _build_recorder), so guarding the
+# import preserves the degrade contract. recorder.py is annotation-only on
+# OTel symbols (TYPE_CHECKING import) and stays loadable either way.
 try:
     from opentelemetry.sdk.metrics import Histogram, MeterProvider
     from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
@@ -48,10 +54,13 @@ try:
     )
     from opentelemetry.sdk.resources import Resource
 
+    from kiro_crew.metrics.local_exporter import JsonlMetricExporter
+
     _OTEL_AVAILABLE = True
 except ImportError:
     Histogram = MeterProvider = PeriodicExportingMetricReader = None  # type: ignore[assignment,misc]
     ExplicitBucketHistogramAggregation = View = Resource = None  # type: ignore[assignment,misc]
+    JsonlMetricExporter = None  # type: ignore[assignment,misc]
     _OTEL_AVAILABLE = False
 
 logger = logging.getLogger(__name__)

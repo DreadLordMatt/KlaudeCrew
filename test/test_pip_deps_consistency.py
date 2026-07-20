@@ -1,0 +1,295 @@
+"""Build gate: every unguarded third-party import is declared in setup.cfg.
+
+Static AST check that fails the build when a module-level third-party import
+in core ``kiro_crew`` source is NOT declared in ``setup.cfg [options]
+install_requires``. This prevents the recurring pattern where a dependency
+is present in a dev environment but missing from ``setup.cfg``
+— silently breaking pip-based installs (editable, one-line, auto-update) with
+``ModuleNotFoundError`` at startup.
+
+Hermetic — no network, no package installation, pure AST + configparser.
+
+Scope: only core kiro_crew modules (excludes apps/builtins/, knowledge/,
+workflows/, aidlc/ sub-trees which have their own dependency management).
+
+The historical PyYAML gap and the opentelemetry
+gap both would have been caught by this gate on day one.
+"""
+from __future__ import annotations
+
+import ast
+import configparser
+import pathlib
+import sys
+
+# --- Dist name -> importable root package mapping ---
+# pip distribution names and Python importable names often differ.
+_DIST_TO_IMPORT: dict[str, str] = {
+    "slack-sdk": "slack_sdk",
+    "pyyaml": "yaml",
+    "python-docx": "docx",
+    "pysqlite3-binary": "pysqlite3",
+    "amazon-transcribe": "amazon_transcribe",
+    "cron-descriptor": "cron_descriptor",
+    "opentelemetry-api": "opentelemetry",
+    "opentelemetry-sdk": "opentelemetry",
+    "snowballstemmer": "snowballstemmer",
+    "defusedxml": "defusedxml",
+    "pdfplumber": "pdfplumber",
+    "websockets": "websockets",
+}
+
+# --- Modules explicitly exempt from the check ---
+_EXEMPT: set[str] = {
+    # Optional integration; guarded by try/except in the import site.
+    "playwright",
+    # Test-only; not a runtime dep.
+    "pytest",
+    "_pytest",
+    # uvloop optional perf dep; guarded at import site.
+    "uvloop",
+    # yarl is a transitive dep of aiohttp; always present when aiohttp is.
+    "yarl",
+    # httpx is optional for quip connector; guarded.
+    "httpx",
+}
+
+# Sub-trees within kiro_crew that are NOT core startup and have their own
+# dependency management (app builtins have requirements.txt, knowledge/
+# and workflows/ are feature modules loaded lazily).
+_EXCLUDED_SUBTREES: tuple[str, ...] = (
+    "apps/builtins/",
+    "knowledge/",
+    "workflows/",
+    "aidlc/",
+    # Fork-only artifact-deploy reaper Lambda payload; boto3/botocore come
+    # from the AWS Lambda runtime, not core startup imports.
+    "deploy/skills/",
+)
+
+
+def _src_root() -> pathlib.Path:
+    """Locate the kiro_crew source tree."""
+    try:
+        import kiro_crew  # noqa: PLC0415
+
+        return pathlib.Path(kiro_crew.__file__).resolve().parent
+    except Exception:
+        return pathlib.Path(__file__).resolve().parent.parent / "src" / "kiro_crew"
+
+
+def _setup_cfg_path() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parent.parent / "setup.cfg"
+
+
+def _parse_install_requires() -> set[str]:
+    """Parse setup.cfg and return the set of declared import root names."""
+    cfg = configparser.ConfigParser()
+    cfg.read(_setup_cfg_path())
+    raw = cfg.get("options", "install_requires", fallback="")
+    declared: set[str] = set()
+    for line in raw.strip().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Strip version specifiers and markers
+        dist_name = line.split(">=")[0].split("<=")[0].split("==")[0].split(
+            "!="
+        )[0].split("<")[0].split(">")[0].split(";")[0].strip()
+        normalized = dist_name.lower().replace("_", "-")
+        import_name = _DIST_TO_IMPORT.get(normalized, dist_name.replace("-", "_"))
+        declared.add(import_name)
+    return declared
+
+
+def _is_in_try_except_importerror(node: ast.stmt, tree: ast.Module) -> bool:
+    """Check if an import is inside a try block that catches ImportError."""
+    for top_node in ast.walk(tree):
+        if not isinstance(top_node, ast.Try):
+            continue
+        catches_import_error = any(
+            (
+                handler.type is None  # bare except
+                or (
+                    isinstance(handler.type, ast.Name)
+                    and handler.type.id
+                    in ("ImportError", "ModuleNotFoundError", "Exception")
+                )
+                or (
+                    isinstance(handler.type, ast.Tuple)
+                    and any(
+                        isinstance(elt, ast.Name)
+                        and elt.id
+                        in ("ImportError", "ModuleNotFoundError", "Exception")
+                        for elt in handler.type.elts
+                    )
+                )
+            )
+            for handler in top_node.handlers
+        )
+        if catches_import_error:
+            for body_stmt in top_node.body:
+                if body_stmt is node:
+                    return True
+    return False
+
+
+def _collect_unguarded_imports(filepath: pathlib.Path) -> list[tuple[str, str]]:
+    """Unguarded module-level third-party imports in a single file."""
+    source = filepath.read_text(encoding="utf-8", errors="replace")
+    try:
+        tree = ast.parse(source, filename=str(filepath))
+    except SyntaxError:
+        return []
+
+    stdlib = sys.stdlib_module_names if hasattr(sys, "stdlib_module_names") else set()
+    results: list[tuple[str, str]] = []
+
+    for node in ast.iter_child_nodes(tree):
+        imports_to_check: list[tuple[str, ast.stmt]] = []
+
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports_to_check.append((alias.name.split(".")[0], node))
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and node.level == 0:  # absolute imports only
+                imports_to_check.append((node.module.split(".")[0], node))
+        elif isinstance(node, ast.Try):
+            # Check if this try catches ImportError
+            catches_import_error = any(
+                (
+                    handler.type is None
+                    or (
+                        isinstance(handler.type, ast.Name)
+                        and handler.type.id
+                        in ("ImportError", "ModuleNotFoundError", "Exception")
+                    )
+                    or (
+                        isinstance(handler.type, ast.Tuple)
+                        and any(
+                            isinstance(elt, ast.Name)
+                            and elt.id
+                            in ("ImportError", "ModuleNotFoundError", "Exception")
+                            for elt in handler.type.elts
+                        )
+                    )
+                )
+                for handler in node.handlers
+            )
+            if not catches_import_error:
+                # Unguarded try body — scan for imports
+                for stmt in node.body:
+                    if isinstance(stmt, ast.Import):
+                        for alias in stmt.names:
+                            imports_to_check.append((alias.name.split(".")[0], stmt))
+                    elif isinstance(stmt, ast.ImportFrom):
+                        if stmt.module and stmt.level == 0:
+                            imports_to_check.append(
+                                (stmt.module.split(".")[0], stmt)
+                            )
+            # else: guarded, skip all body imports
+
+        for root, stmt in imports_to_check:
+            if root in stdlib or root.startswith("_"):
+                continue
+            if root == "kiro_crew":
+                continue
+            if root in _EXEMPT:
+                continue
+            results.append((root, str(filepath)))
+
+    return results
+
+
+def test_all_unguarded_third_party_imports_are_declared():
+    """Every module-level unguarded third-party import in core kiro_crew
+    MUST be in setup.cfg install_requires."""
+    src_root = _src_root()
+    declared = _parse_install_requires()
+
+    undeclared: list[str] = []
+    for py_file in sorted(src_root.rglob("*.py")):
+        # Skip vendored code, test fixtures, and excluded subtrees
+        rel_str = str(py_file.relative_to(src_root))
+        if "_vendor" in py_file.parts or "tests_fixtures" in py_file.parts:
+            continue
+        if any(rel_str.startswith(excl) for excl in _EXCLUDED_SUBTREES):
+            continue
+
+        for root_module, filepath in _collect_unguarded_imports(py_file):
+            if root_module not in declared:
+                rel = py_file.relative_to(src_root)
+                undeclared.append(f"  {root_module} (in {rel})")
+
+    # Deduplicate preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for entry in undeclared:
+        if entry not in seen:
+            seen.add(entry)
+            unique.append(entry)
+
+    assert not unique, (
+        "Unguarded module-level third-party imports not declared in "
+        "setup.cfg install_requires (pip installs will crash):\n"
+        + "\n".join(unique)
+        + "\n\nFix: add the dep to setup.cfg install_requires, OR wrap the "
+        "import in try/except ImportError with a no-op fallback, OR add to "
+        "_EXEMPT in this test with a reason comment."
+    )
+
+
+def test_noop_recorder_when_otel_missing(monkeypatch):
+    """When opentelemetry is not importable, get_recorder() returns a no-op."""
+    import importlib
+
+    # Save and remove all opentelemetry + provider modules from sys.modules
+    to_remove = [
+        k
+        for k in list(sys.modules)
+        if k.startswith("opentelemetry")
+        or k in (
+            "kiro_crew.metrics.provider",
+            "kiro_crew.metrics.recorder",
+            "kiro_crew.metrics.local_exporter",
+        )
+    ]
+    saved = {k: sys.modules.pop(k) for k in to_remove}
+
+    import builtins
+
+    original_import = builtins.__import__
+
+    def mock_import(name, *args, **kwargs):
+        if name.startswith("opentelemetry"):
+            raise ImportError(f"No module named '{name}'")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", mock_import)
+
+    try:
+        # Re-import provider — it should set _OTEL_AVAILABLE = False and
+        # degrade to the MetricsRecorder(None) no-op path (Mesh-2829 contract).
+        spec = importlib.util.find_spec("kiro_crew.metrics.provider")
+        assert spec is not None
+        prov = importlib.util.module_from_spec(spec)
+        sys.modules["kiro_crew.metrics.provider"] = prov
+        spec.loader.exec_module(prov)
+
+        assert prov._OTEL_AVAILABLE is False
+
+        recorder = prov.get_recorder()
+        assert not recorder.enabled
+
+        # Methods should be callable without raising
+        recorder.counter("test.counter", 1)
+        recorder.histogram("test.hist", 42.0)
+        recorder.up_down_counter("test.updown", -1)
+    finally:
+        monkeypatch.undo()
+        # Restore modules
+        sys.modules.update(saved)
+        # Remove our injected module
+        sys.modules.pop("kiro_crew.metrics.provider", None)
+        # Re-import cleanly
+        importlib.import_module("kiro_crew.metrics.provider")
