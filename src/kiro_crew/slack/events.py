@@ -1520,8 +1520,34 @@ async def _dispatch_queued(
         getattr(getattr(orch._cfg, "messaging", None), "use_transport", False) is True
         and _activation != ACTIVATION_REVIEW
     )
-    if _use_transport:
-        await handle_message_transport(
+    try:
+        if _use_transport:
+            await handle_message_transport(
+                orch.slack,  # type: ignore[arg-type]
+                orch.sessions,  # type: ignore[arg-type]
+                channel,
+                text,
+                thread_ts,
+                msg_ts,
+                kwargs.get("sender_id", ""),
+                context_builder=orch.ctx_builder,
+                conversation_log=orch.conv_log,
+                approval_mode=_resolve_approval_mode(orch),
+                agent_override=kwargs.get("agent_override"),
+                subagent_manager=orch.subagent_mgr,
+                task_runner=orch.task_runner,
+                cron_service=orch.cron_svc,
+                # Live-read per message (parity with native handle_message, which
+                # loads config at handler.py:2661/2683): orch._cfg is captured at
+                # startup, so reading it here would make settings-UI toggle saves
+                # silently inert until restart.
+                reactions_enabled=KiroCrewConfig.load().slack.reactions_enabled,
+                show_thinking=KiroCrewConfig.load().slack.show_thinking,
+                consolidator=orch.consolidator,
+                user_display_name=kwargs.get("user_display_name"),
+            )
+            return
+        await handle_message(
             orch.slack,  # type: ignore[arg-type]
             orch.sessions,  # type: ignore[arg-type]
             channel,
@@ -1529,42 +1555,27 @@ async def _dispatch_queued(
             thread_ts,
             msg_ts,
             kwargs.get("sender_id", ""),
-            context_builder=orch.ctx_builder,
-            conversation_log=orch.conv_log,
+            team_id=kwargs.get("team_id", ""),
             approval_mode=_resolve_approval_mode(orch),
-            agent_override=kwargs.get("agent_override"),
+            context_builder=orch.ctx_builder,
+            cron_service=orch.cron_svc,
+            conversation_log=orch.conv_log,
+            consolidator=orch.consolidator,
             subagent_manager=orch.subagent_mgr,
             task_runner=orch.task_runner,
-            cron_service=orch.cron_svc,
-            # Live-read per message (parity with native handle_message, which
-            # loads config at handler.py:2661/2683): orch._cfg is captured at
-            # startup, so reading it here would make settings-UI toggle saves
-            # silently inert until restart.
-            reactions_enabled=KiroCrewConfig.load().slack.reactions_enabled,
-            show_thinking=KiroCrewConfig.load().slack.show_thinking,
-            consolidator=orch.consolidator,
+            channel_agent=kwargs.get("agent_override"),
             user_display_name=kwargs.get("user_display_name"),
         )
-        return
-    await handle_message(
-        orch.slack,  # type: ignore[arg-type]
-        orch.sessions,  # type: ignore[arg-type]
-        channel,
-        text,
-        thread_ts,
-        msg_ts,
-        kwargs.get("sender_id", ""),
-        team_id=kwargs.get("team_id", ""),
-        approval_mode=_resolve_approval_mode(orch),
-        context_builder=orch.ctx_builder,
-        cron_service=orch.cron_svc,
-        conversation_log=orch.conv_log,
-        consolidator=orch.consolidator,
-        subagent_manager=orch.subagent_mgr,
-        task_runner=orch.task_runner,
-        channel_agent=kwargs.get("agent_override"),
-        user_display_name=kwargs.get("user_display_name"),
-    )
+    finally:
+        # The enqueue path deferred temp-image cleanup to here so the queued
+        # turn's text could still resolve its image paths (see _route_message).
+        # Unlink them now that the turn has consumed them — in finally so a
+        # raising turn can't leak the temp files.
+        for _p in kwargs.get("image_temp_paths") or []:
+            try:
+                os.unlink(_p)
+            except OSError:
+                pass
 
 
 # Maximum characters to recover from block extraction (DoS guard).
@@ -2181,6 +2192,7 @@ async def _route_message(
             team_id=team_id,
             agent_override=agent_override,
             user_display_name=_sender_display,
+            image_temp_paths=list(_image_temp_paths),
         )
         if not _queued:
             # Session object not created yet — stash on orch._pending_queue
@@ -2195,6 +2207,7 @@ async def _route_message(
                         team_id=team_id,
                         agent_override=agent_override,
                         user_display_name=_sender_display,
+                        image_temp_paths=list(_image_temp_paths),
                     ),
                 )
             )
@@ -2206,7 +2219,11 @@ async def _route_message(
                 await orch.slack.add_reaction(channel, msg_ts, "hourglass_flowing_sand")
             except Exception:
                 logger.debug("Failed to add queue reaction", exc_info=True)
-        _cleanup_image_temps()
+        # NOTE: do NOT _cleanup_image_temps() here — clean_text references these
+        # temp-file paths and the queued turn hasn't run yet. They are carried in
+        # the queue kwargs and unlinked by _dispatch_queued after the turn runs
+        # (deleting them now dropped the images silently: p.is_file() was False
+        # by dispatch time, so _send_prompt skipped them with no error).
         return
     elif orch.sessions and orch.sessions.enqueue(
         session_key,
@@ -2218,6 +2235,7 @@ async def _route_message(
         team_id=team_id,
         agent_override=agent_override,
         user_display_name=_sender_display,
+        image_temp_paths=list(_image_temp_paths),
     ):
         logger.info("Message %s queued for busy session %s", msg_ts, session_key)
         if orch.slack:
@@ -2225,7 +2243,9 @@ async def _route_message(
                 await orch.slack.add_reaction(channel, msg_ts, "hourglass_flowing_sand")
             except Exception:
                 logger.debug("Failed to add queue reaction", exc_info=True)
-        _cleanup_image_temps()
+        # See the force=True branch above: cleanup is deferred to
+        # _dispatch_queued so the queued turn's clean_text can still resolve
+        # its image temp-file paths.
         return
 
     # ── New transport path: route to the messaging abstraction ──

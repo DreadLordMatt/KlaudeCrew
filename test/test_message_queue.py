@@ -506,3 +506,54 @@ class TestStopTurnPreserveQueue:
         mgr.enqueue("slot1", "ts1", "msg1", force=True)
         await mgr.stop_turn("slot1", preserve_queue=True)
         assert sess.prev_turn_cancelled is True
+
+
+class TestQueuedMessageImagePaths:
+    """A message with image attachments that arrives while the session is busy
+    is enqueued with its clean_text embedding the downloaded image temp-file
+    paths. The enqueue path previously called _cleanup_image_temps() immediately,
+    os.unlink()ing those files before the queued turn ran — so at dispatch
+    p.is_file() was False and _send_prompt silently dropped the images. The fix
+    carries the paths in the queue kwargs and defers unlink to _dispatch_queued
+    (after the turn consumes them)."""
+
+    def test_enqueue_round_trips_image_temp_paths(self):
+        mgr = SessionManager.__new__(SessionManager)
+        mgr._sessions = {}
+        mgr._lock = asyncio.Lock()
+        mgr._sessions["thread1"] = _Session(provider=MagicMock())
+        assert mgr.enqueue(
+            "thread1", "ts1", "look at this\n/tmp/img_abc.png",
+            force=True, image_temp_paths=["/tmp/img_abc.png"],
+        ) is True
+        msg_ts, text, kwargs = mgr.dequeue("thread1")
+        assert msg_ts == "ts1"
+        assert kwargs["image_temp_paths"] == ["/tmp/img_abc.png"]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_queued_unlinks_images_after_turn(self, tmp_path):
+        import kiro_crew.slack.events as events
+
+        # A real temp file that must survive until dispatch, then be cleaned up.
+        img = tmp_path / "img_queued.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n")
+        assert img.is_file()
+
+        seen_paths: dict = {}
+
+        async def fake_handle_message(*args, **kwargs):
+            # At dispatch time the image file must still exist (the bug deleted
+            # it before this point). Record its existence for the assertion.
+            seen_paths["existed_at_dispatch"] = img.is_file()
+
+        orch = MagicMock()
+        orch.slack = None  # skip reaction removal
+
+        with patch.object(events, "handle_message", fake_handle_message):
+            await events._dispatch_queued(
+                orch, "thread1", "ts1", f"see {img}",
+                {"sender_id": "U1", "image_temp_paths": [str(img)]},
+            )
+
+        assert seen_paths["existed_at_dispatch"] is True  # survived until the turn
+        assert not img.is_file()  # cleaned up afterwards (no leak)
