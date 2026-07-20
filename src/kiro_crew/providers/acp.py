@@ -21,6 +21,7 @@ from kiro_crew.acp.session_provider import AcpSessionProvider
 from kiro_crew.acp.types import ACP_BACKEND_CLAUDE, STOP_REASON_CANCELLED, STOP_REASON_END_TURN
 from kiro_crew.effort import (
     EFFORT_LEVELS,
+    effort_settings_key,
     model_supports_effort,
     resolve_effort_for_model,
 )
@@ -41,9 +42,13 @@ def _write_cli_overlay(work_dir: Path, model: str, effort: str) -> None:
     the global ``~/.kiro/settings/cli.json`` so this only affects the slot's
     own session. Merge-safe and idempotent — safe to call before every spawn.
 
+    The effort sub-key is family-specific (``effort_settings_key``): Claude
+    models use ``output_config``, GPT models use ``reasoning`` — kiro-cli
+    silently ignores the wrong key, so the shape must match the model.
+
     Format::
 
-        {"chat.modelDefaults": {"<model>": {"output_config": {"effort": "<level>"}}}}
+        {"chat.modelDefaults": {"<model>": {"<key>": {"effort": "<level>"}}}}
     """
     settings_dir = work_dir / ".kiro" / "settings"
     settings_dir.mkdir(parents=True, exist_ok=True)
@@ -60,11 +65,20 @@ def _write_cli_overlay(work_dir: Path, model: str, effort: str) -> None:
     model_cfg = model_defaults.get(model)
     if not isinstance(model_cfg, dict):
         model_cfg = {}
-    output_cfg = model_cfg.get("output_config")
-    if not isinstance(output_cfg, dict):
-        output_cfg = {}
-    output_cfg["effort"] = effort
-    model_cfg["output_config"] = output_cfg
+    key = effort_settings_key(model)
+    effort_cfg = model_cfg.get(key)
+    if not isinstance(effort_cfg, dict):
+        effort_cfg = {}
+    effort_cfg["effort"] = effort
+    model_cfg[key] = effort_cfg
+    # Recovery checks output_config first, so leaving effort under both family
+    # keys can resurrect a stale value after restart.
+    other_key = "reasoning" if key == "output_config" else "output_config"
+    other_effort_cfg = model_cfg.get(other_key)
+    if isinstance(other_effort_cfg, dict) and "effort" in other_effort_cfg:
+        other_effort_cfg.pop("effort")
+        if not other_effort_cfg:
+            model_cfg.pop(other_key, None)
     model_defaults[model] = model_cfg
     existing["chat.modelDefaults"] = model_defaults
     cli_json.write_text(json.dumps(existing, indent=2), encoding="utf-8")
@@ -136,11 +150,15 @@ def _clear_cli_overlay_effort(work_dir: Path, model: str) -> None:
         return
     model_cfg = model_defaults.get(model)
     if isinstance(model_cfg, dict):
-        output_cfg = model_cfg.get("output_config")
-        if isinstance(output_cfg, dict):
-            output_cfg.pop("effort", None)
-            if not output_cfg:
-                model_cfg.pop("output_config", None)
+        # Clear whichever sub-key holds effort. Sweep both known shapes so a
+        # model whose family key changed (or an overlay written by an older
+        # build) is fully cleaned up, not just the current-family key.
+        for key in ("output_config", "reasoning"):
+            effort_cfg = model_cfg.get(key)
+            if isinstance(effort_cfg, dict):
+                effort_cfg.pop("effort", None)
+                if not effort_cfg:
+                    model_cfg.pop(key, None)
         if not model_cfg:
             model_defaults.pop(model, None)
     try:
@@ -172,12 +190,15 @@ def _read_cli_overlay(work_dir: Path) -> dict[str, str]:
     for model, cfg in model_defaults.items():
         if not isinstance(cfg, dict):
             continue
-        oc = cfg.get("output_config")
-        if not isinstance(oc, dict):
-            continue
-        eff = oc.get("effort")
-        if isinstance(eff, str) and eff:
-            out[model] = eff
+        # Effort lives under output_config (Claude) or reasoning (GPT); read
+        # whichever is present so recovery works for both families.
+        for key in ("output_config", "reasoning"):
+            eff_cfg = cfg.get(key)
+            if isinstance(eff_cfg, dict):
+                eff = eff_cfg.get("effort")
+                if isinstance(eff, str) and eff:
+                    out[model] = eff
+                    break
     return out
 
 

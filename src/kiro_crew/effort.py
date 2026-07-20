@@ -1,18 +1,24 @@
 """Shared reasoning-effort vocabulary for all LLM providers.
 
 Both kiro-cli and claude-agent-acp expose a per-session "effort" (a.k.a.
-thinking depth) knob, but only on Claude Fable/Opus/Sonnet models.  This module
-is the single source of truth for the valid levels and the model-capability
-check so the CLI, dashboard handlers, providers, and config loader all agree.
+thinking depth) knob, but only on reasoning-capable models — Claude
+Fable/Opus/Sonnet and the recent GPT-5.x models.  This module is the single
+source of truth for the valid levels and the model-capability check so the
+CLI, dashboard handlers, providers, and config loader all agree.
 
 Stdlib-only and import-light on purpose — it is imported from hot paths
 (``providers/acp.py``, ``dashboard/chat_handlers.py``) and must not create
 import cycles.
 
 References:
-- kiro-cli ``/effort``: levels ``low|medium|high|xhigh|max``, Opus/Sonnet only,
-  per-model defaults via ``~/.kiro/settings/cli.json`` →
-  ``chat.modelDefaults.<model>.output_config.effort``.
+- kiro-cli ``/effort`` (verified against 2.12/2.13 over ACP): levels
+  ``low|medium|high|xhigh|max``. Available on Claude Opus/Sonnet/Fable AND the
+  GPT-5.x models (``gpt-5.6-sol|terra|luna`` etc.) — kiro applies effort to any
+  model that declares it, and rejects it with "Effort configuration is
+  currently not available on <model>" for those that don't (deepseek, minimax,
+  glm, qwen, auto). Per-model defaults live in ``~/.kiro/settings/cli.json`` →
+  ``chat.modelDefaults.<model>.<key>.effort`` where ``<key>`` is
+  ``output_config`` for Claude models and ``reasoning`` for GPT models.
 - claude-agent-acp ``buildConfigOptions``: effort options come from each
   model's ``supportedEffortLevels``; recommended default ``xhigh`` then ``high``.
 """
@@ -43,21 +49,25 @@ def is_valid_effort(level: object) -> bool:
 
 
 def model_supports_effort(model: str | None) -> bool:
-    """True when *model* is a Claude Fable/Opus/Sonnet model that accepts effort.
+    """True when *model* accepts a reasoning-effort level.
 
-    Effort is only available on Claude Fable, Opus, and Sonnet (per kiro-cli
-    FAQ and the claude-agent-acp ``supportsEffort`` model flag).  Haiku, Nova,
-    and third-party models do not support it; ``"auto"``/``None`` cannot either
-    (kiro-cli errors "Effort configuration is currently not available on auto"
-    until a concrete model is selected).
+    Effort is available on Claude Fable/Opus/Sonnet and the GPT-5.x models
+    (verified against kiro-cli 2.12/2.13 over ACP).  Haiku, Nova, and the other
+    third-party models (deepseek, minimax, glm, qwen) do not support it;
+    ``"auto"``/``None`` cannot either (kiro-cli errors "Effort configuration is
+    currently not available on auto" until a concrete model is selected).
 
-    Matches both naming conventions: kiro-cli (``claude-fable-5``) and the
-    Bedrock/claude-agent-acp form (``global.anthropic.claude-fable-5[1m]``).
+    Matches both naming conventions: kiro-cli (``claude-fable-5``,
+    ``gpt-5.6-sol``) and the Bedrock/claude-agent-acp form
+    (``global.anthropic.claude-fable-5[1m]``).
 
     Prefers the registry's declared ``supports_effort`` flag when the model is in
-    the registry, so a future model whose canonical key lacks the ``opus``/
-    ``sonnet`` substring (or a capable model the heuristic would miss) is honored;
-    falls back to the substring heuristic for ids the registry doesn't list.
+    the registry, so a future model whose canonical key lacks a known-capable
+    substring (or a capable model the heuristic would miss) is honored; falls
+    back to the substring heuristic for ids the registry doesn't list.  The
+    heuristic is a conservative allowlist of known-capable families rather than a
+    "non-Claude means unsupported" denylist — an unverified new family lands as
+    unsupported (safe: the slider hides) until confirmed.
     """
     if not model:
         return False
@@ -79,7 +89,29 @@ def model_supports_effort(model: str | None) -> bool:
             return declared
     except Exception:
         pass  # fall back to the heuristic
-    return "opus" in m or "sonnet" in m or "fable" in m
+    return "opus" in m or "sonnet" in m or "fable" in m or "gpt" in m
+
+
+# kiro-cli persists per-model effort under a family-specific sub-key in
+# ``chat.modelDefaults.<model>``: Claude models use ``output_config``, GPT
+# models use ``reasoning`` (verified against ~/.kiro/settings/cli.json written
+# by kiro 2.13).  Writing the wrong key is silently ignored by kiro, so a
+# GPT model's effort would survive a live ``/effort`` push but be dropped on the
+# next spawn.  The overlay helpers in ``providers/acp.py`` resolve the key here.
+_EFFORT_KEY_GPT = "reasoning"
+_EFFORT_KEY_DEFAULT = "output_config"
+
+
+def effort_settings_key(model: str | None) -> str:
+    """Return the cli.json sub-key kiro uses for *model*'s effort default.
+
+    ``"reasoning"`` for GPT models, ``"output_config"`` for everything else
+    (Claude Opus/Sonnet/Fable).  Used by the kiro workspace overlay so the
+    written key matches what kiro-cli reads back at spawn.
+    """
+    if model and "gpt" in model.lower():
+        return _EFFORT_KEY_GPT
+    return _EFFORT_KEY_DEFAULT
 
 
 def _coerce_defaults(defaults: object) -> dict[str, str]:

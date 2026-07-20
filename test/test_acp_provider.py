@@ -361,13 +361,30 @@ class TestEffortControl:
         # Override rolled back (was previously unset).
         assert "claude-opus-4.7" not in provider._effort_per_model
 
+    @pytest.mark.asyncio
+    async def test_kiro_change_effort_gpt_uses_reasoning_overlay_key(self):
+        # GPT models are effort-capable on the kiro backend; the live push is the
+        # same /effort slash command, but the spawn overlay must use the GPT
+        # `reasoning` key (verified against kiro 2.13) — not `output_config`.
+        provider = self._effort_provider(backend="", model="gpt-5.6-luna")
+        with patch("kiro_crew.providers.acp._write_cli_overlay") as wco:
+            ok = await provider.change_effort("max")
+        assert ok is True
+        provider._client.send_command.assert_awaited_once_with("/effort", args={"level": "max"})
+        wco.assert_called_once()
+        assert provider._effort_per_model["gpt-5.6-luna"] == "max"
+
     def test_supports_effort_reflects_model(self):
         assert self._effort_provider(backend="", model="claude-opus-4.7").supports_effort()
+        # GPT models are effort-capable on the kiro backend.
+        assert self._effort_provider(backend="", model="gpt-5.6-luna").supports_effort()
         # 'auto' is genuinely effort-incapable (no concrete model selected). A raw
         # kiro 'claude-haiku-4.5' is also incapable — the haiku guard wins over
-        # the registry's Sonnet fold (see test_effort.py).
+        # the registry's Sonnet fold (see test_effort.py). deepseek is a
+        # third-party model kiro does not offer effort on.
         assert not self._effort_provider(backend="", model="auto").supports_effort()
         assert not self._effort_provider(backend="", model="claude-haiku-4.5").supports_effort()
+        assert not self._effort_provider(backend="", model="deepseek-3.2").supports_effort()
 
 
 class TestStartKiroRuntimeResume:

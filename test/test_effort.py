@@ -12,6 +12,7 @@ from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.effort import (
     EFFORT_LEVELS,
     EFFORT_VALUES,
+    effort_settings_key,
     is_valid_effort,
     model_supports_effort,
     resolve_effort_for_model,
@@ -49,14 +50,27 @@ class TestModelSupportsEffort:
             "anthropic.claude-sonnet-4-20250514-v1:0",
             "claude-fable-5",
             "global.anthropic.claude-fable-5[1m]",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
         ],
     )
-    def test_opus_sonnet_fable_supported(self, model: str):
+    def test_opus_sonnet_fable_gpt_supported(self, model: str):
         assert model_supports_effort(model)
 
     @pytest.mark.parametrize(
         "model",
-        [None, "", "auto", "amazon.nova-pro-v1:0", "deepseek-3.2"],
+        [
+            None,
+            "",
+            "auto",
+            "amazon.nova-pro-v1:0",
+            "deepseek-3.2",
+            "minimax-m2.5",
+            "glm-5",
+            "qwen3-coder-next",
+        ],
     )
     def test_unsupported(self, model: str | None):
         assert not model_supports_effort(model)
@@ -83,6 +97,20 @@ class TestModelSupportsEffort:
         assert model_supports_effort("global.anthropic.claude-sonnet-4-6[1m]") is True
         # A model the registry does NOT list still uses the substring heuristic.
         assert model_supports_effort("some-haiku-thing") is False
+
+
+class TestEffortSettingsKey:
+    @pytest.mark.parametrize(
+        "model",
+        ["claude-opus-4.7", "claude-sonnet-4.6", "claude-fable-5",
+         "global.anthropic.claude-opus-4-8[1m]", None, "auto"],
+    )
+    def test_claude_and_default_use_output_config(self, model: str | None):
+        assert effort_settings_key(model) == "output_config"
+
+    @pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5", "GPT-5.6-Terra"])
+    def test_gpt_uses_reasoning(self, model: str):
+        assert effort_settings_key(model) == "reasoning"
 
 
 class TestResolveEffortForModel:
@@ -173,6 +201,64 @@ class TestCliOverlay:
         _clear_cli_overlay_effort(tmp_path, "claude-opus-4.7")  # must not raise
         assert _read_cli_overlay(tmp_path) == {}
 
+    def test_gpt_write_uses_reasoning_key_and_roundtrips(self, tmp_path):
+        # kiro-cli persists GPT effort under `reasoning`, not `output_config`;
+        # the wrong key is silently ignored, so the on-disk shape must match.
+        _write_cli_overlay(tmp_path, "gpt-5.6-luna", "max")
+        assert _read_cli_overlay(tmp_path) == {"gpt-5.6-luna": "max"}
+        cli = tmp_path / ".kiro" / "settings" / "cli.json"
+        data = json.loads(cli.read_text())
+        model_cfg = data["chat.modelDefaults"]["gpt-5.6-luna"]
+        assert model_cfg["reasoning"]["effort"] == "max"
+        assert "output_config" not in model_cfg
+
+    @pytest.mark.parametrize(
+        "model,current_key,stale_key",
+        [
+            ("gpt-5.6-luna", "reasoning", "output_config"),
+            ("claude-opus-4.7", "output_config", "reasoning"),
+        ],
+    )
+    def test_write_removes_stale_other_family_effort(
+        self, tmp_path, model: str, current_key: str, stale_key: str
+    ):
+        settings_dir = tmp_path / ".kiro" / "settings"
+        settings_dir.mkdir(parents=True)
+        cli = settings_dir / "cli.json"
+        cli.write_text(
+            json.dumps(
+                {
+                    "chat.modelDefaults": {
+                        model: {stale_key: {"effort": "low", "preserved": True}}
+                    }
+                }
+            )
+        )
+
+        _write_cli_overlay(tmp_path, model, "max")
+
+        assert _read_cli_overlay(tmp_path) == {model: "max"}
+        model_cfg = json.loads(cli.read_text())["chat.modelDefaults"][model]
+        assert model_cfg[current_key]["effort"] == "max"
+        assert model_cfg[stale_key] == {"preserved": True}
+
+    def test_mixed_families_coexist(self, tmp_path):
+        _write_cli_overlay(tmp_path, "claude-opus-4.7", "high")
+        _write_cli_overlay(tmp_path, "gpt-5.6-sol", "medium")
+        assert _read_cli_overlay(tmp_path) == {
+            "claude-opus-4.7": "high",
+            "gpt-5.6-sol": "medium",
+        }
+
+    def test_clear_removes_gpt_reasoning_key(self, tmp_path):
+        _write_cli_overlay(tmp_path, "gpt-5.6-luna", "max")
+        _clear_cli_overlay_effort(tmp_path, "gpt-5.6-luna")
+        assert _read_cli_overlay(tmp_path) == {}
+        # The whole model entry is dropped once its only sub-key is empty.
+        cli = tmp_path / ".kiro" / "settings" / "cli.json"
+        data = json.loads(cli.read_text())
+        assert "gpt-5.6-luna" not in data.get("chat.modelDefaults", {})
+
 
 class TestFactoryEffortThreading:
     """The provider factory must thread the slot's reasoning_effort_override
@@ -208,6 +294,17 @@ class TestFactoryEffortThreading:
             reasoning_effort_override="xhigh",
         )
         assert kwargs.get("effort_per_model") == {expected_key: "xhigh"}
+
+    def test_valid_effort_on_gpt_threads_per_model_kiro(self):
+        # GPT models: the raw model id is threaded and effort is honored on
+        # the kiro backend.
+        kwargs = self._capture_provider_kwargs(
+            "acp",
+            session_key="dashboard:1",
+            model_override="gpt-5.6-luna",
+            reasoning_effort_override="max",
+        )
+        assert kwargs.get("effort_per_model") == {"gpt-5.6-luna": "max"}
 
     @pytest.mark.parametrize("provider_name", ["acp"])
     def test_effort_on_incapable_model_not_threaded(self, provider_name):
