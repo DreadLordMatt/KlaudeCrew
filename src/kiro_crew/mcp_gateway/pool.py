@@ -48,10 +48,14 @@ _DEFAULT_READ_BUFFER_LIMIT = 64 * 1024 * 1024  # 64 MiB
 
 
 def _resolve_read_buffer_limit() -> int:
-    """Resolve the read buffer limit from env or fall back to default.
+    """Resolve the read buffer limit.
 
-    Env var: ``KIROCREW_MCP_READ_LIMIT`` (bytes, integer).
-    Config key: ``mcp_gateway.read_buffer_limit_bytes``.
+    Precedence: env var ``KIROCREW_MCP_READ_LIMIT`` (bytes) → config key
+    ``mcp_gateway.read_buffer_limit_bytes`` → hard-coded default. Previously only
+    the env var was consulted, so the documented config key was a silent no-op —
+    a user raising the limit to stop legitimate large responses being fast-failed
+    (Mesh-2861) saw no effect. Config read is function-level to avoid an import
+    cycle and is best-effort (config unavailable at import → default).
     """
     raw = os.environ.get("KIROCREW_MCP_READ_LIMIT")
     if raw:
@@ -61,6 +65,14 @@ def _resolve_read_buffer_limit() -> int:
                 return val
         except (ValueError, TypeError):
             pass
+    try:
+        from kiro_crew.config.loader import _raw_config
+
+        cfg_val = (_raw_config().get("mcp_gateway") or {}).get("read_buffer_limit_bytes")
+        if isinstance(cfg_val, int) and not isinstance(cfg_val, bool) and cfg_val >= 1024:
+            return cfg_val
+    except Exception:
+        logger.debug("mcp read limit: config unavailable, using default", exc_info=True)
     return _DEFAULT_READ_BUFFER_LIMIT
 
 
@@ -75,7 +87,12 @@ _DEFAULT_SPILL_THRESHOLD = 256 * 1024  # 256 KiB
 
 
 def _resolve_spill_threshold() -> int:
-    """Resolve the spill threshold from env or fall back to default."""
+    """Resolve the spill threshold.
+
+    Precedence: env var ``KIROCREW_MCP_SPILL_THRESHOLD`` → config key
+    ``mcp_gateway.response_spill_threshold_bytes`` → hard-coded default. See
+    _resolve_read_buffer_limit — the config key was previously dead.
+    """
     raw = os.environ.get("KIROCREW_MCP_SPILL_THRESHOLD")
     if raw:
         try:
@@ -84,6 +101,14 @@ def _resolve_spill_threshold() -> int:
                 return val
         except (ValueError, TypeError):
             pass
+    try:
+        from kiro_crew.config.loader import _raw_config
+
+        cfg_val = (_raw_config().get("mcp_gateway") or {}).get("response_spill_threshold_bytes")
+        if isinstance(cfg_val, int) and not isinstance(cfg_val, bool) and cfg_val >= 0:
+            return cfg_val
+    except Exception:
+        logger.debug("mcp spill threshold: config unavailable, using default", exc_info=True)
     return _DEFAULT_SPILL_THRESHOLD
 
 

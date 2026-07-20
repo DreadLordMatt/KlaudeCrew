@@ -257,6 +257,49 @@ class TestConfigOverrides:
             val = pool._resolve_spill_threshold()
         assert val == 0
 
+    # The read-buffer/spill config keys are parsed into McpGatewayConfig and
+    # documented as settable in config.json, but the runtime globals in
+    # mcp_gateway/pool.py were resolved ONLY from env vars — so the config keys
+    # were dead (a user raising the 64 MiB limit per the docs got a silent
+    # no-op; oversize responses kept being fast-failed, Mesh-2861). The
+    # resolvers now consult the config value when the env var is unset.
+    def test_read_buffer_limit_reads_config_when_env_unset(self, monkeypatch):
+        import kiro_crew.mcp_gateway.pool as pool
+
+        monkeypatch.delenv("KIROCREW_MCP_READ_LIMIT", raising=False)
+        with patch(
+            "kiro_crew.config.loader._raw_config",
+            return_value={"mcp_gateway": {"read_buffer_limit_bytes": 134217728}},
+        ):
+            assert pool._resolve_read_buffer_limit() == 134217728
+
+    def test_spill_threshold_reads_config_when_env_unset(self, monkeypatch):
+        import kiro_crew.mcp_gateway.pool as pool
+
+        monkeypatch.delenv("KIROCREW_MCP_SPILL_THRESHOLD", raising=False)
+        with patch(
+            "kiro_crew.config.loader._raw_config",
+            return_value={"mcp_gateway": {"response_spill_threshold_bytes": 1048576}},
+        ):
+            assert pool._resolve_spill_threshold() == 1048576
+
+    def test_env_var_still_beats_config(self, monkeypatch):
+        import kiro_crew.mcp_gateway.pool as pool
+
+        monkeypatch.setenv("KIROCREW_MCP_READ_LIMIT", "2048")
+        with patch(
+            "kiro_crew.config.loader._raw_config",
+            return_value={"mcp_gateway": {"read_buffer_limit_bytes": 999999}},
+        ):
+            assert pool._resolve_read_buffer_limit() == 2048
+
+    def test_default_when_neither_env_nor_config(self, monkeypatch):
+        import kiro_crew.mcp_gateway.pool as pool
+
+        monkeypatch.delenv("KIROCREW_MCP_READ_LIMIT", raising=False)
+        with patch("kiro_crew.config.loader._raw_config", return_value={}):
+            assert pool._resolve_read_buffer_limit() == pool._DEFAULT_READ_BUFFER_LIMIT
+
 
 # --- (h) Startup cleanup removes >24h spill files, keeps fresh ---
 
