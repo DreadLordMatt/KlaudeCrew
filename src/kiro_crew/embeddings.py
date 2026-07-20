@@ -35,6 +35,7 @@ import threading
 import time
 import types
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Callable
@@ -559,8 +560,8 @@ def _resolve_model_url() -> str:
         if env_url.lower().startswith("https://"):
             return env_url
         logger.warning(
-            "%s must be an https:// URL (got %r) — using the CDN default",
-            _MODEL_URL_ENV, env_url[:64],
+            "%s must be an https:// URL — ignoring the override and using "
+            "the CDN default", _MODEL_URL_ENV,
         )
     try:
         path = config_path()
@@ -571,12 +572,29 @@ def _resolve_model_url() -> str:
                 if cfg_url.lower().startswith("https://"):
                     return cfg_url
                 logger.warning(
-                    "memory.embed_model_url must be an https:// URL (got %r) — "
-                    "using the CDN default", cfg_url[:64],
+                    "memory.embed_model_url must be an https:// URL — ignoring "
+                    "the override and using the CDN default",
                 )
     except Exception:
         logger.debug("Could not read embed_model_url from config", exc_info=True)
     return _DEFAULT_MODEL_URL
+
+
+def redact_model_url(url: str) -> str:
+    """Return *url* safe for logs/terminal: strip userinfo, query, fragment.
+
+    A private-mirror override may carry credentials in userinfo or a signed
+    query string (e.g. presigned URLs). Only scheme + host + path are ever
+    logged or printed; the full URL is used exclusively for the request.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        return urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", ""))
+    except Exception:
+        return "<unparseable-url>"
 
 
 class ModelDownloadManager:
@@ -717,7 +735,7 @@ class ModelDownloadManager:
         self._target.parent.mkdir(parents=True, exist_ok=True)
         staging = self._target.parent / f".{self._target.name}.http.{os.getpid()}.tmp"
         try:
-            logger.info("Downloading embedding model from %s", url)
+            logger.info("Downloading embedding model from %s", redact_model_url(url))
             req = urllib.request.Request(url, method="GET")
             ctx = _make_ssl_context()
             # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- _resolve_model_url enforces https:// and the payload is sha256-pinned

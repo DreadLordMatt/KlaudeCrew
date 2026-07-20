@@ -158,18 +158,21 @@ def _doctor_model_url_reachable(issues: list[str]) -> None:
     state — the background download retries with backoff on every boot.
     """
     del issues  # advisory-only diagnostic; keeps the call-site signature uniform
+    from kiro_crew.embeddings import redact_model_url  # circular-safe (no loader)
+
     url = _resolve_model_url()
+    safe = redact_model_url(url)
     try:
         req = urllib.request.Request(url, method="HEAD")
         # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- _resolve_model_url enforces https://; HEAD-only reachability probe
         with urllib.request.urlopen(req, timeout=5) as resp:
-            print(f"  model url:   ✅ reachable ({resp.status}) {url}")
+            print(f"  model url:   ✅ reachable ({resp.status}) {safe}")
     except urllib.error.HTTPError as exc:
-        print(f"  model url:   ❌ HTTP {exc.code} from {url}")
+        print(f"  model url:   ❌ HTTP {exc.code} from {safe}")
         print("               Fix: set KIROCREW_EMBED_MODEL_URL (or memory.embed_model_url)")
         print("               to a mirror hosting the GGUF; the sha256 pin still verifies it.")
     except Exception as exc:
-        print(f"  model url:   ❌ unreachable ({exc}) {url}")
+        print(f"  model url:   ❌ unreachable ({exc}) {safe}")
         print("               Check network connectivity; the background download will")
         print("               keep retrying with backoff on every gateway boot.")
 
