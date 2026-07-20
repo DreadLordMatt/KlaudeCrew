@@ -18,8 +18,9 @@ except ImportError:
 class _NodeView:
     """Minimal node-attribute view supporting get, subscript, iteration, and len."""
 
-    def __init__(self, data: dict[str, dict]):
+    def __init__(self, data: dict[str, dict], lock: "threading.RLock | None" = None):
         self._data = data
+        self._lock = lock
 
     def get(self, nid: str, default: dict | None = None) -> dict:
         return self._data.get(nid, default if default is not None else {})
@@ -31,7 +32,13 @@ class _NodeView:
         return nid in self._data
 
     def __iter__(self):
-        return iter(self._data)
+        # Snapshot under the lock: a concurrent add_node/clear on the loop
+        # thread must not mutate the dict while an mc-embed reader iterates it
+        # ("dictionary changed size during iteration").
+        if self._lock is not None:
+            with self._lock:
+                return iter(list(self._data))
+        return iter(list(self._data))
 
     def __len__(self) -> int:
         return len(self._data)
@@ -40,55 +47,87 @@ class _NodeView:
 class _EdgeView:
     """Minimal edge view supporting iteration and subscript access."""
 
-    def __init__(self, fwd: dict[str, dict[str, dict]]):
+    def __init__(self, fwd: dict[str, dict[str, dict]], lock: "threading.RLock | None" = None):
         self._fwd = fwd
+        self._lock = lock
 
     def __getitem__(self, key: tuple[str, str]) -> dict:
         u, v = key
         return self._fwd[u][v]
 
     def __call__(self, *, data: bool = False):  # noqa: ARG002
-        for u, targets in self._fwd.items():
-            for v, attrs in targets.items():
-                yield u, v, attrs
+        # Materialize a snapshot under the lock before yielding — see _NodeView.
+        if self._lock is not None:
+            with self._lock:
+                snapshot = [
+                    (u, v, attrs)
+                    for u, targets in self._fwd.items()
+                    for v, attrs in targets.items()
+                ]
+        else:
+            snapshot = [
+                (u, v, attrs)
+                for u, targets in self._fwd.items()
+                for v, attrs in targets.items()
+            ]
+        yield from snapshot
 
 
 class SimpleDiGraph:
     """Minimal directed graph replacing networkx.DiGraph for the subset of API we use."""
 
     def __init__(self) -> None:
+        # Guards all reads/writes of the three dicts. KnowledgeStore mutates the
+        # graph inline on the event-loop thread (ingest _store_entities,
+        # dedup -> _load_graph clear()+rebuild), while HybridRetriever.search()
+        # traverses it on an mc-embed executor thread (get_neighbors ->
+        # successors/predecessors/nodes). Without this, concurrent iterate +
+        # clear/insert on the same dict raises "dictionary changed size during
+        # iteration" (HTTP 500) or returns a half-rebuilt graph. Re-entrant
+        # because a single logical op (e.g. get_neighbors) takes it repeatedly.
+        self._lock = threading.RLock()
         self._node_attrs: dict[str, dict] = {}
         self._fwd: dict[str, dict[str, dict]] = defaultdict(dict)
         self._rev: dict[str, dict[str, dict]] = defaultdict(dict)
-        self.nodes = _NodeView(self._node_attrs)
-        self.edges = _EdgeView(self._fwd)
+        self.nodes = _NodeView(self._node_attrs, self._lock)
+        self.edges = _EdgeView(self._fwd, self._lock)
 
     def clear(self) -> None:
-        self._node_attrs.clear()
-        self._fwd.clear()
-        self._rev.clear()
+        with self._lock:
+            self._node_attrs.clear()
+            self._fwd.clear()
+            self._rev.clear()
 
     def add_node(self, nid: str, **attrs: object) -> None:
-        self._node_attrs[nid] = attrs
+        with self._lock:
+            self._node_attrs[nid] = attrs
 
     def add_edge(self, u: str, v: str, **attrs: object) -> None:
-        self._fwd[u][v] = attrs
-        self._rev[v][u] = attrs
+        with self._lock:
+            self._fwd[u][v] = attrs
+            self._rev[v][u] = attrs
 
     def has_edge(self, u: str, v: str) -> bool:
-        return v in self._fwd.get(u, {})
+        with self._lock:
+            return v in self._fwd.get(u, {})
 
     def has_node(self, nid: str) -> bool:
-        return nid in self._node_attrs
+        with self._lock:
+            return nid in self._node_attrs
 
     def degree(self, nid: str) -> int:
-        return len(self._fwd.get(nid, {})) + len(self._rev.get(nid, {}))
+        with self._lock:
+            return len(self._fwd.get(nid, {})) + len(self._rev.get(nid, {}))
 
     def successors(self, nid: str):
-        return iter(self._fwd.get(nid, {}))
+        # Snapshot the neighbor keys under the lock so the caller can iterate
+        # freely while the loop thread mutates the graph (see __init__).
+        with self._lock:
+            return iter(list(self._fwd.get(nid, {})))
 
     def predecessors(self, nid: str):
-        return iter(self._rev.get(nid, {}))
+        with self._lock:
+            return iter(list(self._rev.get(nid, {})))
 
 
 class KnowledgeStore:

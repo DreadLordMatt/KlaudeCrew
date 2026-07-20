@@ -125,3 +125,71 @@ def test_close_only_releases_calling_threads_connection(store):
     assert worker_conn_ok.get("ok") is True
     # And the main thread lazily reconnects after close().
     assert store.db.execute("SELECT 1").fetchone() is not None
+
+
+# ── In-memory graph thread-safety ──
+# The thread-local sqlite fix (above) removed a de-facto guard: previously the
+# shared connection raised sqlite3.ProgrammingError in _keyword_search before
+# _graph_search ran, so the in-memory graph was never traversed cross-thread.
+# With per-thread connections, HybridRetriever.search() reaches the graph leg on
+# an mc-embed thread (get_neighbors -> successors/predecessors/nodes) while the
+# event-loop thread mutates the SAME SimpleDiGraph inline (ingest add_entity/
+# add_entity_relation, dedup -> _load_graph clear()+rebuild). The graph is a
+# single shared instance of plain dicts; concurrent iterate + clear/insert
+# raised "dictionary changed size during iteration" (HTTP 500) or returned a
+# half-rebuilt graph. SimpleDiGraph now guards all access with an RLock and
+# snapshots iterating reads.
+
+
+def test_simpledigraph_reader_survives_concurrent_mutation():
+    """A reader traversing the graph must not crash while another thread
+    clears+rebuilds it. Pre-fix this raised RuntimeError: dictionary changed
+    size during iteration."""
+    from kiro_crew.knowledge.store import SimpleDiGraph
+
+    g = SimpleDiGraph()
+    for i in range(200):
+        g.add_edge("hot", f"n{i}")
+        g.add_edge(f"n{i}", "hot")
+
+    stop = threading.Event()
+    errors: list[str] = []
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                for _ in g.successors("hot"):
+                    pass
+                for _ in g.predecessors("hot"):
+                    pass
+                list(g.nodes)
+                list(g.edges(data=True))
+            except Exception as e:  # noqa: BLE001 — recording is the assertion
+                errors.append(repr(e))
+                return
+
+    def writer() -> None:
+        while not stop.is_set():
+            try:
+                for i in range(200):
+                    g.add_edge("hot", f"m{i}")
+                g.clear()
+                for i in range(200):
+                    g.add_edge("hot", f"n{i}")
+                    g.add_edge(f"n{i}", "hot")
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+                return
+
+    threads = [threading.Thread(target=reader) for _ in range(4)]
+    threads += [threading.Thread(target=writer) for _ in range(2)]
+    for t in threads:
+        t.start()
+    stop_after = threading.Timer(2.0, stop.set)
+    stop_after.start()
+    for t in threads:
+        t.join(timeout=10)
+    stop_after.cancel()
+    stop.set()
+
+    assert not errors, f"graph race not eliminated: {errors[:3]}"
