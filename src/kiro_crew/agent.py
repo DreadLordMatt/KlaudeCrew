@@ -2279,6 +2279,15 @@ def _enforce_denied_commands() -> None:
             data = json.loads(f.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             continue
+        # A valid-JSON-but-non-object root (e.g. an AppleDouble ._foo.json stub,
+        # or a hand-edited/tool-emitted "[]"/42) would raise AttributeError on
+        # the setdefault below — which is NOT in the except tuple above, so it
+        # would propagate out of this per-file loop and abort enforcement for
+        # every agent config after it (deniedCommands, a security control,
+        # silently left un-refreshed). Skip the bad file and keep enforcing the
+        # rest. _load_json() already guards non-dict roots the same way.
+        if not isinstance(data, dict):
+            continue
         ts = data.setdefault("toolsSettings", {})
         bash = ts.setdefault("execute_bash", {})
         shell = ts.setdefault("shell", {})

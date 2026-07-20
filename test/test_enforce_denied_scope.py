@@ -132,3 +132,33 @@ class TestEnforceDeniedScope:
         bad.write_bytes(_APPLEDOUBLE_BYTES)
 
         assert _load_json(bad) == {}
+
+    def test_non_object_root_agent_file_does_not_abort_enforcement(self, tmp_path: Path):
+        """A valid-JSON-but-non-object root ("[]", 42, "str") must be skipped,
+        not abort enforcement for every agent iterated after it.
+
+        The 90e3cccc fix added UnicodeDecodeError to the except clause, but a
+        non-object root raises AttributeError on data.setdefault() — which is
+        NOT in that tuple — so it escaped the per-file loop and silently left
+        deniedCommands (a security control) un-refreshed on all later agents.
+        """
+        bundled_dir, agents_dir, mock_cfg = _setup(tmp_path, "all")
+        # A "._"-prefixed name sorts before the real configs, so pre-fix the
+        # AttributeError it raises aborts the loop before they are enforced.
+        (agents_dir / "._list_root.json").write_text("[]")
+        (agents_dir / "._scalar_root.json").write_text("42")
+
+        with (
+            patch("kiro_crew.agent._BUNDLED_CFG_DIR", bundled_dir),
+            patch("kiro_crew.agent.KIRO_AGENTS_DIR", agents_dir),
+            patch("kiro_crew.config.KiroCrewConfig.load", return_value=mock_cfg),
+        ):
+            # Must not raise AttributeError.
+            _enforce_denied_commands()
+
+        # The non-object files are left untouched (not rewritten).
+        assert (agents_dir / "._list_root.json").read_text() == "[]"
+        # Valid sibling configs are still enforced despite the bad files.
+        for name in ("kirocrew.json", "other-agent.json"):
+            data = json.loads((agents_dir / name).read_text())
+            assert "rm -rf /" in data["toolsSettings"]["execute_bash"]["deniedCommands"]

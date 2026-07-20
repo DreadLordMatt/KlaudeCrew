@@ -501,7 +501,13 @@ def _get_agent_names() -> list[str]:
                     exc_info=True,
                 )
             name = None
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            # UnicodeDecodeError (a ValueError subclass, NOT an OSError) is
+            # raised by safe_read_file's utf-8 read on a non-UTF-8 *.json —
+            # e.g. a macOS AppleDouble ._foo.json stub in ~/.kiro/agents.
+            # Without it here the raise escaped and killed the `/kirocrew
+            # channels` handler / channel-modal refresh task before it opened.
+            # Mirrors the 90e3cccc fix to agent.py's _load_json/_enforce_denied.
             name = None
         names.append(name or f.stem)
     return sorted(names)

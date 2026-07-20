@@ -74,3 +74,21 @@ def test_falls_back_to_stem_when_name_is_null(agents_dir):
     """
     _write_agent(agents_dir, "null-name.json", {"name": None})
     assert _get_agent_names() == ["null-name"]
+
+
+def test_non_utf8_agent_file_does_not_crash(agents_dir):
+    """Regression (sibling of the 90e3cccc agent.py fix): a non-UTF-8 *.json
+    (e.g. a macOS AppleDouble "._foo.json" resource-fork stub) must be skipped,
+    not raise UnicodeDecodeError.
+
+    safe_read_file opens with encoding='utf-8'; the read raises
+    UnicodeDecodeError (a ValueError subclass, NOT an OSError), which escaped the
+    old (json.JSONDecodeError, OSError) except and killed the `/kirocrew
+    channels` handler / channel-modal refresh task before the modal opened.
+    """
+    _write_agent(agents_dir, "real-agent.json", {"name": "real"})
+    (agents_dir / "._bad.json").write_bytes(
+        b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X\xa3\xff\xfe" + b"\x00" * 16
+    )
+    # Must not raise; the bad file falls back to its stem, valid one resolves.
+    assert _get_agent_names() == ["._bad", "real"]
