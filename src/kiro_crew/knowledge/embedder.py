@@ -161,11 +161,21 @@ def bytes_to_floats(data: bytes) -> list[float]:
 
 
 def embed_signature(model: str, content_budget: int = _EMBED_CONTENT_BUDGET) -> str:
-    """Signature over the embedding configuration for staleness detection.
+    """Signature over the embedding inputs a re-embed can actually change.
 
-    A change in signature means stored vectors may be from a different vector
-    space and need re-embedding (sig-gated rebuild). Folds in the model id and
-    the content budget — the two inputs a re-embed can actually change.
+    Captures the model id and the content budget — change either and a stored
+    vector may come from a different vector space, and re-embedding the same
+    item content fixes it. Items whose stored ``embedding_sig`` differs from
+    the current one are re-embedded by the sig-gated rebuild (manual trigger
+    and watcher self-heal both use it). The literal ``inprocess`` token stands
+    where the Ollama-era ``base_url`` used to — the in-process runtime has no
+    endpoint, and keeping a distinct token forces a one-time re-embed when
+    migrating vectors produced by an external server.
+
+    ponytail: does NOT cover edits to ``embed_for_item``'s assembly logic (field
+    set / join separator) — a value hash can't see code. Ceiling: such a change
+    needs a manual ``force`` rebuild. Upgrade path: add an ast-normalized source
+    hash here if that logic starts churning.
     """
     raw = f"{model}|inprocess|{content_budget}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]

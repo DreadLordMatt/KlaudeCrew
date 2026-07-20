@@ -357,6 +357,45 @@ def _probe_unshare() -> bool:
     return False
 
 
+def userns_available() -> bool:
+    """Public: True if unprivileged user + mount namespaces work on this host.
+
+    Stable cross-module entry point for the namespace-support probe, shared by
+    the OS-level sandbox here and the JailProvider extension point
+    (``platform/interfaces.py``), so consumers do not depend on the private
+    ``_probe_unshare`` name.
+    """
+    return _probe_unshare()
+
+
+@functools.lru_cache(maxsize=1)
+def is_wsl() -> bool:
+    """Public: True if this Linux host is running under Windows Subsystem for Linux.
+
+    Centralized host probe (parallel to :func:`userns_available`) so consumers
+    never re-implement WSL detection. WSL2 *does* expose working user
+    namespaces, so :func:`userns_available` returns True there — but WSL's
+    networking is a NAT'd virtual interface, and rootless-namespace jails
+    (slirp4netns) make agentic command networking unreachable. A jail backend
+    (JailProvider) uses this to opt WSL out of jailing.
+
+    Detection (cheap, in order): the ``WSL_DISTRO_NAME`` / ``WSL_INTEROP`` env
+    vars WSL injects into every login shell, then the ``microsoft`` marker the
+    WSL kernel stamps into ``/proc/version`` (covers WSL1 + WSL2, both Microsoft
+    and -microsoft-standard builds). Result is cached — the host's WSL-ness does
+    not change within a process. Always False off Linux.
+    """
+    if sys.platform != "linux":
+        return False
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        with open("/proc/version", encoding="utf-8", errors="replace") as fh:
+            return "microsoft" in fh.read().lower()
+    except OSError:
+        return False
+
+
 def _probe_sandbox_exec() -> bool:
     """Return True if macOS ``sandbox-exec`` actually works.
 
@@ -1390,7 +1429,7 @@ def detect_backend(config_mode: str = "auto") -> str:
         return "none"
     if _backend is not None:
         return _backend
-    if _probe_unshare():
+    if userns_available():
         _backend = "namespace"
     elif _probe_sandbox_exec():
         _backend = "sandbox-exec"
