@@ -77,19 +77,24 @@ describe('ChatInput reasoning effort button', () => {
     expect(REASONING_EFFORT_PROVIDERS.has('claude_code')).toBe(false)
   })
 
-  it('modelSupportsEffort gates per-model (Fable/Opus/Sonnet only)', () => {
+  it('modelSupportsEffort gates per-model (Fable/Opus/Sonnet/GPT-5.x)', () => {
     // Capable: Fable/Opus/Sonnet in either naming convention.
     expect(modelSupportsEffort('claude-fable-5')).toBe(true)
     expect(modelSupportsEffort('global.anthropic.claude-fable-5[1m]')).toBe(true)
     expect(modelSupportsEffort('claude-opus-4.7')).toBe(true)
     expect(modelSupportsEffort('claude-sonnet-4.6')).toBe(true)
     expect(modelSupportsEffort('global.anthropic.claude-opus-4-8[1m]')).toBe(true)
-    // Not capable: haiku, auto, empty/undefined, third-party.
+    // Capable: GPT-5.x (kiro applies effort to GPT models too).
+    expect(modelSupportsEffort('gpt-5.6-sol')).toBe(true)
+    expect(modelSupportsEffort('gpt-5.6-luna')).toBe(true)
+    // Not capable: haiku, auto, empty/undefined, other third-party.
     expect(modelSupportsEffort('claude-haiku-4.5')).toBe(false)
     expect(modelSupportsEffort('auto')).toBe(false)
     expect(modelSupportsEffort('')).toBe(false)
     expect(modelSupportsEffort(undefined)).toBe(false)
     expect(modelSupportsEffort('deepseek-3.2')).toBe(false)
+    expect(modelSupportsEffort('minimax-m2.5')).toBe(false)
+    expect(modelSupportsEffort('glm-5')).toBe(false)
   })
 })
 

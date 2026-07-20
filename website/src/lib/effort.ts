@@ -29,7 +29,7 @@ export function effortLabel(level: string): string {
 /**
  * Concrete effort levels offered in the dropdown, ordered low→high, with the
  * '' default sentinel first. kiro-cli (acp) supports these on Fable/Opus/Sonnet
- * models.
+ * and GPT-5.x models.
  */
 export const EFFORT_LEVELS = ['', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
@@ -39,13 +39,17 @@ export const REASONING_EFFORT_PROVIDERS = new Set(['acp'])
 
 /**
  * Per-model effort capability — mirrors the backend `model_supports_effort`
- * (kiro_crew/effort.py): effort is Fable/Opus/Sonnet-only; Haiku/auto/empty
- * and third-party models cannot use it. Gates the dropdown so a non-capable
- * model never shows a control that would silently no-op on the backend.
+ * (kiro_crew/effort.py): effort is available on Fable/Opus/Sonnet and GPT-5.x
+ * models; Haiku/auto/empty and the other third-party models (deepseek, minimax,
+ * glm, qwen) cannot use it. Gates the dropdown so a non-capable model never
+ * shows a control that would silently no-op on the backend.
+ *
+ * Keep this in sync with the backend allowlist — it is a conservative list of
+ * known-capable families, not a "non-Claude means unsupported" denylist.
  */
 export function modelSupportsEffort(model: string | undefined): boolean {
   if (!model) return false
   const m = model.toLowerCase()
   if (m === 'auto' || m.includes('haiku')) return false
-  return m.includes('opus') || m.includes('sonnet') || m.includes('fable')
+  return m.includes('opus') || m.includes('sonnet') || m.includes('fable') || m.includes('gpt')
 }
