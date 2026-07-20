@@ -91,6 +91,16 @@ class TestDoctor:
         """Pin config to a pristine default (see ``_pin_default_config``)."""
         _pin_default_config(monkeypatch)
 
+    @pytest.fixture(autouse=True)
+    def _hermetic_embeddings_runtime(self, monkeypatch):
+        """Pin the vendored-runtime probe host-independently: the brazil
+        interpreter on a Mac can be darwin/x86_64 under Rosetta, where the
+        vendored libs legitimately do not exist (designed degradation)."""
+        import kiro_crew.cli_doctor as _doc
+
+        monkeypatch.setattr(_doc, "_load_llama_class", lambda: object)
+        monkeypatch.setattr(_doc, "model_file_present", lambda path=None: False)
+
     def test_doctor_with_kiro(self, tmp_path):
         agent_file = tmp_path / "kirocrew.json"
         # A minimally healthy agent config so doctor walks the whole MCP
@@ -2867,13 +2877,16 @@ class TestDoctorEmbeddings:
         _pin_default_config(monkeypatch)
 
     @staticmethod
-    def _run_doctor(tmp_path, monkeypatch, *, runtime_ok: bool, model_present: bool):
+    def _run_doctor(tmp_path, monkeypatch, *, runtime_ok: bool, model_present: bool, platform_supported: bool = True):
         """Run _doctor with the embeddings runtime/model state stubbed."""
         agent_file = tmp_path / "kirocrew.json"
         _healthy_agent_file(agent_file)
         import kiro_crew.cli_doctor as doc
 
         monkeypatch.setattr(doc, "_load_llama_class", lambda: object if runtime_ok else None)
+        monkeypatch.setattr(
+            doc, "_platform_libs_dirname", lambda: "macos_arm64" if platform_supported else None
+        )
         monkeypatch.setattr(doc, "model_file_present", lambda path=None: model_present)
         default_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
         with (
@@ -2896,10 +2909,23 @@ class TestDoctorEmbeddings:
         assert "embeddings:  ✅ always-on" in out
 
     def test_doctor_reports_runtime_failure(self, tmp_path, capsys, monkeypatch):
-        """Vendored runtime failing to import is surfaced as an issue."""
+        """Runtime import failing on a SUPPORTED platform is surfaced as an issue."""
         self._run_doctor(tmp_path, monkeypatch, runtime_ok=False, model_present=False)
         out = capsys.readouterr().out
         assert "runtime:     ❌ vendored runtime failed to load" in out
+
+    def test_doctor_unsupported_platform_is_not_an_issue(self, tmp_path, capsys, monkeypatch):
+        """No vendored libs for this platform = designed degradation, not a doctor failure."""
+        self._run_doctor(
+            tmp_path,
+            monkeypatch,
+            runtime_ok=False,
+            model_present=False,
+            platform_supported=False,
+        )
+        out = capsys.readouterr().out
+        assert "runtime:     ⏹ unsupported platform" in out
+        assert "embedding runtime" not in out
 
     def test_doctor_reports_model_present(self, tmp_path, capsys, monkeypatch):
         """Model file present -> reported with its path."""

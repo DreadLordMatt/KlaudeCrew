@@ -917,7 +917,12 @@ class TestSessionHostPreexec:
             try:
                 fn()
                 new_soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
-                assert new_soft == hard
+                if hard == resource.RLIM_INFINITY:
+                    # Implementation contract: unlimited hard (macOS) caps the
+                    # soft limit at max(inherited_soft, 65536), never infinity.
+                    assert new_soft == 65536
+                else:
+                    assert new_soft == hard
             finally:
                 resource.setrlimit(resource.RLIMIT_NOFILE, (orig_soft, hard))
         finally:

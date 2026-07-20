@@ -54,6 +54,7 @@ def test_transient_errno_set_covers_resource_exhaustion():
 
 
 def test_probe_success_clears_failure_detail(monkeypatch):
+    monkeypatch.setattr(sb, "sys", types.SimpleNamespace(platform="linux"))  # hermetic: gate precedes the mocked probe
     monkeypatch.setattr(sb, "_probe_unshare_once", lambda: (True, False, "ok"))
     sb._last_unshare_failure = (True, "stale detail from a previous probe")
     assert sb._probe_unshare() is True
@@ -61,6 +62,7 @@ def test_probe_success_clears_failure_detail(monkeypatch):
 
 
 def test_probe_transient_failure_retries_once(monkeypatch):
+    monkeypatch.setattr(sb, "sys", types.SimpleNamespace(platform="linux"))  # hermetic: gate precedes the mocked probe
     calls: list[int] = []
 
     def fake_once():
@@ -74,6 +76,7 @@ def test_probe_transient_failure_retries_once(monkeypatch):
 
 
 def test_probe_permanent_failure_does_not_retry(monkeypatch):
+    monkeypatch.setattr(sb, "sys", types.SimpleNamespace(platform="linux"))  # hermetic: gate precedes the mocked probe
     calls: list[int] = []
 
     def fake_once():
@@ -87,6 +90,7 @@ def test_probe_permanent_failure_does_not_retry(monkeypatch):
 
 
 def test_probe_transient_then_success_recovers(monkeypatch):
+    monkeypatch.setattr(sb, "sys", types.SimpleNamespace(platform="linux"))  # hermetic: gate precedes the mocked probe
     results = [(False, True, _EAGAIN_REASON), (True, False, "ok")]
     monkeypatch.setattr(sb, "_probe_unshare_once", lambda: results.pop(0))
     assert sb._probe_unshare() is True
@@ -232,6 +236,7 @@ def test_probe_child_killed_by_signal_is_transient(monkeypatch):
 
 def test_on_loop_cold_cache_returns_none_without_probing(monkeypatch):
     """On event loop + cold cache: returns False immediately, does NOT call _probe_unshare_once."""
+    monkeypatch.setattr(sb, "sys", types.SimpleNamespace(platform="linux"))  # hermetic: gate precedes the mocked probe
     # Monkeypatch _probe_unshare_once to raise if called — proves loop never probes
     monkeypatch.setattr(
         sb, "_probe_unshare_once", lambda: (_ for _ in ()).throw(AssertionError("probe called on loop!"))
@@ -256,6 +261,7 @@ def test_on_loop_cold_cache_returns_none_without_probing(monkeypatch):
 
 def test_on_loop_kicks_background_warm_that_populates_cache(monkeypatch):
     """On-loop call fires background thread that fills cache off-loop."""
+    monkeypatch.setattr(sb, "sys", types.SimpleNamespace(platform="linux"))  # hermetic: gate precedes the mocked probe
     probe_thread_names: list[str] = []
 
     def recording_probe():
@@ -330,6 +336,7 @@ def test_prewarm_backend_populates_cache(monkeypatch):
 
 def test_off_loop_transient_retry_sleeps(monkeypatch):
     """When no event loop is running, time.sleep IS called for the retry."""
+    monkeypatch.setattr(sb, "sys", types.SimpleNamespace(platform="linux"))  # hermetic: gate precedes the mocked probe
     sleep_calls: list[float] = []
     monkeypatch.setattr(sb.time, "sleep", lambda s: sleep_calls.append(s))
     monkeypatch.setattr(sb, "_probe_unshare_once", lambda: (False, True, "EAGAIN"))
@@ -357,6 +364,7 @@ def test_probe_unshare_fast_path_on_loop_when_backend_set(monkeypatch):
     bypassing the warm cache and deferring on-loop, returning False even
     though the host is known-good.
     """
+    monkeypatch.setattr(sb, "sys", types.SimpleNamespace(platform="linux"))  # hermetic: gate precedes the mocked probe
     import asyncio
 
     # Preset cache to "namespace" (simulates successful prewarm)

@@ -32,6 +32,7 @@ from kiro_crew.dashboard.origin import (
 )
 from kiro_crew.embeddings import (
     _load_llama_class,
+    _platform_libs_dirname,
     _resolve_model_url,
     default_model_path,
     model_file_present,
@@ -432,8 +433,16 @@ def _doctor(platform_boot_error: "Exception | None" = None) -> None:
 
     if _load_llama_class() is not None:
         print("  runtime:     ✅ vendored llama-cpp-python importable")
+    elif _platform_libs_dirname() is None:
+        # Designed degradation, not a defect: no vendored native libs exist for
+        # this platform (e.g. darwin/x86_64) and embeddings.py documents the
+        # keyword-search fallback. Nothing for the user to fix — don't fail.
+        print(
+            "  runtime:     ⏹ unsupported platform "
+            f"({sys.platform}/{_plat.machine()}) — memory uses keyword search"
+        )
     else:
-        print("  runtime:     ❌ vendored runtime failed to load (unsupported platform?)")
+        print("  runtime:     ❌ vendored runtime failed to load")
         issues.append("embedding runtime")
 
     if model_file_present():
