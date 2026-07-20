@@ -625,11 +625,11 @@ export default function KnowledgePage() {
           <span>{stats.relations} relations</span>
           <span>{stats.sources} sources</span>
           {stats.embeddings?.enabled ? (
-            <span className={stats.embeddings.available ? 'text-ok' : 'text-warn'} title={stats.embeddings.available ? `${stats.embeddings.model} — ${stats.embeddings.embedded_items} embedded` : `Ollama not reachable (${stats.embeddings.model})`}>
-              ● {stats.embeddings.available ? `embeddings (${stats.embeddings.embedded_items})` : 'embeddings offline'}
+            <span className={stats.embeddings.available ? 'text-ok' : 'text-warn'} title={stats.embeddings.available ? `${stats.embeddings.model} — ${stats.embeddings.embedded_items} embedded` : `Embedding model loading (${stats.embeddings.model})`}>
+              ● {stats.embeddings.available ? `embeddings (${stats.embeddings.embedded_items})` : 'embeddings loading'}
             </span>
           ) : (
-            <span className="text-muted" title="Add knowledge.embeddings.enabled: true to ~/.kirocrew/config.json">○ embeddings off</span>
+            <span className="text-muted" title="Embedding model is downloading in the background">○ embeddings initializing</span>
           )}
           {tab === 'list' && <span className="ml-auto text-[10px]">/ to search, Esc to back, &larr;&rarr; to page</span>}
         </div>

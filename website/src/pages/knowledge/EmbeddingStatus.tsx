@@ -1,6 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Brain, Check, AlertTriangle } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
 import { api } from '../../api/client'
 import { knowledgeApi } from './api'
 
@@ -13,14 +12,13 @@ interface KnowledgeEmbedStatus {
 }
 
 export function EmbeddingStatus() {
-  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const generateMutation = useMutation({
     mutationFn: () => knowledgeApi('/embedding/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['knowledge-embedding-status'] }),
   })
 
-  // Use the vector memory status (same source of truth as Settings → Vector Memory)
+  // Use the vector memory status (same source of truth as Settings > Vector Memory)
   const { data: vectorStatus } = useQuery({
     queryKey: ['vector-embedding-status'],
     queryFn: () => api.vectorEmbeddingStatus() as Promise<{ provider?: string; server_healthy?: boolean; model_available?: boolean }>,
@@ -36,7 +34,7 @@ export function EmbeddingStatus() {
 
   if (!vectorStatus) return null
 
-  const active = vectorStatus.provider === 'ollama' && vectorStatus.server_healthy
+  const active = vectorStatus.server_healthy || vectorStatus.model_available
   const total = knowledgeStatus?.total_items ?? 0
   const embedded = knowledgeStatus?.embedded_items ?? 0
   const pct = total > 0 ? Math.round((embedded / total) * 100) : 0
@@ -57,7 +55,7 @@ export function EmbeddingStatus() {
         ) : (
           <>
             <AlertTriangle size={12} className="text-warn" />
-            <span className="text-muted">Ollama ready — knowledge items need embedding.</span>
+            <span className="text-muted">Embedding engine ready — knowledge items need embedding.</span>
             <button
               onClick={() => generateMutation.mutate()}
               disabled={generateMutation.isPending}
@@ -70,13 +68,7 @@ export function EmbeddingStatus() {
       ) : (
         <>
           <AlertTriangle size={12} className="text-warn" />
-          <span className="text-muted">Smart Search disabled — enable in</span>
-          <button
-            onClick={() => navigate('/settings?tab=overview')}
-            className="text-accent underline bg-transparent border-none cursor-pointer text-[12px] p-0"
-          >
-            Settings → Vector Memory
-          </button>
+          <span className="text-muted">Smart Search unavailable — embedding model is downloading in the background.</span>
         </>
       )}
     </div>

@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, act, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-// Must match the router package the component tree uses: EmbeddingStatus (rendered
-// by KnowledgePage) calls useNavigate from 'react-router-dom', and in react-router
-// v7 the -dom package has its own context instance, so MemoryRouter must come from
-// 'react-router-dom' or useNavigate won't see the router.
+// The MemoryRouter wrapper is retained defensively for future routed children:
+// since the always-on embeddings change, nothing in the KnowledgePage tree uses
+// the router (EmbeddingStatus dropped its useNavigate; DetailView's Link2 is a
+// lucide icon, not a router Link). If a routed child is added, this wrapper —
+// which must come from 'react-router-dom' (v7 keeps its own context instance) —
+// already provides the context.
 import { MemoryRouter } from 'react-router-dom'
 
 // Mock the knowledge API

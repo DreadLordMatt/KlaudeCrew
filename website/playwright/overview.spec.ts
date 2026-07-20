@@ -12,7 +12,8 @@ test.describe('Overview Page E2E Tests', () => {
 
   test('navigates to Overview and displays tabs', async ({ page }) => {
     for (const label of TABS) {
-      // exact match: 'Memory' would otherwise also hit the 'Enable Vector Memory' CTA.
+      // exact match: 'Memory' would otherwise also hit the Vector Memory card's CTA
+      // ('Retry Download' / 'Start Embedding Engine' since always-on embeddings).
       await expect(page.getByRole('button', { name: label, exact: true })).toBeVisible({ timeout: 10000 })
     }
   })

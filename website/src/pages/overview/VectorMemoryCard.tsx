@@ -32,8 +32,10 @@ interface EmbeddingStatus {
   provider?: string
   model_available?: boolean
   server_healthy?: boolean
-  ollama_installed?: boolean
-  needs_docker?: boolean
+  download_step?: string
+  download_attempt?: number
+  bytes_downloaded?: number
+  bytes_total?: number
 }
 
 interface SemanticEntry {
@@ -231,17 +233,47 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
     pollEmbeddingStatus()
   }
 
+  // Derive the download step label from the raw status
+  const downloadStepLabel = (step: string, status: EmbeddingStatus | null): string => {
+    const rawStep = status?.download_step
+    if (rawStep === 'verifying') return 'Verifying model integrity…'
+    if (rawStep === 'waiting_retry') {
+      const attempt = status?.download_attempt ?? 0
+      return `Retrying download (attempt ${attempt})…`
+    }
+    if (step === 'downloading') {
+      const dl = status?.bytes_downloaded ?? 0
+      const total = status?.bytes_total ?? 0
+      if (total > 0) {
+        const pctDone = Math.round((dl / total) * 100)
+        const dlMB = (dl / 1e6).toFixed(0)
+        const totalMB = (total / 1e6).toFixed(0)
+        return `Downloading embedding model (${dlMB}/${totalMB} MB — ${pctDone}%)…`
+      }
+      return 'Downloading embedding model (~610MB)…'
+    }
+    return step
+  }
+
+  // Compute determinate progress percentage from byte counts when available
+  const downloadPct = (status: EmbeddingStatus | null): number | null => {
+    const dl = status?.bytes_downloaded ?? 0
+    const total = status?.bytes_total ?? 0
+    if (total > 0 && dl > 0) return Math.min(95, Math.round((dl / total) * 100))
+    return null
+  }
+
   return (<>
     <Card>
-      <CardTitle><Brain className="lucide-inline" /> Vector Memory <InfoTip text="Structured semantic (key-value) + episodic (conversation fragments) memory with optional vector search. Off by default — enable to install Ollama and load the embedding model." /></CardTitle>
+      <CardTitle><Brain className="lucide-inline" /> Vector Memory <InfoTip text="Structured semantic (key-value) + episodic (conversation fragments) memory with vector search. Embeddings are always-on — the model downloads automatically in the background." /></CardTitle>
       {!active && !enabling && (
         <div className="flex flex-col gap-3 items-start">
           {embStatus?.model_available
-            ? <p className="text-sm text-muted">Model already loaded. Click to start the embedding server.</p>
-            : <p className="text-sm text-muted">Enable vector memory for semantic search across your conversation history. Installs Ollama + loads ~610MB embedding model from Gitfarm.</p>
+            ? <p className="text-sm text-muted">Model loaded. Embedding engine is starting up.</p>
+            : <p className="text-sm text-muted">Vector memory is initializing. The embedding model (~610MB) downloads automatically in the background.</p>
           }
           <div className="flex gap-2 flex-wrap">
-            <SendBtn onClick={startEmbeddings}>{ embStatus?.model_available ? <><Zap className="lucide-inline" /> Start Embedding Server</> : <><Brain className="lucide-inline" /> Enable Vector Memory</>}</SendBtn>
+            <SendBtn onClick={startEmbeddings}>{ embStatus?.model_available ? <><Zap className="lucide-inline" /> Start Embedding Engine</> : <><Brain className="lucide-inline" /> Retry Download</>}</SendBtn>
             {!stats?.migrated && stats?.has_legacy_memory && !migrateResult?.semantic && (
               <Btn disabled={migrating} onClick={async () => { setMigrating(true); setMigrateResult(null); const r = await api.vectorMigrate().catch(() => ({ error: 'Migration failed' })); setMigrateResult(r); setMigrating(false); await load() }}>
                 {migrating ? <><Hourglass className="lucide-inline" /> Migrating…</> : <><Package className="lucide-inline" /> Migrate from Markdown</>}
@@ -261,13 +293,13 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
       )}
       {enabling && (() => {
         const step = embStatus?.setup_step || 'checking'
-        const steps = embStatus?.needs_docker
-          ? ['checking', 'installing_docker', 'starting', 'downloading', 'done']
-          : embStatus?.model_available
-            ? ['checking', 'starting', 'done']
-            : ['checking', 'installing_ollama', 'starting', 'downloading', 'done']
+        const steps = ['checking', 'downloading', 'done']
         const idx = steps.indexOf(step)
-        const pct = step === 'error' ? 0 : Math.max(5, Math.min(95, ((Math.max(0, idx) + 1) / steps.length) * 100))
+        const bytePct = downloadPct(embStatus)
+        const pct = step === 'error' ? 0
+          : step === 'downloading' && bytePct != null ? bytePct
+          : Math.max(5, Math.min(95, ((Math.max(0, idx) + 1) / steps.length) * 100))
+        const hasDeterminatePct = step === 'downloading' && bytePct != null
         return (
           <div className="flex flex-col gap-3">
             <div className="flex items-center gap-3">
@@ -275,23 +307,17 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
               <div className="flex-1">
                 <div className="text-sm font-medium text-text-strong mb-1">
                   {step === 'checking' && 'Checking system status…'}
-                  {step === 'installing_docker' && 'Installing Docker + Ollama image…'}
-                  {step === 'installing_ollama' && 'Installing Ollama…'}
-                  {step === 'downloading' && 'Loading embedding model (~610MB)…'}
-                  {step === 'starting' && 'Starting Ollama embedding server…'}
+                  {step === 'downloading' && downloadStepLabel(step, embStatus)}
                   {step === 'done' && <><CheckCircle className="lucide-inline" /> Ready!</>}
                   {step === 'error' && <><XCircle className="lucide-inline" /> {embStatus?.setup_error || 'Setup failed'}</>}
                 </div>
                 <div className="w-full bg-bg-elevated rounded-full h-2 border border-border overflow-hidden">
-                  <div className={`h-full rounded-full ${step === 'downloading' ? 'animate-[grow_300s_ease-out_forwards]' : 'transition-all duration-700 ease-out'}`}
-                    style={{ width: step === 'downloading' ? undefined : `${pct}%`, background: step === 'error' ? 'var(--danger)' : 'var(--accent)' }} />
+                  <div className={`h-full rounded-full ${hasDeterminatePct ? 'transition-all duration-1000 ease-out' : step === 'downloading' ? 'animate-[grow_300s_ease-out_forwards]' : 'transition-all duration-700 ease-out'}`}
+                    style={{ width: hasDeterminatePct ? `${pct}%` : step === 'downloading' ? undefined : `${pct}%`, background: step === 'error' ? 'var(--danger)' : 'var(--accent)' }} />
                 </div>
                 <div className="text-[12px] text-muted mt-1">
-                  {step === 'installing_docker' && 'Installing Docker and pulling Ollama image (AL2)…'}
-                  {step === 'installing_ollama' && 'Installing Ollama runtime…'}
-                  {step === 'downloading' && 'Cloning model from Gitfarm…'}
-                  {step === 'starting' && 'Loading model into Ollama…'}
-                  {step === 'error' && 'Check logs. macOS: brew install ollama. Linux: curl -fsSL https://ollama.com/install.sh | sh'}
+                  {step === 'downloading' && 'Downloading from CDN…'}
+                  {step === 'error' && 'Download failed. Check network connectivity and try again.'}
                 </div>
               </div>
             </div>
@@ -312,16 +338,14 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
               </div>
             ))}
             <div className="stat-accent bg-bg-elevated rounded-md px-3 py-2 border border-border">
-              <div className="text-muted text-[11px] uppercase tracking-wider">Provider</div>
+              <div className="text-muted text-[11px] uppercase tracking-wider">Embeddings</div>
               <div className="text-lg font-bold">
                 {embStatus?.setup_step && embStatus.setup_step !== 'idle' && embStatus.setup_step !== 'done'
                   ? <Badge variant="warn"><Hourglass className="lucide-inline" /> {embStatus.setup_step}</Badge>
                   : (() => {
                       const modelOk = embStatus?.model_available ?? embStatus?.server_healthy;
-                      const ollamaInstalled = embStatus?.ollama_installed ?? true;
-                      if (embStatus?.provider !== 'ollama') return <Badge variant="warn">{embStatus?.provider || 'none'}</Badge>;
-                      if (!embStatus?.server_healthy) return <Badge variant={ollamaInstalled ? 'warn' : 'err'}>{ollamaInstalled ? 'ollama — server down' : 'ollama not installed'}</Badge>;
-                      return <Badge variant={modelOk ? 'ok' : 'warn'}>{modelOk ? <><Check className="lucide-inline" /> ollama</> : <><AlertTriangle className="lucide-inline" /> ollama — no model</>}</Badge>;
+                      if (!modelOk) return <Badge variant="warn"><AlertTriangle className="lucide-inline" /> model loading</Badge>;
+                      return <Badge variant="ok"><Check className="lucide-inline" /> active</Badge>;
                     })()
                 }
               </div>
@@ -339,12 +363,6 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
                 <Btn disabled={migrating} onClick={async () => { setMigrating(true); setMigrateResult(null); const r = await api.vectorMigrate().catch(() => ({ error: 'Migration failed' })); setMigrateResult(r); setMigrating(false); await load() }}>
                   {migrating ? <><Hourglass className="lucide-inline" />…</> : <><Package className="lucide-inline" /> Migrate</>}
                 </Btn>
-              )}
-              {embStatus?.provider !== 'ollama' && !enabling && (
-                <SendBtn onClick={startEmbeddings}>{embStatus?.model_available ? <><Zap className="lucide-inline" /> Start Embeddings</> : <><Brain className="lucide-inline" /> Enable Embeddings</>}</SendBtn>
-              )}
-              {embStatus?.provider === 'ollama' && (
-                <Btn danger onClick={async () => { await api.vectorDisableEmbeddings(); load() }}>Disable Embeddings</Btn>
               )}
             </div>
           </div>
@@ -364,7 +382,7 @@ export default function VectorMemoryCard({ onActiveChange, onMigratedChange }: {
               list="key-suggestions" className="w-full" />
             <datalist id="key-suggestions">{filteredKeys.map(k => <option key={k} value={k}>{k}</option>)}</datalist>
           </div>
-          <Input placeholder="Value" style={{ flex: 2 }} value={newVal} onChange={e => { setNewVal(e.target.value); setWriteError('') }} 
+          <Input placeholder="Value" style={{ flex: 2 }} value={newVal} onChange={e => { setNewVal(e.target.value); setWriteError('') }}
             onKeyDown={async e => { if (e.key === 'Enter' && newKey && newVal) { try { await api.vectorSemanticWrite(newKey, newVal); setNewKey(''); setNewVal(''); setWriteError(''); load() } catch (err: unknown) { setWriteError(extractError(err)) } } }} />
           <SendBtn onClick={async () => { if (!newKey || !newVal) return; try { await api.vectorSemanticWrite(newKey, newVal); setNewKey(''); setNewVal(''); setWriteError(''); load() } catch (e: unknown) { setWriteError(extractError(e)) } }}>Set</SendBtn>
         </div>
