@@ -208,11 +208,29 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         if body.get("steer") and message:
             _client = slot._acp_client
             if _client is not None and getattr(_client, "supports_steer", False):
+                # Register as pending BEFORE the await: _client.steer() suspends
+                # on stdin.drain(), and if the turn's finally runs during that
+                # suspension it must already see this steer to requeue it
+                # (append-after-await would land on an idle slot and orphan the
+                # message — zedmor's review, CR-290015501). The force-stop
+                # clear() likewise races correctly: a hard kill during the
+                # await discards the entry, so a late write can't resurrect it.
+                slot._pending_steers.append(message)
                 try:
                     steered = await _client.steer(message)
                 except Exception as exc:  # best-effort — fall through to queue
                     logger.warning("steer failed for slot %s: %s", slot.key, exc)
                     steered = False
+                if not steered:
+                    # Unwind the optimistic registration so the queue fallback
+                    # below doesn't double-deliver. If the entry is already
+                    # gone, the turn's finally requeued it (or a hard kill
+                    # discarded it) during the await — either way the message
+                    # is accounted for, so skip the fallback.
+                    try:
+                        slot._pending_steers.remove(message)
+                    except ValueError:
+                        return web.json_response({"ok": True, "queued": True})
                 if steered:
                     _ts = datetime.now(timezone.utc).isoformat()
                     # Sanitize: same chain as the queue path.
@@ -710,6 +728,10 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
     if slot._stop_state == "soft_pending":
         slot._stop_state = "killing"
         slot._queue.clear()
+        # Hard kill = "discard everything": drop unconsumed steers too, so the
+        # end-of-turn requeue (chat_runner finally) has nothing to resurrect.
+        # Mirrors the queue clear above; a soft stop preserves both.
+        slot._pending_steers.clear()
         state.push_slots_update()
         logger.info("Stop (force): hard-killing session for slot %s", name)
 

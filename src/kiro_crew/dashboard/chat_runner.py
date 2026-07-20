@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
@@ -20,6 +21,7 @@ from kiro_crew.acp.types import (
     EVENT_MCP_OAUTH_REQUEST,
     EVENT_MCP_SERVER_INIT_FAILURE,
     EVENT_MCP_SERVER_INITIALIZED,
+    EVENT_STEER_CONSUMED,
     STOP_REASON_CANCELLED,
     STOP_REASON_END_TURN,
     STOP_REASON_REFUSAL,
@@ -1502,6 +1504,109 @@ async def _handle_goal_command(
     slot.append("assistant", body, "msg msg-a")
     state.push_slots_update()
     slot.append("done", "", "done")
+
+
+def _settle_consumed_steers(slot: "_ChatSlot", snapshot: str) -> None:
+    """Settle pending steers covered by a ``steering_consumed`` echo.
+
+    kiro-cli injects the CONCATENATION of every steer queued since the last
+    consumption; the echo text carries each one ``<user_message>``-wrapped.
+    Parse the snapshot into its individual blocks and settle by EQUALITY —
+    substring containment would false-positive short steers against longer
+    ones or against the wrapper text itself, and a falsely-settled steer is
+    silently lost when the turn dies. A steer registered after kiro-cli
+    snapshotted (not among the blocks) stays pending (zedmor's review,
+    CR-290015501). Settling is COUNT-AWARE: each snapshot block settles at
+    most one pending entry, so a duplicate identical steer registered after
+    the snapshot stays pending instead of being swept by set membership.
+    When the echo carries no usable text (older backend, redacted echo),
+    fall back to settling all — worst case is a visible, cancellable
+    duplicate, never a silent loss.
+    """
+    if not slot._pending_steers:
+        return
+    if snapshot.strip():
+        consumed_blocks = re.findall(
+            r"<user_message>\n(.*?)\n</user_message>", snapshot, re.DOTALL
+        )
+        # The steer RPC wraps message.strip(); pending stores the raw message.
+        # Strip for parity so whitespace never causes a false NON-match (the
+        # safe direction is a duplicate, but exact settling is better).
+        consumed_counts: dict[str, int] = {}
+        for block in consumed_blocks:
+            consumed_counts[block] = consumed_counts.get(block, 0) + 1
+        remaining = []
+        for m in slot._pending_steers:
+            key = m.strip()
+            if consumed_counts.get(key, 0) > 0:
+                consumed_counts[key] -= 1
+            else:
+                remaining.append(m)
+    else:
+        remaining = []
+    logger.debug(
+        "Steer consumed for slot %s (%d settled, %d still pending)",
+        slot.key,
+        len(slot._pending_steers) - len(remaining),
+        len(remaining),
+    )
+    slot._pending_steers[:] = remaining
+
+
+def _requeue_unconsumed_steers(state: "DashboardState", slot: "_ChatSlot") -> None:
+    """Degrade unconsumed mid-turn steers into ordinary queue cards.
+
+    Called from ``_run_chat``'s finally on every turn-exit path. A steer that
+    kiro-cli never confirmed via ``steering_consumed`` died with the turn
+    (stall-cancel, soft STOP, error, or a steer racing the turn's natural
+    end); before this fix it vanished silently (2026-07-17 incident).
+
+    Requeues at the HEAD of the slot queue — steers were meant to be injected
+    before any queued item ran — preserving their relative order, and
+    broadcasts a ``queue_push`` per message so open clients render the card.
+    The card is visible and individually cancellable: a user whose STOP meant
+    "discard" dismisses it with one click; nothing is ever silently lost.
+    A hard kill never reaches here with pending steers (the force-stop
+    handler clears ``_pending_steers`` alongside ``_queue``).
+    """
+    if not slot._pending_steers:
+        return
+    requeued = slot._pending_steers[:]
+    slot._pending_steers.clear()
+    for steer_msg in reversed(requeued):
+        # Raw-at-rest by design: slot._queue is a DELIVERY payload (the drained
+        # entry becomes the next turn's LLM input), matching every other queue
+        # producer (queue_append in chat_handlers / messaging). All dashboard
+        # egresses redact: the three "queue" response sites in chat_handlers
+        # apply _redact_for_display, and every queue_* broadcast (including the
+        # queue_push below) sanitizes. Sanitizing at insert would corrupt the
+        # delivered message relative to the normal queue path.
+        qid = slot.queue_insert(0, steer_msg)
+        try:
+            content, _ = redact_exfiltration_urls(steer_msg)
+            content, _ = redact_credentials(content)
+            state.broadcast_ws(
+                "queue_push",
+                {
+                    "slot": slot.key,
+                    "content": _redact_for_display(content),
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "queue_id": qid,
+                },
+            )
+        except Exception:
+            # Broadcast is best-effort — the message is already safely in the
+            # queue; clients reconcile from slot detail on next fetch.
+            logger.warning(
+                "queue_push broadcast failed for requeued steer (slot %s)",
+                slot.key,
+                exc_info=True,
+            )
+    logger.info(
+        "Requeued %d unconsumed steer(s) for slot %s (turn ended before consumption)",
+        len(requeued),
+        slot.key,
+    )
 
 
 async def _run_chat(
@@ -3237,6 +3342,8 @@ async def _run_chat(
                         outcome,
                     )
                     continue
+            elif event.kind == EVENT_STEER_CONSUMED:
+                _settle_consumed_steers(slot, event.text or "")
             elif event.kind == EVENT_COMPACTION_STATUS:
                 logger.debug("Main loop: compaction event text=%r", event.text)
                 if _broadcast_compaction_result(state, slot, event):
@@ -3985,6 +4092,18 @@ async def _run_chat(
         # End-of-turn fallback: catches set_project calls that fired mid-turn,
         # after the start-of-turn consume already ran.
         await _consume_pending_reset(state, slot)
+        # ── Requeue unconsumed steers (steer-loss fix, 2026-07-17 incident) ──
+        # A steer handed to kiro-cli that never echoed steering_consumed dies
+        # with the turn (stall-cancel, soft STOP, error, or a steer that raced
+        # the turn's natural end). Degrade each one to an ordinary queue card
+        # at the HEAD of the queue (steers outrank queued messages — they were
+        # meant to be injected before any queued item ran). This mirrors the
+        # existing STOP semantics: soft stop preserves the queue; a hard kill
+        # discards it (the force-stop handler clears _pending_steers alongside
+        # _queue, so nothing is requeued there). The card is visible and
+        # individually cancellable — a user who meant "discard" clicks ✕;
+        # nothing is ever silently lost.
+        _requeue_unconsumed_steers(state, slot)
         # Process queued messages (FIFO) — keep SSE stream alive
         next_msg = None
         consumed: list = []
