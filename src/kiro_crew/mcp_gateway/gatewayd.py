@@ -66,6 +66,7 @@ from kiro_crew.mcp_gateway.prewarm import (
 )
 from kiro_crew.mcp_gateway.spill import cleanup_old_spill_files
 from kiro_crew.metrics.provider import get_recorder
+from kiro_crew.sandbox import prewarm_backend
 from kiro_crew.sel import SecurityEventLog
 
 logger = logging.getLogger(__name__)
@@ -2532,6 +2533,9 @@ async def _amain(argv: Optional[list[str]] = None) -> int:
                 return
 
     hb_task = asyncio.create_task(_heartbeat(), name="mcp-gateway-heartbeat")
+
+    # Prewarm sandbox probe cache so backends spawned on-loop never hit cold path
+    prewarm_backend()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:

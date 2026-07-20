@@ -119,6 +119,7 @@ from kiro_crew.memory import MemoryStore
 from kiro_crew.platform import boot_platform
 from kiro_crew.providers.base import LLMEvent
 from kiro_crew.safety_override import safety_override
+from kiro_crew.sandbox import prewarm_backend
 from kiro_crew.security import redact, redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
 from kiro_crew.service.common import restart_command_hint
@@ -3927,6 +3928,9 @@ class GatewayOrchestrator:
         from kiro_crew.session import cleanup_orphaned_sessions
 
         cleanup_orphaned_sessions()
+
+        # Prewarm sandbox probe cache so on-loop spawns never hit cold-cache path
+        prewarm_backend()
 
         # ── Initialise all services ──
         from kiro_crew.slack.events import SeenCache, init_socket_mode

@@ -19,8 +19,10 @@ Config: ``"sandbox": "auto" | "off"`` in ``~/.kirocrew/config.json``.
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import ctypes.util
+import errno
 import functools
 import json
 import logging
@@ -30,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -160,24 +163,195 @@ def _sandbox_policy():
 # ── Availability probes ──
 
 
-def _probe_unshare() -> bool:
-    """Return True if user + mount namespaces work (Linux)."""
-    if sys.platform != "linux":
-        return False
+# unshare(2) flags for the userns probe.
+_CLONE_NEWUSER = 0x10000000
+_CLONE_NEWNS = 0x00020000
+
+# Errnos that indicate a TRANSIENT resource failure (fork/CDLL under momentary
+# pressure) — the kernel supports user namespaces, we just couldn't verify it
+# right now. These must never be treated as "this host has no sandbox backend"
+# (incident 2026-07-18: one EAGAIN during a cron spawn burst fail-closed every
+# subsequent spawn for an hour because the failed probe result was cached).
+_TRANSIENT_PROBE_ERRNOS = frozenset(
+    {errno.EAGAIN, errno.ENOMEM, errno.EMFILE, errno.ENFILE, errno.ENOSPC}
+)
+
+# Delay before the single in-probe retry on a transient failure.
+_PROBE_TRANSIENT_RETRY_DELAY_SECS = 0.05
+
+# Detail of the most recent failed userns probe: (transient, reason).
+# ``None`` means the last probe succeeded (or none has run yet). Consumed by
+# detect_backend() for cache policy and by wrap_argv() for error reporting.
+_last_unshare_failure: tuple[bool, str] | None = None
+
+
+def _probe_unshare_once() -> tuple[bool, bool, str]:
+    """One unshare(CLONE_NEWUSER|CLONE_NEWNS) attempt: ``(ok, transient, reason)``.
+
+    The forked child exits with the unshare(2) errno so the parent can
+    distinguish a kernel that refuses user namespaces (EPERM/EINVAL/ENOSYS —
+    permanent) from momentary resource exhaustion (EAGAIN/ENOMEM/... —
+    transient).
+    """
     try:
-        _clone_newuser = 0x10000000
-        _clone_newns = 0x00020000
         _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
         _libc.unshare.argtypes = [ctypes.c_int]
         _libc.unshare.restype = ctypes.c_int
+    except OSError as exc:
+        return (False, exc.errno in _TRANSIENT_PROBE_ERRNOS, f"libc load failed: {exc}")
+    except Exception as exc:  # find_library returning junk, ABI issues, ...
+        return (False, False, f"libc load failed: {exc}")
+    try:
         pid = os.fork()
-        if pid == 0:
-            ret = _libc.unshare(_clone_newuser | _clone_newns)
-            os._exit(0 if ret == 0 else 1)
+    except OSError as exc:
+        name = errno.errorcode.get(exc.errno or 0, "?")
+        transient = exc.errno in _TRANSIENT_PROBE_ERRNOS
+        return (False, transient, f"fork failed with errno {exc.errno} ({name})")
+    if pid == 0:
+        try:
+            ret = _libc.unshare(_CLONE_NEWUSER | _CLONE_NEWNS)
+            err = ctypes.get_errno() if ret != 0 else 0
+            os._exit(0 if ret == 0 else (err if 0 < err < 256 else 1))
+        except BaseException:
+            os._exit(1)
+    try:
         _, status = os.waitpid(pid, 0)
-        return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
-    except Exception:
+    except OSError as exc:
+        return (False, True, f"waitpid failed: {exc}")
+    if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
+        return (True, False, "ok")
+    if not os.WIFEXITED(status):
+        sig = os.WTERMSIG(status) if os.WIFSIGNALED(status) else 0
+        return (
+            False,
+            True,  # child killed by signal is always transient
+            f"probe child killed by signal {sig}",
+        )
+    child_errno = os.WEXITSTATUS(status)
+    name = errno.errorcode.get(child_errno, "?")
+    transient = child_errno in _TRANSIENT_PROBE_ERRNOS
+    return (
+        False,
+        transient,
+        f"unshare(CLONE_NEWUSER|CLONE_NEWNS) failed with errno {child_errno} ({name})",
+    )
+
+
+# ── Background warm thread (never-block-on-loop policy) ──
+# The event loop NEVER executes fork/waitpid/sleep for the probe. On-loop
+# callers with a cold cache get an immediate transient "none" (fail-closed,
+# self-heals in ms) and fire a background daemon thread that populates the
+# cache off-loop. Boot sites call prewarm_backend() to fill the cache before
+# any on-loop caller ever reaches detect_backend(), so the transient path is
+# typically never hit in production.
+
+_warm_thread: threading.Thread | None = None
+
+
+def _background_warm() -> None:
+    """Run the probe off-loop and populate the cache. Thread target."""
+    global _backend, _last_unshare_failure
+    for attempt in (1, 2):
+        ok, transient, reason = _probe_unshare_once()
+        if ok:
+            _last_unshare_failure = None
+            _backend = "namespace"
+            logger.info("Background warm: sandbox backend = namespace")
+            return
+        _last_unshare_failure = (transient, reason)
+        if not transient:
+            logger.warning("Background warm: probe permanent failure: %s", reason)
+            _backend = "none"
+            return
+        logger.warning("Background warm: probe transient (attempt %d/2): %s", attempt, reason)
+        if attempt == 1:
+            time.sleep(_PROBE_TRANSIENT_RETRY_DELAY_SECS)
+    # Both attempts transient — leave cache uncached (None) so next call re-tries
+    logger.warning("Background warm: both attempts transient, cache stays cold")
+
+
+def _kick_background_warm() -> None:
+    """Start the background warm thread if not already running."""
+    global _warm_thread
+    if _warm_thread is not None and _warm_thread.is_alive():
+        return  # dedupe: warm already in progress
+    _warm_thread = threading.Thread(
+        target=_background_warm, name="sandbox-probe-warm", daemon=True
+    )
+    _warm_thread.start()
+
+
+def prewarm_backend() -> None:
+    """Fire-and-forget boot hook: start background probe to fill the cache.
+
+    Call early in gateway startup (slack/gateway.py, mcp_gateway/gatewayd.py)
+    so the cache is warm before any on-loop spawn path reaches detect_backend().
+    """
+    if sys.platform != "linux":
+        return  # probes are Linux-only
+    _kick_background_warm()
+
+
+def _probe_unshare() -> bool:
+    """Return True if user + mount namespaces work (Linux).
+
+    Failures are logged with their errno and classified transient vs
+    permanent in :data:`_last_unshare_failure`; a transient failure gets one
+    immediate retry (off-loop only).
+
+    **Never-block-on-loop invariant**: when called from a running asyncio
+    event loop with a cold cache, this function does NOT probe — it fires
+    ``_kick_background_warm()`` and returns False with a transient reason.
+    The background thread populates the cache in ms; the next spawn re-checks
+    and finds a warm cache. Boot prewarm ensures this path is rarely hit.
+
+    Callers deciding cache policy (detect_backend) MUST consult the
+    classification — a transient result is not evidence that the host lacks
+    a sandbox backend.
+    """
+    global _last_unshare_failure
+    if sys.platform != "linux":
+        _last_unshare_failure = (False, "not Linux")
         return False
+
+    # Fast path: the cache already proved user namespaces work -- no probe
+    # needed. Keeps on-loop callers correct after prewarm instead of
+    # deferring and returning False.
+    if _backend == "namespace":
+        return True
+
+    # Detect running event loop — governs whether we probe directly or defer.
+    on_loop = False
+    try:
+        asyncio.get_running_loop()
+        on_loop = True
+    except RuntimeError:
+        pass
+
+    if on_loop:
+        # NEVER probe on the event loop. Kick background warm and fail transient.
+        _kick_background_warm()
+        _last_unshare_failure = (
+            True,
+            "probe deferred to background thread (cold cache on event loop); "
+            "cache warms in ms — retry",
+        )
+        return False
+
+    # Off-loop: direct probe with one retry on transient failure.
+    for attempt in (1, 2):
+        ok, transient, reason = _probe_unshare_once()
+        if ok:
+            _last_unshare_failure = None
+            return True
+        _last_unshare_failure = (transient, reason)
+        if not transient:
+            logger.warning("userns probe failed (permanent): %s", reason)
+            return False
+        logger.warning("userns probe failed (transient, attempt %d/2): %s", attempt, reason)
+        if attempt == 1:
+            time.sleep(_PROBE_TRANSIENT_RETRY_DELAY_SECS)
+    return False
 
 
 def _probe_sandbox_exec() -> bool:
@@ -1118,7 +1292,6 @@ def cleanup_stale_sandbox_profiles(*, legacy_dir: str | None = None) -> int:
 # ── Public API ──
 
 _backend: str | None = None  # "namespace", "sandbox-exec", "none"
-_backend_config_mode: str | None = None  # config mode when backend was cached
 
 
 def _allow_no_isolation() -> bool:
@@ -1195,23 +1368,38 @@ def _warn_no_isolation(mode: str) -> None:
 def detect_backend(config_mode: str = "auto") -> str:
     """Detect the best available sandbox backend.
 
-    Cached after first call; cache is invalidated if *config_mode* changes
-    (e.g. user toggles agent.sandbox between "auto" and "off").
+    Cache policy (incident 2026-07-18 — one transient fork failure poisoned
+    the cache and fail-closed every spawn for an hour until restart):
+
+    - A positive result (``"namespace"``/``"sandbox-exec"``) is cached for the
+      process lifetime — kernel capability does not change while running.
+    - ``"none"`` is cached ONLY when the userns probe failure looks permanent
+      (kernel refuses user namespaces: EPERM/EINVAL/ENOSYS). A transient
+      resource failure (fork EAGAIN, EMFILE, ...) is never cached — the next
+      spawn re-probes and self-heals.
+    - ``config_mode="off"`` short-circuits to ``"none"`` without probing and
+      without touching the cache. All other modes share one cache entry:
+      backend capability is mode-independent, so mode alternation no longer
+      forces pointless re-probes.
     """
-    global _backend, _backend_config_mode
-    if _backend is not None and _backend_config_mode == config_mode:
-        return _backend
-    # Invalidate on config change
-    if _backend_config_mode != config_mode:
-        _backend = None
-        _backend_config_mode = config_mode
+    global _backend
     if config_mode == "off":
-        _backend = "none"
-    elif _probe_unshare():
+        return "none"
+    if _backend is not None:
+        return _backend
+    if _probe_unshare():
         _backend = "namespace"
     elif _probe_sandbox_exec():
         _backend = "sandbox-exec"
     else:
+        transient, reason = _last_unshare_failure or (False, "no probe detail recorded")
+        if transient:
+            logger.warning(
+                "Sandbox backend probe failed transiently (%s); result NOT cached — "
+                "the next spawn re-probes",
+                reason,
+            )
+            return "none"
         _backend = "none"
     logger.info("Sandbox backend: %s (config_mode=%s)", _backend, config_mode)
     return _backend
@@ -1219,9 +1407,9 @@ def detect_backend(config_mode: str = "auto") -> str:
 
 def reset_backend() -> None:
     """Reset cached backend (for testing or config change)."""
-    global _backend, _backend_config_mode
+    global _backend, _last_unshare_failure
     _backend = None
-    _backend_config_mode = None
+    _last_unshare_failure = None
 
 
 # wrap_argv's ``mode`` vocabulary is a superset of the governance ``sandbox``
@@ -1335,6 +1523,25 @@ def wrap_argv(
         # returned unmodified argv, allowing the agent subprocess to access all
         # credential paths without any OS-level isolation.
         if not _allow_unsandboxed_exec():
+            transient, probe_reason = _last_unshare_failure or (
+                False,
+                "no probe detail recorded",
+            )
+            if transient:
+                guidance = (
+                    "This probe failure looks TRANSIENT (momentary resource "
+                    "pressure) — it is not cached and the next spawn re-probes "
+                    "automatically. Do NOT disable the sandbox for this; retry "
+                    "instead. "
+                )
+            else:
+                guidance = (
+                    "If this host genuinely lacks a sandbox backend, set "
+                    "agent.sandbox_allow_unsandboxed_exec=true in "
+                    "~/.kirocrew/config.json to explicitly allow unsandboxed "
+                    "execution, or install a supported sandbox backend "
+                    "(Linux user namespaces, or macOS sandbox-exec). "
+                )
             # Emit SEL audit event for this security-relevant denial so it
             # appears in the tamper-evident audit log (AutoSDE requirement).
             try:
@@ -1347,17 +1554,18 @@ def wrap_argv(
                     tool_name=argv[0] if argv else "unknown",
                     tool_kind="subprocess",
                     outcome="denied",
-                    error="No sandbox backend available and allow_unsandboxed_exec is not set",
+                    error=(
+                        "No sandbox backend available and allow_unsandboxed_exec "
+                        f"is not set (probe: {probe_reason})"
+                    ),
                 )
             except Exception:
                 logger.warning("Failed to emit SEL audit event for sandbox denial", exc_info=True)
             raise RuntimeError(
                 "Sandbox backend unavailable and allow_unsandboxed_exec is not set. "
                 "No OS-level sandbox backend is available on this host, and the "
-                "agent subprocess cannot be safely isolated. Set "
-                "agent.sandbox_allow_unsandboxed_exec=true in ~/.kirocrew/config.json "
-                "to explicitly allow unsandboxed execution, or install a supported "
-                "sandbox backend (Linux user namespaces, or macOS sandbox-exec)."
+                "agent subprocess cannot be safely isolated. "
+                f"Probe detail: {probe_reason}. " + guidance
             )
         # Opted in: warn (or info) and return unmodified argv
         _warn_no_isolation(mode)
