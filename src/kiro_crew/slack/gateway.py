@@ -83,7 +83,11 @@ from kiro_crew.dashboard.origin import (
 from kiro_crew.dashboard.stale_asset_watchdog import run_stale_asset_watchdog
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.dashboard.token_auth import MAX_SESSION_TTL_SECS, generate_token
-from kiro_crew.embeddings import OllamaManager, _validate_url, make_sync_embed_fn
+from kiro_crew.embeddings import (
+    make_sync_embed_fn,
+    model_file_present,
+    start_background_model_download,
+)
 from kiro_crew.executors import (
     cron_executor,
     maintenance_executor,
@@ -514,7 +518,7 @@ class GatewayOrchestrator:
         self._pending_queue: dict[str, list] = {}
         self._socket_client: WSSocketModeClient | None = None
         self._wecom_client: "WeComClient | None" = None  # set by maybe_start_wecom
-        self._ollama_manager: object | None = None  # OllamaManager (lazy import)
+        self._model_download_task: "asyncio.Task[bool] | None" = None
         self._mcp_gateway_manager: GatewayManager | None = None
 
     def _count_in_flight_work(self) -> int:
@@ -3369,85 +3373,24 @@ class GatewayOrchestrator:
         if self.dashboard_state:
             self.dashboard_state.no_crons = self._no_crons  # API-only mode
 
-    async def _start_ollama(self) -> None:
-        """Start Ollama server, pull model, and set embed_fn on vector memory.
+    async def _start_embeddings(self) -> None:
+        """Wire in-process embeddings and kick background model download.
 
-        Wires embed_fn_factory unconditionally so that if Ollama is unavailable
-        at gateway boot but starts later, _try_embed() will lazily rebind on
-        next memory write — no gateway restart required.
+        The embed_fn_factory is wired unconditionally so that _try_embed()
+        lazily rebinds embed_fn once the model file lands — no gateway
+        restart required. If the model is already present (common case after
+        first boot), embed_fn is bound immediately.
         """
-        # Capture config locals so the factory closure stays stable.
-        embed_url = self._cfg.memory.embedding_url
-        embed_model = self._cfg.memory.embedding_model
-        embed_timeout = self._cfg.memory.embedding_timeout_secs
-        embed_auth = self._cfg.memory.embedding_auth
-
-        if not self._cfg.memory.embedding_managed:
-            # External Ollama (e.g. SSH-forwarded or API Gateway). Reuse
-            # _validate_url so the safety gate, credential-in-URL check, and
-            # audit logging stay consistent with the managed EmbeddingClient path.
-            try:
-                _validate_url(
-                    embed_url,
-                    allow_remote=self._cfg.memory.allow_remote_embedding,
-                )
-            except ValueError as e:
-                logger.error(
-                    "External embedding URL %s rejected: %s — embeddings disabled",
-                    embed_url,
-                    e,
-                )
-                return
-            # SEL audit: external network endpoint authorized for embedding data.
-            # _validate_url already emits SEL on rejection paths; this matches
-            # the success-path audit requirement for security-relevant config.
-            sel().log_tool_invocation(
-                session_key="gateway_startup",
-                tool_name="_start_ollama_unmanaged",
-                outcome="external_endpoint_configured",
-                resources=embed_url,
-                metadata={"auth": embed_auth},
-            )
-            print("🐾 Using external Ollama at", embed_url)
-            # Wire factory for lazy rebind on external Ollama too — covers
-            # transient SSH tunnel / API Gateway outages mid-session.
-            self.vector_memory.embed_fn_factory = lambda: make_sync_embed_fn(
-                embed_url,
-                timeout=embed_timeout,
-                model=embed_model,
-                auth=embed_auth,
-            )
-            self.vector_memory.embed_fn = make_sync_embed_fn(
-                embed_url,
-                timeout=embed_timeout,
-                model=embed_model,
-                auth=embed_auth,
-            )
-            logger.info("External Ollama configured, embeddings enabled (unmanaged)")
-            return
-
-        mgr = OllamaManager(embed_url, model=embed_model)
-        self._ollama_manager = mgr
-        print("🐾 Starting Ollama embedding server…")
-        # Wire factory before ensure_running() so lazy rebind survives boot-time failure.
-        self.vector_memory.embed_fn_factory = lambda: make_sync_embed_fn(
-            embed_url,
-            timeout=embed_timeout,
-            model=embed_model,
-            auth=embed_auth,
-        )
-        if await mgr.ensure_running():
-            self.vector_memory.embed_fn = make_sync_embed_fn(
-                embed_url,
-                timeout=embed_timeout,
-                model=embed_model,
-                auth=embed_auth,
-            )
-            logger.info("Ollama server started, embeddings enabled")
+        self.vector_memory.embed_fn_factory = make_sync_embed_fn
+        if model_file_present():
+            self.vector_memory.embed_fn = make_sync_embed_fn()
+            logger.info("In-process embeddings ready (model already present)")
         else:
-            logger.warning(
-                "Ollama not ready at boot — embeddings will lazily reconnect when available"
+            logger.info(
+                "Embedding model not yet present — downloading in background; "
+                "memory falls back to keyword search until ready"
             )
+        self._model_download_task = start_background_model_download()
 
     # ------------------------------------------------------------------
     # MCP Gateway
@@ -3638,10 +3581,9 @@ class GatewayOrchestrator:
             cleanup_tasks.append(asyncio.wait_for(self._wecom_client.close(), timeout=2.0))
         if self._telegram_client:
             cleanup_tasks.append(asyncio.wait_for(self._telegram_client.close(), timeout=2.0))
-        # Stop Ollama server if we started it
-        if self._ollama_manager is not None:
-            if isinstance(self._ollama_manager, OllamaManager):
-                cleanup_tasks.append(self._ollama_manager.stop())
+        # Cancel background model download if still in flight
+        if self._model_download_task is not None and not self._model_download_task.done():
+            self._model_download_task.cancel()
 
         if cleanup_tasks:
             await asyncio.gather(*cleanup_tasks, return_exceptions=True)
@@ -3969,9 +3911,8 @@ class GatewayOrchestrator:
         seen = SeenCache()
         self._init_services()
 
-        # Start Ollama server if embeddings are configured
-        if self._cfg.memory.embedding_provider == "ollama":
-            await self._start_ollama()
+        # Wire in-process embeddings (always-on) and kick background model download
+        await self._start_embeddings()
 
         # Start MCP gateway sidecar before any ACP session can spawn.  The
         # rewriter writes the agent-JSON overlay first so kiro-cli picks up

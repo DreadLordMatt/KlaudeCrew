@@ -52,7 +52,7 @@ _ENUM_FIELDS: list[tuple[str, str, list[str]]] = [
     ("agent", "provider", ["acp"]),
     ("agent", "sandbox", ["auto", "off"]),
     ("agent", "log_level", ["DEBUG", "INFO", "WARNING", "ERROR"]),
-    ("memory", "embedding_provider", ["none", "ollama"]),
+    ("memory", "embedding_provider", ["llama_cpp"]),
 ]
 
 # Top-level keys recognised by the schema
@@ -230,7 +230,7 @@ _workspace_config_st = st.builds(
 _memory_store_config_st = st.builds(
     MemoryStoreConfig,
     description=st.text(min_size=0, max_size=30),
-    embedding_provider=st.sampled_from(["", "none", "ollama"]),
+    embedding_provider=st.sampled_from(["", "none", "llama_cpp"]),
 )
 
 # Hypothesis strategy for generating valid KiroCrewConfig instances
@@ -252,11 +252,8 @@ _session_config_st = st.builds(
 
 _memory_config_st = st.builds(
     MemoryConfig,
-    embedding_provider=st.sampled_from(["none", "ollama"]),
-    embedding_url=st.just("http://localhost:11434"),
-    allow_remote_embedding=st.booleans(),
+    embedding_provider=st.sampled_from(["llama_cpp"]),
     embedding_dim=st.sampled_from([256, 512, 1024]),
-    embedding_timeout_secs=st.floats(min_value=1.0, max_value=30.0),
     semantic_confidence_threshold=st.floats(min_value=0.0, max_value=1.0),
     episodic_dedup_threshold=st.floats(min_value=0.0, max_value=1.0),
     episodic_max_results=st.integers(min_value=1, max_value=50),
@@ -352,7 +349,6 @@ class TestConfigLoaderProperties:
         # Compare memory fields
         assert loaded.memory.embedding_provider == config.memory.embedding_provider
         assert loaded.memory.embedding_dim == config.memory.embedding_dim
-        assert loaded.memory.allow_remote_embedding == config.memory.allow_remote_embedding
         assert loaded.memory.migrated == config.memory.migrated
         assert loaded.memory.episodic_max_results == config.memory.episodic_max_results
         assert loaded.memory.episodic_max_count == config.memory.episodic_max_count
@@ -408,7 +404,7 @@ class TestConfigLoaderProperties:
             ("agent", "streaming", "boolean"),
             ("session", "timeout_secs", "integer"),
             ("memory", "embedding_dim", "integer"),
-            ("memory", "allow_remote_embedding", "boolean"),
+            ("memory", "migrated", "boolean"),
         ]
         wrong_values = [
             42,  # wrong for string/boolean
@@ -799,11 +795,8 @@ class TestAgentWorkspaceBindingsProperties:
         top_level=st.fixed_dictionaries(
             {},
             optional={
-                "embedding_provider": st.sampled_from(["none", "ollama"]),
-                "embedding_url": st.text(min_size=1, max_size=40),
-                "allow_remote_embedding": st.booleans(),
+                "embedding_provider": st.sampled_from(["llama_cpp"]),
                 "embedding_dim": st.sampled_from([256, 512, 1024]),
-                "embedding_timeout_secs": st.floats(min_value=1.0, max_value=30.0),
                 "semantic_confidence_threshold": st.floats(min_value=0.0, max_value=1.0),
                 "episodic_dedup_threshold": st.floats(min_value=0.0, max_value=1.0),
                 "episodic_max_results": st.integers(min_value=1, max_value=50),
@@ -815,8 +808,7 @@ class TestAgentWorkspaceBindingsProperties:
             {},
             optional={
                 "description": st.text(min_size=0, max_size=30),
-                "embedding_provider": st.sampled_from(["", "none", "ollama"]),
-                "embedding_url": st.one_of(st.just(""), st.text(min_size=1, max_size=40)),
+                "embedding_provider": st.sampled_from(["", "none", "llama_cpp"]),
                 "embedding_dim": st.one_of(st.just(None), st.sampled_from([256, 512, 1024])),
             },
         ),
@@ -881,7 +873,7 @@ class TestAgentWorkspaceBindingsProperties:
         kiro_agent_name=st.text(min_size=1, max_size=20),
         ws_dir=st.text(min_size=1, max_size=30),
         store_desc=st.text(min_size=0, max_size=20),
-        store_provider=st.sampled_from(["", "none", "ollama"]),
+        store_provider=st.sampled_from(["", "none", "llama_cpp"]),
     )
     @settings(deadline=None)
     def test_resolver_correct_bindings(
@@ -1175,7 +1167,7 @@ class TestAgentWorkspaceBindingsProperties:
             min_size=0,
             max_size=3,
         ),
-        embedding_provider=st.sampled_from(["none", "ollama"]),
+        embedding_provider=st.sampled_from(["llama_cpp"]),
     )
     @settings(deadline=None)
     def test_backward_compatibility_with_legacy_configs(
@@ -1332,28 +1324,12 @@ class TestEdgeCases:
         **Validates: Requirement 5.4**
         """
         raw_config: dict = {
-            "memory": {"embedding_provider": "ollama"},
+            "memory": {"embedding_provider": "llama_cpp"},
         }
         cfg = _load_from_dict(raw_config)
 
         assert "default" in cfg.memory_stores
         assert isinstance(cfg.memory_stores["default"], MemoryStoreConfig)
-
-    def test_embedding_model_loaded_from_config(self) -> None:
-        """embedding_model from config.json is used instead of default."""
-        raw_config: dict = {
-            "memory": {"embedding_model": "snowflake-arctic-embed2"},
-        }
-        cfg = _load_from_dict(raw_config)
-        assert cfg.memory.embedding_model == "snowflake-arctic-embed2"
-
-    def test_embedding_runtime_loaded_from_config(self) -> None:
-        """embedding_runtime from config.json is used instead of default 'native'."""
-        raw_config: dict = {
-            "memory": {"embedding_runtime": "docker"},
-        }
-        cfg = _load_from_dict(raw_config)
-        assert cfg.memory.embedding_runtime == "docker"
 
     def test_recent_tint_count_loaded_from_config(self) -> None:
         """recent_tint_count from config.json is used instead of default 0."""
@@ -1365,10 +1341,58 @@ class TestEdgeCases:
         cfg = _load_from_dict({})
         assert cfg.dashboard.recent_tint_count == 0
 
-    def test_embedding_runtime_defaults_to_native(self) -> None:
-        """embedding_runtime defaults to 'native' when not in config."""
+    def test_embedding_provider_defaults_to_llama_cpp(self) -> None:
+        """embedding_provider defaults to 'llama_cpp' (in-process, default-on)."""
         cfg = _load_from_dict({})
-        assert cfg.memory.embedding_runtime == "native"
+        assert cfg.memory.embedding_provider == "llama_cpp"
+
+    def test_legacy_ollama_provider_coerces_to_llama_cpp(self) -> None:
+        """Old configs with 'ollama' load fine and coerce to the in-process runtime."""
+        raw_config: dict = {
+            "memory": {"embedding_provider": "ollama"},
+        }
+        cfg = _load_from_dict(raw_config)
+        assert cfg.memory.embedding_provider == "llama_cpp"
+
+    def test_none_provider_coerces_to_llama_cpp(self) -> None:
+        """Embeddings are always-on: a legacy 'none' (previously-disabled) coerces too."""
+        raw_config: dict = {
+            "memory": {"embedding_provider": "none"},
+        }
+        cfg = _load_from_dict(raw_config)
+        assert cfg.memory.embedding_provider == "llama_cpp"
+
+    def test_legacy_removed_embedding_keys_are_ignored(self) -> None:
+        """Configs carrying deleted Ollama-era keys still load without error.
+
+        embedding_url / embedding_managed / embedding_auth / embedding_model /
+        embedding_timeout_secs / embedding_runtime / allow_remote_embedding were
+        removed from MemoryConfig; the loader ignores unknown keys.
+        """
+        raw_config: dict = {
+            "memory": {
+                "embedding_provider": "ollama",
+                "embedding_url": "http://localhost:11434",
+                "embedding_managed": True,
+                "embedding_auth": "none",
+                "embedding_model": "snowflake-arctic-embed2",
+                "embedding_timeout_secs": 5.0,
+                "embedding_runtime": "docker",
+                "allow_remote_embedding": False,
+            },
+        }
+        cfg = _load_from_dict(raw_config)
+        assert cfg.memory.embedding_provider == "llama_cpp"  # coerced
+        for removed in (
+            "embedding_url",
+            "embedding_managed",
+            "embedding_auth",
+            "embedding_model",
+            "embedding_timeout_secs",
+            "embedding_runtime",
+            "allow_remote_embedding",
+        ):
+            assert not hasattr(cfg.memory, removed)
 
     def test_to_dict_always_writes_structured_workspace_format(self) -> None:
         """to_dict() always writes structured workspace format.

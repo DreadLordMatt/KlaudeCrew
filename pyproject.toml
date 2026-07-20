@@ -38,6 +38,11 @@ dev = [
 
 [tool.black]
 line-length = 100
+# force-exclude (not extend-exclude): formatter hooks pass explicit file paths
+# to black, and only force-exclude is honored for explicit paths. Vendored
+# third-party code must never be reformatted (keeps diffs against upstream
+# wheels clean for upgrades).
+force-exclude = "/_vendor/"
 
 [tool.isort]
 known_first_party = ["kiro_crew"]
@@ -47,6 +52,10 @@ profile = "black"
 
 # To maintain consistency with other settings
 line_length = 100
+# skip + skip_glob: isort's skip_glob alone is not honored when a formatter
+# hook passes explicit file paths with --filter-files unset; filter both ways.
+skip_glob = ["**/_vendor/*", "src/kiro_crew/_vendor/*"]
+extend_skip = ["_vendor"]
 
 [tool.mypy]
 mypy_path = "src"
@@ -65,4 +74,15 @@ pretty = true
 # Suppresses errors about packages which do not implement type-hint sharing.
 # See also https://mypy.readthedocs.io/en/latest/running_mypy.html#missing-imports.
 ignore_missing_imports = true
+# Vendored third-party code (llama-cpp-python) — never type-check it. The
+# exclude matches _vendor anywhere (src/ and build output trees alike).
+exclude = ['/_vendor/']
+
+[[tool.mypy.overrides]]
+# _vendor has no __init__.py (it is a sys.path root), so mypy may resolve the
+# vendored files as either kiro_crew._vendor.* or top-level llama_cpp.* /
+# diskcache depending on invocation — suppress both spellings.
+module = ["kiro_crew._vendor.*", "llama_cpp", "llama_cpp.*", "diskcache"]
+ignore_errors = true
+follow_imports = "skip"
 

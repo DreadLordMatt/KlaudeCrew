@@ -383,10 +383,8 @@ open "$URL"
 | Service won't start | `sudo journalctl -u kirocrew -n 50` to check logs |
 | Service keeps restarting | Check `systemctl status kirocrew` for exit code, then check logs |
 | SSH tunnel refuses connection | Confirm the gateway is running on the remote host and listening on the expected port (`ss -ltnp \| grep 5476`) |
-| Dashboard shows Ollama offline (✗) but it was working before | The `ollama.com` install script creates a systemd service (`User=ollama`) that conflicts with KiroCrew's own process management. The systemd user can't find models in your `~/.ollama/models/`. Fix: `sudo systemctl disable --now ollama` — KiroCrew manages Ollama itself via `ollama serve` subprocess |
-| `ollama list` shows no models but files exist in `~/.ollama/` | Same systemd user mismatch. The `ollama` system user looks in `/usr/share/ollama/.ollama/models/` instead of your home directory. Either disable the systemd service (recommended) or set `Environment="OLLAMA_MODELS=/home/YOUR_USER/.ollama/models"` in `/etc/systemd/system/ollama.service` |
+| Dashboard shows embeddings not ready | The embedding model (~610MB) downloads in the background over HTTPS from the KiroCrew CDN on gateway startup — run `kirocrew doctor` (it probes the resolved model URL) and check network reachability; a mirror can be set via `KIROCREW_EMBED_MODEL_URL`. Memory falls back to keyword search until the model lands |
 
-> **Note**: Embeddings (Ollama) are optional. If Ollama isn't installed,
-> KiroCrew degrades gracefully — semantic memory features are reduced but
-> the agent still runs. See the [README](../README.md) for Ollama setup
-> (`ollama pull qwen3-embedding:0.6b`).
+> **Note**: Embeddings are always-on and run in-process (bundled
+> llama-cpp-python) — no Ollama install needed. Until the model file lands,
+> KiroCrew degrades gracefully to keyword search and the agent still runs.

@@ -815,51 +815,27 @@ class CronHistoryConfig:
 @dataclass
 class MemoryConfig:
     embedding_provider: str = field(
-        default="none",
+        default="llama_cpp",
         metadata=_meta(
             "Embedding Provider",
-            "Vector embedding backend.",
-            enum=["none", "ollama"],
-        ),
-    )
-    embedding_url: str = field(
-        default="http://localhost:11434",
-        metadata=_meta("Embedding URL", "URL for the embedding service."),
-    )
-    allow_remote_embedding: bool = field(
-        default=False,
-        metadata=_meta("Allow Remote Embedding", "Allow non-localhost embedding endpoints."),
-    )
-    embedding_managed: bool = field(
-        default=True,
-        metadata=_meta(
-            "Managed Embedding Server",
-            "When true, KiroCrew starts/stops a local Ollama server. "
-            "Set to false for external or SSH-forwarded Ollama instances.",
-        ),
-    )
-    embedding_auth: str = field(
-        default="none",
-        metadata=_meta(
-            "Embedding Auth",
-            "Auth scheme for embedding requests. Default 'none' (local Ollama). "
-            "Advanced: 'aws_sigv4' signs requests for an AWS-fronted endpoint (opt-in).",
+            "Vector embedding backend (always-on). In-process via vendored llama-cpp-python. "
+            "Legacy configs with 'ollama' or 'none' are auto-migrated to 'llama_cpp'.",
+            enum=["llama_cpp"],
         ),
     )
     embedding_dim: int = field(
         default=1024,
         metadata=_meta("Embedding Dimension", "Dimensionality of embedding vectors."),
     )
-    embedding_model: str = field(
-        default="qwen3-embedding:0.6b",
+    embed_model_url: str = field(
+        default="",
         metadata=_meta(
-            "Embedding Model",
-            "Ollama model name for embeddings. Must match embedding_dim (e.g. qwen3-embedding:0.6b=1024, nomic-embed-text=768).",
+            "Embedding Model URL",
+            "Override HTTPS URL for the embedding model GGUF download (mirrored/airgapped "
+            "deployments). Empty uses the public KiroCrew CDN default; the "
+            "KIROCREW_EMBED_MODEL_URL env var wins over both. The download is "
+            "sha256-verified regardless of source.",
         ),
-    )
-    embedding_timeout_secs: float = field(
-        default=5.0,
-        metadata=_meta("Embedding Timeout", "Timeout in seconds for embedding requests."),
     )
     semantic_confidence_threshold: float = field(
         default=0.8,
@@ -898,14 +874,6 @@ class MemoryConfig:
         default=365,
         metadata=_meta("History Max Days", "Maximum days of history to retain."),
     )
-    embedding_runtime: str = field(
-        default="native",
-        metadata=_meta(
-            "Embedding Runtime",
-            "How Ollama runs: 'native' (direct binary) or 'docker' (container fallback for AL2 glibc).",
-            enum=["native", "docker"],
-        ),
-    )
     migrated: bool = field(
         default=False,
         metadata=_meta("Migrated", "Whether memory has been migrated to vector store."),
@@ -921,6 +889,17 @@ class MemoryConfig:
 #: widgets). ``svg`` is excluded because ``.svg`` is not in
 #: ``FileReader.SUPPORTED``.
 DEFAULT_AUTO_INGEST_ARTIFACT_KINDS = ["markdown", "text", "html", "json"]
+
+
+def _coerce_embedding_provider(raw: str) -> str:
+    """Normalize legacy or unknown embedding_provider values.
+
+    Embeddings are always-on: every value coerces to ``"llama_cpp"``. Old configs
+    may carry ``"ollama"`` (previous runtime) or ``"none"`` (previously-disabled);
+    both are transparently upgraded. Unknown values also coerce so a config file
+    from a newer/older version never crashes.
+    """
+    return "llama_cpp"
 
 
 @dataclass
@@ -1314,8 +1293,9 @@ class MemoryStoreConfig:
         default="",
         metadata=_meta(
             "Embedding Provider",
-            "Override embedding backend for this store. Empty inherits from top-level memory.",
-            enum=["", "none", "ollama"],
+            "Override embedding backend for this store. Empty inherits from top-level memory "
+            "(embeddings are always-on; per-store disable is not supported).",
+            enum=["", "llama_cpp"],
         ),
     )
 
@@ -2806,15 +2786,11 @@ class KiroCrewConfig:
                 export_interval_seconds=int(telemetry_data.get("export_interval_seconds", 60)),
             ),
             memory=MemoryConfig(
-                embedding_provider=memory_data.get("embedding_provider", "none"),
-                embedding_url=memory_data.get("embedding_url", "http://localhost:11434"),
-                allow_remote_embedding=memory_data.get("allow_remote_embedding", False),
-                embedding_managed=memory_data.get("embedding_managed", True),
-                embedding_auth=memory_data.get("embedding_auth", "none"),
-                embedding_model=memory_data.get("embedding_model", "qwen3-embedding:0.6b"),
+                embedding_provider=_coerce_embedding_provider(
+                    memory_data.get("embedding_provider", "llama_cpp")
+                ),
                 embedding_dim=memory_data.get("embedding_dim", 1024),
-                embedding_timeout_secs=memory_data.get("embedding_timeout_secs", 5.0),
-                embedding_runtime=memory_data.get("embedding_runtime", "native"),
+                embed_model_url=memory_data.get("embed_model_url", ""),
                 semantic_confidence_threshold=memory_data.get("semantic_confidence_threshold", 0.8),
                 episodic_dedup_threshold=memory_data.get("episodic_dedup_threshold", 0.88),
                 episodic_max_results=memory_data.get("episodic_max_results", 8),

@@ -14,7 +14,7 @@ KiroCrew's configuration and memory systems have grown organically. Several pain
 
 1. **Ad-hoc config parsing** — `workspaces`, `default_workspace`, `slack.*` are parsed outside the dataclass hierarchy in `KiroCrewConfig.load()`. No validation, no schema, no discoverability for the dashboard.
 2. **Global memory** — `VectorMemoryStore` uses a single `memory.db` + `memory.faiss` at `~/.kirocrew/`. Users working across multiple projects (oncall vs. feature work vs. personal) get cross-contaminated context. The parked `feat/workspace-scoped-vector-memory` branch prototyped per-workspace stores but depends on a proper config foundation.
-3. **No plugin system** — memory backends are hardcoded (SQLite+FAISS local, Ollama embeddings). No way to swap in remote vector DBs, different embedding providers, or team-shared memory without code changes.
+3. **No plugin system** — memory backends are hardcoded (SQLite+FAISS local, in-process llama.cpp embeddings). No way to swap in remote vector DBs, different embedding providers, or team-shared memory without code changes.
 
 These three problems are coupled: named memory stores need config to declare them, and plugins need config to declare and configure backends. Solving them in the wrong order creates rework.
 
@@ -116,11 +116,8 @@ Target `config.json` structure after Phase 1:
   },
   "session": { "timeout_secs": 1800 },
   "memory": {
-    "embedding_provider": "none",
-    "embedding_url": "http://localhost:11434",
-    "allow_remote_embedding": false,
+    "embedding_provider": "llama_cpp",
     "embedding_dim": 1024,
-    "embedding_timeout_secs": 5.0,
     "semantic_confidence_threshold": 0.8,
     "episodic_dedup_threshold": 0.88,
     "episodic_max_results": 8,
@@ -173,12 +170,12 @@ Proposed config shape:
   "memory_stores": {
     "default": {
       "description": "General-purpose memory",
-      "embedding_provider": "ollama",
+      "embedding_provider": "llama_cpp",
       "semantic_keys": ["pref.*", "project.*"]
     },
     "oncall-knowledge": {
       "description": "Oncall runbooks, incident patterns, escalation paths",
-      "embedding_provider": "ollama"
+      "embedding_provider": "llama_cpp"
     },
     "shared-team": {
       "description": "Team-wide knowledge base",
@@ -288,7 +285,7 @@ Migration strategy:
 Today the memory stack is hardcoded:
 ```
 VectorMemoryStore → SQLite + FAISS (local)
-EmbeddingClient → Ollama (localhost)
+LlamaCppEmbedder → vendored llama-cpp-python (in-process)
 ```
 
 Phase 4 introduces a plugin interface:
@@ -324,7 +321,7 @@ Config shape:
   "memory_stores": {
     "default": {
       "backend": "sqlite_faiss",
-      "embedding_provider": "ollama"
+      "embedding_provider": "llama_cpp"
     },
     "shared-team": {
       "backend": "remote_pgvector",
@@ -343,7 +340,7 @@ Key design decisions:
 
 - **`backend` field** per memory store selects the `MemoryBackend` implementation. Default: `"sqlite_faiss"` (current behavior). Each store can use a different backend.
 
-- **`embedding_provider` field** per store selects the `EmbeddingBackend`. Default: `"ollama"` when enabled, `"none"` otherwise.
+- **`embedding_provider` field** per store selects the `EmbeddingBackend`. Default: `"llama_cpp"` when enabled, `"none"` otherwise.
 
 - **Per-plugin remote consent (addressing AutoSDE comment)** — instead of piggy-backing on the embedding-specific `allow_remote_embedding` flag, each store/plugin that communicates with an external service declares `"remote": true`. The system enforces a general-purpose `allow_remote_access` top-level flag. A store with `"remote": true` is rejected at load time unless `allow_remote_access` is also true. This cleanly separates the consent mechanism from embedding semantics.
 

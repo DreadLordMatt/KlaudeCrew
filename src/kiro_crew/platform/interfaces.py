@@ -160,9 +160,12 @@ class IdentityProvider(Protocol):
 class EmbeddingSource(Protocol):
     """Where the embedding model comes from + request signing.
 
-    Public default = the public Ollama registry (``qwen3-embedding:0.6b``),
-    unsigned local requests.  The companion supplies an internal model source
-    and a SigV4 request signer.
+    Public default = the bundled in-process model (``qwen3-embedding:0.6b``
+    via vendored llama.cpp), no HTTP and no signing.  Since the in-process
+    runtime landed the core has no active HTTP embed path, so
+    ``endpoint_url``/``sign_request`` are a dormant seam — kept for contract
+    stability.  A companion supplying a different runtime should compose an
+    ``EmbeddingBackend`` via ``embeddings.register_embedding_backend``.
     """
 
     def registry_model(self) -> str: ...

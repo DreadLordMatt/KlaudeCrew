@@ -97,3 +97,6 @@ ignore_files:
   - "*.min.js"
   - "*.min.css"
   - .git/
+  # Vendored third-party code (llama-cpp-python) — carries upstream GitHub
+  # source URLs and identifiers we must not rewrite.
+  - src/kiro_crew/_vendor/**

@@ -19,7 +19,6 @@ from kiro_crew.agent import AGENT_FILENAME, KIRO_AGENTS_DIR
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config import KiroCrewConfig
 from kiro_crew.config.loader import config_dir
-from kiro_crew.constants import OLLAMA_DOCKER_CONTAINER
 from kiro_crew.dashboard.crash_dump_store import (
     dump_age_seconds,
     dump_first_stack_lines,
@@ -30,6 +29,12 @@ from kiro_crew.dashboard.origin import (
     is_local_only,
     machine_hostname,
     parse_dashboard_url,
+)
+from kiro_crew.embeddings import (
+    _load_llama_class,
+    _resolve_model_url,
+    default_model_path,
+    model_file_present,
 )
 from kiro_crew.mcp_cleanup import KIROCREW_BIN_MCP_SERVERS as _MANAGED_MCPS
 from kiro_crew.mcp_discovery import McpServerInfo, probe_server
@@ -53,26 +58,6 @@ def _os_fix_hint(mac: str, linux: str) -> str:
 # companion re-registers (see acp/client.py) — report it, when present, as that
 # optional seam rather than as a user-facing backend.
 _CLAUDE_ACP_BIN = "claude-agent-acp"
-
-
-def _detect_docker_ollama() -> str | None:
-    """Return display string if Ollama Docker container exists, else None."""
-    docker = shutil.which("docker")
-    if not docker:
-        return None
-    try:
-        result = subprocess.run(
-            [docker, "inspect", "--format", "{{.State.Status}}", OLLAMA_DOCKER_CONTAINER],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        status = result.stdout.strip()
-        if result.returncode == 0 and status in ("running", "exited", "paused", "created"):
-            return f"Docker ({OLLAMA_DOCKER_CONTAINER}) [{status}]"
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
-        pass
-    return None
 
 
 def _doctor_mcp_tools(agent_path: Path, issues: list[str]) -> None:
@@ -161,76 +146,30 @@ def _doctor_mcp_tools(agent_path: Path, issues: list[str]) -> None:
         issues.append(f"{ref} probe")
 
 
-def _doctor_ollama_install(issues: list[str]) -> None:
-    """Diagnose why Ollama auto-install would fail."""
+def _doctor_model_url_reachable(issues: list[str]) -> None:
+    """Light HTTPS-reachability probe of the resolved embedding-model URL.
 
-    system = _plat.system()
-
-    if system == "Darwin":
-        brew = shutil.which("brew")
-        if brew:
-            try:
-                result = subprocess.run(
-                    [brew, "info", "ollama"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-            except subprocess.TimeoutExpired:
-                # Homebrew can exceed the timeout during its periodic
-                # auto-update (a network tap fetch on the first brew call).
-                # Ollama is optional, so degrade to a warning instead of
-                # crashing doctor (mirrors the Linux branch below).
-                print("  brew info:   ⚠️  timed out checking formula")
-            else:
-                if result.returncode == 0:
-                    print(
-                        "  brew info:   ✅ formula available"
-                        " (enable will run: brew install ollama)"
-                    )
-                else:
-                    err = result.stderr.strip()[:200]
-                    print(f"  brew info:   ❌ {err}")
-                    issues.append("ollama (brew cannot resolve formula)")
-        else:
-            print("  brew:        ⚠️  not found" " — enable will try direct download")
-        print("               Install: brew install ollama")
-    elif system == "Linux":
-        brew = shutil.which("brew")
-        brew_formula_ok = False
-        if brew:
-            try:
-                result = subprocess.run(
-                    [brew, "info", "ollama"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                brew_formula_ok = result.returncode == 0
-            except subprocess.TimeoutExpired:
-                print("  brew:        ⚠️  timed out checking formula")
-            else:
-                if brew_formula_ok:
-                    print("  brew:        ✅ (enable will run: brew install ollama)")
-                else:
-                    print("  brew:        ⚠️  formula not available; will try curl fallback")
-        if not brew_formula_ok:
-            curl = shutil.which("curl")
-            if curl:
-                print(
-                    "  curl:        ✅ (enable will run:"
-                    " curl -fsSL https://ollama.com/install.sh | sh)"
-                )
-            else:
-                print("  curl:        ❌ not found — auto-install will fail")
-                issues.append("ollama (curl missing)")
-        if brew_formula_ok:
-            print("               Install: brew install ollama")
-        else:
-            print("               Install: curl -fsSL https://ollama.com/install.sh | sh")
-    else:
-        print(f"  platform:    ❌ auto-install unsupported on {system}")
-        issues.append("ollama (unsupported platform)")
+    Only runs when the model file is absent (a present model needs no
+    download). A HEAD request bounded to 5s — reports the endpoint's
+    reachability so a blocked/misconfigured CDN or mirror is diagnosed here
+    instead of as a silent background-download failure loop. Advisory only
+    (never appended to ``issues``): an absent model is a normal transient
+    state — the background download retries with backoff on every boot.
+    """
+    del issues  # advisory-only diagnostic; keeps the call-site signature uniform
+    url = _resolve_model_url()
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            print(f"  model url:   ✅ reachable ({resp.status}) {url}")
+    except urllib.error.HTTPError as exc:
+        print(f"  model url:   ❌ HTTP {exc.code} from {url}")
+        print("               Fix: set KIROCREW_EMBED_MODEL_URL (or memory.embed_model_url)")
+        print("               to a mirror hosting the GGUF; the sha256 pin still verifies it.")
+    except Exception as exc:
+        print(f"  model url:   ❌ unreachable ({exc}) {url}")
+        print("               Check network connectivity; the background download will")
+        print("               keep retrying with backoff on every gateway boot.")
 
 
 def _doctor(platform_boot_error: "Exception | None" = None) -> None:
@@ -488,28 +427,22 @@ def _doctor(platform_boot_error: "Exception | None" = None) -> None:
     except Exception as exc:  # pragma: no cover - defensive
         print(f"  sqlite fts5: ⚠️  could not check ({exc})")
 
-    # ── Ollama / Vector Memory ──
-    print("\nVector Memory (Ollama)")
+    # ── Vector Memory (in-process embeddings) ──
+    print("\nVector Memory (in-process embeddings)")
 
-    ollama = shutil.which("ollama") or _detect_docker_ollama()
-    if ollama:
-        print(f"  ollama:      ✅ {ollama}")
+    if _load_llama_class() is not None:
+        print("  runtime:     ✅ vendored llama-cpp-python importable")
     else:
-        print("  ollama:      ⏹ not installed (optional — vector memory)")
-        _doctor_ollama_install(issues)
+        print("  runtime:     ❌ vendored runtime failed to load (unsupported platform?)")
+        issues.append("embedding runtime")
 
-    if ollama:
-        try:
-            with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2) as resp:
-                print("  server:      ✅ running")
-        except Exception:
-            print("  server:      ⏹ not running (will auto-start on enable)")
-
-    # Check embedding config
-    if cfg.memory.embedding_provider == "ollama":
-        print("  embeddings:  ✅ enabled")
+    if model_file_present():
+        print(f"  model:       ✅ {default_model_path()}")
     else:
-        print("  embeddings:  ⏹ disabled (enable from dashboard → Overview → Memory)")
+        print("  model:       ⏹ not downloaded yet (downloads in background on gateway start)")
+        _doctor_model_url_reachable(issues)
+
+    print("  embeddings:  ✅ always-on")
 
     # ── Speech-to-Text (optional) ──
     print("\nSpeech-to-Text")

@@ -1442,7 +1442,7 @@ class HistoryConsolidator:
 
             # Structured memory writes (Phase 2/3). Offloaded to a worker thread:
             # _write_structured_memory embeds each item via a blocking urllib call
-            # to Ollama, and _consolidate runs on the event loop thread (fired via
+            # to the in-process embedder, and _consolidate runs on the event loop thread (fired via
             # asyncio.create_task). Running it inline stalls the whole gateway loop
             # if the embedding endpoint is slow/hung (heartbeats, Slack, dashboard).
             if self._vector_store:

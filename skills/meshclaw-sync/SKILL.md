@@ -421,9 +421,12 @@ credential redaction, destructive-command deny patterns, `~/.aws`/`~/.ssh`
 sensitive-path blocking, the SEL HMAC audit log, command-trust matching.
 
 And keep the OSS-flipped defaults: provider **`acp` (kiro-cli, the only
-provider)**, Ollama public embeddings, Piper TTS default, Slack enterprise
-default-open, lazy boto3/transcribe imports (STT-only; the `[aws]`/Bedrock
-extra was removed with the providers).
+provider)**, always-on in-process embeddings (vendored llama-cpp-python; the
+model downloads over sha256-pinned HTTPS from the KiroCrew CDN — the fork's
+transport swap for upstream's Gitfarm fallback; user-directed adoption of
+upstream 85ff0a87, superseding the old Ollama-registry default), Piper TTS
+default, Slack enterprise default-open, lazy boto3/transcribe imports
+(STT-only; the `[aws]`/Bedrock extra was removed with the providers).
 
 ### `platform/` (CPP seam + Governance) — fork-side core, sync with care
 

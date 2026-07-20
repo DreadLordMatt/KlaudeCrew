@@ -67,16 +67,23 @@ or on the dashboard Overview → Lessons tab.
 Memory is workspace-scoped. Different workspaces have different preferences,
 projects, and history. Lessons can be global or workspace-specific.
 
-## Vector Memory (Optional)
+## Vector Memory
 
-An opt-in upgrade that adds semantic search over your memory:
+Semantic search over your memory, always on:
 
 - **Semantic memory**: structured key-value store with confidence scoring
 - **Episodic memory**: conversation fragments searchable by meaning
-- **Embeddings**: local Ollama server with Qwen3-Embedding-0.6B (runs on your machine, no data leaves)
+- **Embeddings**: Qwen3-Embedding-0.6B running in-process (no Ollama or any
+  other server to install — the runtime is bundled; no data leaves your machine)
 
-Enable via the dashboard Overview → Memory tab → "Enable Vector Memory" button.
-Requires ~610MB for the embedding model.
+The embedding model (~610MB) downloads automatically in the background the
+first time the gateway starts, over HTTPS from the KiroCrew CDN — failed
+downloads retry automatically with backoff, and again on the next gateway
+start; the Memory tab shows download progress. Once downloaded, the model
+loads in the background too, so nothing ever waits on it. While the model is
+downloading or loading, memory falls back to keyword search and switches to
+semantic search as soon as the model is ready — no restart needed. Requires
+~610MB disk for the model and ~700MB RAM once the model is loaded.
 
 ## Consolidation
 

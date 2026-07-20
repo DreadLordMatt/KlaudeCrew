@@ -484,7 +484,7 @@ async def rebuild_embeddings(store, embedder, *, job_id: str | None = None,
     same function powers the dashboard trigger and the watcher self-heal. Returns the
     number of items re-embedded.
 
-    ponytail: serial single-item embed (Ollama is the CPU floor and fans out
+    ponytail: serial single-item embed (the in-process embedder is the CPU floor and fans out
     internally); batch size is only the commit/progress cadence, not a throttle.
     """
     loop = asyncio.get_running_loop()

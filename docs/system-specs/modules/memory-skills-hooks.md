@@ -1,6 +1,6 @@
 # Memory, Skills & Hooks Modules
 
-Last Updated: 2026-07-13 (skills lazy-load usage-ranked top-K + skill_search + SkillUsageLedger, /api/skills discovery_executor offload; pysqlite3, Snowball stemming, Docker fallback simplified)
+Last Updated: 2026-07-19 (in-process embeddings: always-on with no disable path, non-blocking background model load, download robustness — daemon-thread HTTPS download, Ollama-blob salvage, retry ladder — and the `EmbeddingBackend` swap seam; skills lazy-load usage-ranked top-K + skill_search + SkillUsageLedger, /api/skills discovery_executor offload)
 
 ## Overview
 
@@ -67,7 +67,7 @@ Exposed on dashboard: Overview → Memory tab → Memory Settings card. Changes 
 
 ## Vector Memory (`vector_memory.py`)
 
-Opt-in structured memory system backed by SQLite + FAISS + local Ollama embeddings. Off by default — enabled via dashboard "Enable Vector Memory" button.
+Structured memory system backed by SQLite + FAISS + in-process embeddings (vendored llama-cpp-python). Embeddings are ALWAYS-ON: `_coerce_embedding_provider` (config/loader.py) coerces EVERY `embedding_provider` value — including legacy `"ollama"` and `"none"` — to `"llama_cpp"`, so there is no config knob to disable them. While the model is still downloading or absent, memory degrades gracefully to keyword/FTS search and the lazy-rebind machinery in `vector_memory._try_embed` picks embeddings up when the model lands — no restart. Per-store overrides (`MemoryStoreConfig.embedding_provider`, enum `["", "llama_cpp"]`) can only inherit or restate the default — per-store disable is not supported.
 
 ### Semantic Memory
 
@@ -93,53 +93,43 @@ SQLite table `episodic_memories` — conversation fragments with optional embedd
 
 Context injection: top-8 results in `[Episodic Memory]` block, capped at 3000 chars (`cap=3000`). Injected on the first message of new sessions via `build_message()` — not at plain session start, since `build_session_context` passes no query to `memory.get_context()`.
 
-### Embedding Client (`embeddings.py`)
+### In-Process Embedder (`embeddings.py`)
 
-Async HTTP client for local Ollama server (`localhost:11434`):
-- `embed_one(text)` / `embed_batch(texts)` → returns 1024-dim vectors or `None` on error
-- Ollama API: `POST /api/embed` with `{"model": "qwen3:0.6b", "input": [...]}`
-- Localhost-only URL validation (rejects remote servers, credentials in URL)
-- **SSRF protection on the `allow_remote` path (`_validate_url` + `_resolve_blocked_addr`):** even when the owner opts into a remote embedding server (`allow_remote_embedding: true`, https-only), an IP-*literal* host is rejected (raising `ValueError`, so the caller disables embeddings) if it is a private / loopback / link-local / reserved / multicast / unspecified address — covering the IMDS endpoints (`169.254.169.254`, `fd00:ec2::254`), all RFC1918 space (`10/8`, `172.16/12`, `192.168/16`), `127/8`, and `::1`. IPv4-mapped IPv6 (`::ffff:a.b.c.d`) is unwrapped so a mapped internal address cannot slip through. **Trailing-dot normalization (Heimdall follow-up):** a fully-qualified trailing-dot literal (`169.254.169.254.` / `127.0.0.1.`) is rejected by both `ipaddress.ip_address` and `socket.inet_aton`, so it used to fall through as a DNS name and slip past the check; `addr_clean` is now `rstrip('.')`-normalized before parsing (the kernel/resolver treats the FQDN form as the same address; still **no DNS**), while the trailing-dot form of a public literal stays allowed. **Alternate-encoding normalization (Heimdall follow-up to CR-289119233):** because `ipaddress.ip_address` accepts only the canonical dotted-quad / RFC-5952 forms, alternate IPv4 literal encodings — hex (`0x7f000001`), decimal (`2130706433`), octal (`017700000001`), short-form (`127.1`) and the IMDS variants (`0xa9fea9fe` / `2852039166` / `169.254.43518`) — used to fall through the `ValueError` branch as if they were DNS names, letting aiohttp connect straight to loopback/IMDS. The `ValueError` branch now re-parses `addr_clean` through `socket.inet_aton` (the same permissive parse the C resolver/kernel performs, **pure string parse — no DNS**): `OSError` means a genuine DNS name (falls through to the accepted name-based residual), any other exception **fails CLOSED** (treated as blocked), and success is re-classified as an `IPv4Address` against the same private/loopback/link-local/reserved/multicast/unspecified rejection. The classification remains **pure / non-blocking — no DNS**: nothing on this sync/event-loop path calls `socket.getaddrinfo` (satisfies the whole-tree no-blocking-call gate). A DNS *name* is therefore not resolved here and passes the literal check. Malformed / hostless URLs are **denied (fail-closed)** rather than allowed. **Residual (accepted risk):** name-based / DNS-rebinding TOCTOU — a hostname that points at a private/metadata address (at validation and/or request time) is not caught, because the name is never resolved on the loop. Addresses Talos finding `76640a75`.
-- Rate-limited warnings (once per 60s on repeated failures)
-- Health check: `GET /api/tags` — verifies server running AND model loaded
+Embeddings run in-process via the vendored llama-cpp-python 0.3.34 runtime (`kiro_crew/_vendor/llama_cpp`) — no external server, no HTTP hop, no runtime pip install. (The Ollama-era remote-URL path — and with it `_validate_url`/`_resolve_blocked_addr` SSRF hardening for Talos `76640a75` — was removed together with the network client: there is no embedding URL to validate anymore.)
 
-**Sync embedding cache** (`make_sync_embed_fn`): The sync callable used by `vector_memory.py` caches results via `functools.lru_cache` keyed by input text. Embeddings are deterministic (same text → same vector for a given model), so caching is safe. Bounded to 128 entries (~4 MB with Python boxed floats). Failures (None) are not cached — `lru_cache` does not cache exceptions, so transient errors are retried. Cache stats logged every 20 misses. Cache lives per `make_sync_embed_fn()` call — reset when embeddings are disabled/re-enabled or gateway restarts.
+- `LlamaCppEmbedder.embed(text)` / `embed_batch(texts)` → returns 1024-dim vectors or `None` on any failure (graceful degradation)
+- **Non-blocking model load**: the GGUF load runs on a background daemon thread (`_kick_background_load()`, thread name `mc-embed-load`) — `embed()`/`embed_batch()` NEVER block on the load. When the model isn't in memory yet, the call kicks the background load and returns `None` immediately; memory degrades to keyword search until the load lands. The gateway/dashboard event loop is never stalled by embedding work. `wait_ready(timeout)` exists for sync contexts (tests, one-shot CLI flows) that legitimately want to block — never call it from an event-loop thread
+- The underlying `Llama` object is NOT thread-safe — inference on a loaded model is serialized behind a lock (tens of ms per short text)
+- `get_shared_embedder()` — process-wide singleton (~700MB RSS when loaded), shared by vector memory AND the knowledge library; `close()` unloads the model to free RSS
+- Per-platform native libs live in `_vendor/llama_cpp_libs/{linux_x86_64,linux_aarch64,macos_arm64,win_amd64}`, selected at import time via `LLAMA_CPP_LIB_PATH` (upstream-supported override; an operator-set value wins, enabling e.g. a GPU build). Unsupported platforms and import failures degrade to keyword-only memory search. See `_vendor/README.md`
+- Failed model loads (corrupt file, bad native libs) are retried only after a 300s cooldown so a broken state can't spawn a loader thread per embed call
 
-### Ollama Manager (`embeddings.py`)
+**Embedding backend abstraction** (`EmbeddingBackend` ABC): the public swap seam for future runtimes (Ollama again, remote endpoints, ONNX) and user-defined models. Surface: `model_id`, `dim`, `is_ready()`, `embed()`, `embed_batch()`, `close()`. Consumers (vector memory, knowledge library) depend only on this interface; everything llama.cpp-specific lives in `LlamaCppEmbedder`. Swap flow: `register_embedding_backend(factory)` + `reset_shared_embedder()` replaces the singleton (pass `None` to restore the default). A backend with a different `model_id`/`dim` produces incomparable vectors — the knowledge library's `embed_signature` folds `model_id` in, so a swap automatically triggers the sig-gated knowledge re-embed; vector memory re-embeds via `migrate`.
 
-Manages Ollama server lifecycle and model provisioning:
+**Sync embedding cache** (`make_sync_embed_fn()`, no args): The sync callable used by `vector_memory.py` wraps the shared embedder and caches results via `functools.lru_cache` keyed by `(input text, backend model_id)` — after a backend swap, the old model's cached vectors can never be served for the new model. Embeddings are deterministic (same text → same vector for a given model), so caching is safe. Bounded to 128 entries (~4 MB with Python boxed floats). Failures (None) are not cached — a still-downloading model is retried. Cache stats logged every 20 misses. Cache lives per `make_sync_embed_fn()` call — reset on gateway restart. Embedding through the cache never blocks on the model load (kicked in the background); callers get `None` until the model is resident.
 
-**Install** (`install_ollama()`):
-- macOS: `brew install ollama` (requires Homebrew), fallback to direct binary download
-- Linux: `brew install ollama` or `curl -fsSL https://ollama.com/install.sh | sh`
-- Docker fallback code preserved for runtime recovery (triggers only if native binary fails with GLIBC error and brew is unavailable)
-- Only triggered from dashboard "Enable Vector Memory" or gateway startup when `embedding_provider: "ollama"`
+### Model Download Manager (`embeddings.py`)
 
-**Docker fallback** (legacy, last-resort only):
-- Only activated when native binary crashes with GLIBC error **and** brew reinstall fails (or brew is unavailable)
-- Preserved for backwards compatibility but not recommended — `brew install ollama` resolves glibc issues
-- `_needs_sudo_cache` persists across `OllamaManager` instances within the gateway process
+`ModelDownloadManager` (singleton via `model_download_manager()`) downloads the embedding GGUF in the BACKGROUND at gateway startup — boot is never blocked by the 610MB transfer:
 
-**Model loading** (`pull_model()`):
-- Clones `KiroCrewModelQwen3Embedding` from Gitfarm (internal, no external model download)
-- Finds `qwen3-embedding-0.6b.gguf` (Q8_0 quantized, 610MB) in cloned package
-- Creates Ollama model via `ollama create qwen3:0.6b -f Modelfile` from local GGUF
-- IMPORTANT: `ollama pull qwen3:0.6b` from registry is a CHAT model — does NOT support embeddings
-- Only the Gitfarm GGUF produces a working embedding model
-- No fallback to Ollama registry — internal package is the only model source
+**Download flow** (`ensure_model()` / `start_background_model_download()`):
+- **Salvage fast-path** (`_salvage_legacy_ollama_blob`): before downloading, checks the legacy Ollama blob store (`~/.ollama/models/blobs/sha256-<digest>`, honoring `$OLLAMA_MODELS`) — Ollama stores layer blobs content-addressed and the Ollama-era GGUF is byte-identical, so migrating users skip the 610MB re-download entirely. The copy is sha256-verified like a real download; any failure falls through to the normal download
+- Downloads `qwen3-embedding-0.6b-q8_0.gguf` (Q8_0 quantized, 610MB) over plain HTTPS from the public KiroCrew CDN — URL resolution order: `KIROCREW_EMBED_MODEL_URL` env var, then the `memory.embed_model_url` config knob, then the built-in `_DEFAULT_MODEL_URL` CDN constant. No git, no cloud SDK. Streaming sha256 is computed while downloading and byte-level progress (`bytes_downloaded`/`bytes_total`) is written to `status` every ~16MB for the dashboard's determinate progress bar
+- sha256-verifies the file (`06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439` — the trust anchor for every source: a tampered CDN object or mirror can only fail verification); files under `_GGUF_MIN_BYTES` (1MB) are rejected as truncated
+- Installs persistently to `~/.kirocrew/models/qwen3-embedding-0.6b.gguf` — atomic install: stages into a per-process unique file in the TARGET directory (same filesystem) then `os.replace`, so two concurrent processes (gateway + one-shot CLI) can never interleave writes into a shared staging file
+- **Daemon-thread download** (`_run_download_on_daemon_thread`): the blocking HTTPS transfer runs on a daemon thread (deliberately NOT `run_in_executor` — executor threads are joined at interpreter exit), so Ctrl-C or a finished one-shot CLI is never pinned by an in-flight 610MB transfer
+- **Retry ladder**: background startup task = up to 6 attempts with exponential backoff (60s base, 30min cap, may span hours); every gateway restart retries; dashboard Enable/Retry click = `DOWNLOAD_ATTEMPTS_INTERACTIVE` (3) attempts for fast feedback. `kirocrew run` (one-shot CLI) never kicks downloads — only the long-lived gateway does
+- Escape hatch: `KIROCREW_SKIP_MODEL_DOWNLOAD=1` skips the download entirely (tests/CI must never trigger a 610MB download; tests additionally pin `OLLAMA_MODELS` to a tmp dir so the salvage path can't fire)
+- Concurrent `ensure_model()` calls (startup task + dashboard Enable click) share one in-flight download
+- `status` dict (`step`: `idle`/`downloading`/`verifying`/`waiting_retry`/`ready`/`failed`, plus `error` and `attempt`) is readable at any time by the dashboard status endpoint
 
-**Server** (`start_server()` / `stop()`):
-- Native: starts `ollama serve` as subprocess (Metal GPU on macOS, CUDA/CPU on Linux)
-- Docker fallback: `docker rm -f kirocrew-ollama` then `docker run -d` (only if native fails and brew unavailable)
-- Health polling with 30s timeout
-- SIGTERM → SIGKILL cleanup (native) or `docker stop` (Docker)
-
-**Dashboard Enable Flow** (retryable):
-- `POST /api/memory/enable-embeddings` — installs Ollama, starts server, loads model
-- On failure: status resets to `idle` with error message, frontend shows error + 🔄 Retry button
+**Dashboard Enable Flow** (non-blocking, retryable):
+- `POST /api/memory/enable-embeddings` — never blocks on the download: if the model is absent it kicks (or adopts an already-in-flight) background download with `DOWNLOAD_ATTEMPTS_INTERACTIVE` (3) attempts and returns immediately (`{"ok": true, "status": "downloading"}`); the frontend polls `embedding-status` for progress. When the model is present it installs faiss-cpu if missing, wires the embed function, and persists config
+- On failure: status resets to `idle` with error message, frontend shows error + Retry button
 - Prevents concurrent setup attempts (409 if already in progress)
 - `can_retry` flag in status response for frontend retry button
-- Progress steps: `checking` → `installing_ollama` (or `installing_docker` if Docker fallback) → `starting` → `downloading` → `done`
+- `GET /api/memory/embedding-status` — `enabled` is always `true`; `provider` reports the legacy `"ollama"` token (the shipped frontend hard-checks `provider === "ollama"` — kept until the frontend companion change lands); `setup_step` maps the manager's steps to the legacy vocabulary the shipped polling loop terminates on (`ready`→`done`, `failed`→`error`, `downloading`/`verifying`/`waiting_retry`→`downloading`); the raw step and attempt are additionally exposed as `download_step` + `download_attempt` for newer frontends; `server_healthy` = model file present OR model loaded
+- `POST /api/memory/disable-embeddings` — **gone**: embeddings are always-on. Kept as a graceful HTTP 410 stub (not a 404) because the shipped frontend still renders a Disable button; remove together with the frontend button
 
 ### Model Security & Policy
 
@@ -147,9 +137,9 @@ Manages Ollama server lifecycle and model provisioning:
 |-------|-------|
 | Model | Qwen/Qwen3-Embedding-0.6B (Q8_0 GGUF) |
 | License | Apache-2.0 (on approved list for self-approval) |
-| Source | public Ollama registry (`ollama pull qwen3-embedding:0.6b`) |
-| Runtime | Ollama (MIT license, native via brew or install script) |
-| Data flow | Text → localhost:11434 → float vectors (no data leaves machine) |
+| Source | public KiroCrew CDN (`_DEFAULT_MODEL_URL`; sha256-pinned; `KIROCREW_EMBED_MODEL_URL` / `memory.embed_model_url` for mirrors) |
+| Runtime | Vendored llama-cpp-python 0.3.34 (MIT license, `kiro_crew/_vendor/`) |
+| Data flow | Text → in-process function call → float vectors (no data leaves machine) |
 | Policy | Self-approvable under [Public Dataset and ML Model Policy](https://policy.a2z.com/docs/83291/publication) |
 
 Conditions met for self-approval:
@@ -157,11 +147,11 @@ Conditions met for self-approval:
 2. Apache-2.0 license — on approved list
 3. Outputs are float vectors — no excluded categories (health, financial, biometric, PII)
 4. Not recreating training data — generating embeddings, not content
-5. Model weights sourced from internal Gitfarm package (no 3P model download at runtime)
+5. Model weights sourced from the sha256-pinned KiroCrew release bucket (integrity-verified download at runtime)
 
-### Why Ollama (not TEI)
+### Why llama.cpp (not TEI)
 
-TEI (Text Embeddings Inference) uses the candle Rust framework with a Metal backend that has an [unmerged memory bug](https://github.com/huggingface/candle/pull/3197) causing unbounded GPU buffer allocation on macOS. The process consumes 4+ GB RAM and never becomes healthy. This affects ALL models on TEI/Metal, not just Qwen3. Ollama uses llama.cpp which works correctly on all platforms (macOS Metal, Linux CUDA/CPU).
+TEI (Text Embeddings Inference) uses the candle Rust framework with a Metal backend that has an [unmerged memory bug](https://github.com/huggingface/candle/pull/3197) causing unbounded GPU buffer allocation on macOS. The process consumes 4+ GB RAM and never becomes healthy. This affects ALL models on TEI/Metal, not just Qwen3. llama.cpp works correctly on all supported platforms (macOS Metal, Linux CPU) — KiroCrew vendors it directly via llama-cpp-python, which also removes the external Ollama server the previous design depended on.
 
 ### Lessons in Vector Memory
 
@@ -172,10 +162,8 @@ When vector memory is active, lessons are stored as semantic entries:
 - Methods: `write_lesson()`, `get_lessons()`, `delete_lesson()`, `get_lessons_context()`
 - Context: injected as `[Learned corrections]` block, separate from `[Semantic Memory]`
 - Allowlist: `lesson.*` prefix in `_BUILTIN_PREFIXES`
-- `start()` / `stop()` — subprocess lifecycle (SIGTERM → SIGKILL, same pattern as kiro-cli)
-- `ensure_running()` — auto-start on dashboard "Enable Vector Memory" click when `embedding_provider: "ollama"`
 
-Model: `Qwen/Qwen3-Embedding-0.6B` Q8_0 GGUF (610MB). Apache-2.0 licensed. Served via Ollama on all platforms.
+Model: `Qwen/Qwen3-Embedding-0.6B` Q8_0 GGUF (610MB). Apache-2.0 licensed. Served in-process via the vendored llama-cpp-python runtime on all supported platforms.
 
 ### Consolidation Integration
 
@@ -196,9 +184,9 @@ Model: `Qwen/Qwen3-Embedding-0.6B` Q8_0 GGUF (610MB). Apache-2.0 licensed. Serve
 | GET | `/api/memory/episodic/search?q=` | Search episodic memories |
 | DELETE | `/api/memory/episodic/{id}` | Tombstone episodic entry |
 | GET | `/api/memory/stats` | Counts, index size, provider status |
-| GET | `/api/memory/embedding-status` | Embedding system health |
-| POST | `/api/memory/enable-embeddings` | Install Ollama + load model from Gitfarm + update config |
-| POST | `/api/memory/disable-embeddings` | Set provider to none (Ollama keeps running) |
+| GET | `/api/memory/embedding-status` | Embedding health + download progress. `enabled` always true; `setup_step` in legacy vocabulary (done/error/idle/downloading); raw `download_step` (idle/downloading/verifying/waiting_retry/ready/failed) + `download_attempt` + `bytes_downloaded`/`bytes_total` |
+| POST | `/api/memory/enable-embeddings` | Non-blocking: kicks/adopts the background model download and returns `{"ok": true, "status": "downloading"}` when the model is absent; wires embeddings + updates config when present |
+| POST | `/api/memory/disable-embeddings` | HTTP 410 stub — embeddings are always-on; kept only until the frontend removes its Disable button |
 | POST | `/api/memory/migrate` | Migrate markdown → structured memory |
 | POST | `/api/memory/import` | Import from JSON export |
 | GET | `/api/memory/context-preview?q=` | Preview injected semantic + episodic context |
@@ -216,19 +204,22 @@ Parses legacy markdown files into structured memory:
 - `preferences.md`: bullet points with `key: value` → semantic entries (confidence 0.85, source "migration"). Bare prefix keys get `.default` suffix.
 - `projects.md`: project names → `project.name` semantic entries, details → episodic
 - `history/*.md`: daily summaries → episodic entries (importance 0.4)
-- **Embedding during migration**: when Ollama is enabled, the dashboard handler sets `store.embed_fn` before calling migration. Each episodic entry is embedded via Ollama and stored with its FAISS vector, enabling vector search immediately after migration.
+- **Embedding during migration**: when the model file is present, the dashboard handler sets `store.embed_fn` before calling migration. Each episodic entry is embedded in-process and stored with its FAISS vector, enabling vector search immediately after migration.
 - Idempotent: re-running skips existing semantic entries (conflict resolution), episodic dedup via FAISS when available
 - Dashboard: "📦 Migrate from Markdown" button shown when `migrated=false` and legacy files exist
 
 ### Cross-Platform
 
-macOS (Apple Silicon) and Linux (x86_64, arm64/Graviton) supported. All paths use `pathlib.Path`. GGUF model loaded from internal `KiroCrewModelQwen3Embedding` Gitfarm package (no external model downloads).
+macOS (Apple Silicon), Linux (x86_64, arm64/Graviton), and Windows supported. All paths use `pathlib.Path`. GGUF model downloaded over sha256-pinned HTTPS from the KiroCrew CDN. No runtime install step — native llama.cpp libraries are vendored per platform in `_vendor/llama_cpp_libs/` and selected via `LLAMA_CPP_LIB_PATH` (the old Docker fallback is gone).
 
-| Platform | Ollama Install | GPU | Notes |
-|----------|---------------|-----|-------|
-| macOS (Apple Silicon) | `brew install ollama` or direct download | Metal | Native, fastest |
-| Linux glibc ≥ 2.27 (AL2023+) | `brew install ollama` or `curl install.sh` | CUDA if available | Native |
-| Linux glibc < 2.27 (AL2) | `brew install ollama` or Docker fallback | CPU only | Brew avoids glibc issues |
+| Platform | Vendored libs | GPU | Notes |
+|----------|--------------|-----|-------|
+| macOS (Apple Silicon) | `macos_arm64/` | Metal (shader embedded in dylib) | Fastest |
+| Linux x86_64 | `linux_x86_64/` | CPU | manylinux2014 (glibc ≥ 2.17) — AL2 and AL2023 both work |
+| Linux aarch64/Graviton | `linux_aarch64/` | CPU | manylinux2014 (glibc ≥ 2.17) — AL2 and AL2023 both work |
+| Windows x86_64 | `win_amd64/` | CPU | DLLs found via `os.add_dll_directory` (Mesh-629) |
+
+The model download requires only outbound HTTPS (no git/git-lfs) on all platforms.
 
 ## Lessons (`learn.py` → `vector_memory.py`)
 

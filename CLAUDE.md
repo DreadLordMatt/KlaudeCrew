@@ -46,11 +46,15 @@ changing code, **never reintroduce** any of the following (see
   `acp/client.py` is intentionally kept so an internal companion can
   re-register Claude Code — do NOT delete it, but do NOT re-add the public
   registration glue either. (See the "Package Split" design.)
-- Other OSS-flipped defaults (keep these): embeddings pull from the **public**
-  Ollama registry (`ollama pull qwen3-embedding:0.6b`); voice TTS defaults to
-  **Piper** (local), not Polly; Slack enterprise gate is default-open (opt-in
-  allowlist via `slack.allowed_enterprise_ids`); `boto3` / `amazon-transcribe`
-  are **optional** lazy imports for STT only (`pip install kirocrew[voice]`).
+- Other OSS-flipped defaults (keep these): embeddings are **always-on and
+  in-process** (vendored llama-cpp-python under `_vendor/`; the Qwen3 GGUF
+  downloads over sha256-pinned HTTPS from the KiroCrew CDN — override via
+  `KIROCREW_EMBED_MODEL_URL` / `memory.embed_model_url`; no Ollama server, no
+  git/git-lfs — the `EmbeddingBackend` seam keeps other runtimes possible);
+  voice TTS defaults to **Piper** (local), not Polly; Slack enterprise gate is
+  default-open (opt-in allowlist via `slack.allowed_enterprise_ids`);
+  `boto3` / `amazon-transcribe` are **optional** lazy imports for STT only
+  (`pip install kirocrew[voice]`).
 
 **Keep** the generic security controls (these are not Amazon-specific): AKIA/ASIA
 credential redaction, destructive-command deny patterns, `~/.aws` / `~/.ssh`

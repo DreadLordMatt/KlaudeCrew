@@ -1334,3 +1334,41 @@ class TestWatcherSelfHeal:
         row = store.db.execute(
             "SELECT status FROM ingestion_jobs WHERE id = 'cancel000001'").fetchone()
         assert row["status"] == "cancelled"
+
+
+class TestEmbedSignature:
+    def test_base_url_ignored_by_signature(self):
+        # Embeddings run in-process (no external inference endpoint), so the
+        # sig hashes f"{model}|inprocess|{budget}" — no base_url input. Same
+        # model = stable signature; changing the model changes the signature,
+        # triggering the sig-gated rebuild.
+        from kiro_crew.knowledge.embedder import embed_signature
+
+        a = embed_signature("m")
+        b = embed_signature("m")
+        assert a == b
+
+    def test_model_changes_signature(self):
+        from kiro_crew.knowledge.embedder import embed_signature
+
+        assert embed_signature("m1") != embed_signature("m2")
+
+    def test_content_budget_changes_signature(self):
+        # Changing the budget must change the embed signature, else items
+        # truncated under the old budget would never be re-embedded.
+        from kiro_crew.knowledge.embedder import embed_signature
+
+        assert embed_signature("m") != embed_signature("m", content_budget=42)
+
+    def test_embedder_signature_matches_model_signature(self):
+        from kiro_crew.knowledge.embedder import (
+            _EMBED_CONTENT_BUDGET,
+            embed_signature,
+            embedder_signature,
+        )
+
+        class _E:
+            model = "m"
+            content_budget = _EMBED_CONTENT_BUDGET
+
+        assert embedder_signature(_E()) == embed_signature("m")

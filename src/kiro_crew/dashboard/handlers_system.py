@@ -26,6 +26,7 @@ from aiohttp import web
 import kiro_crew
 from kiro_crew import platform_compat
 from kiro_crew.dashboard.state import DashboardState
+from kiro_crew.embeddings import get_shared_embedder, model_file_present
 from kiro_crew.platform import current_context
 from kiro_crew.safety_override import safety_override
 from kiro_crew.stats import Stats
@@ -501,70 +502,16 @@ def _collect_system_metrics() -> dict[str, object]:
         data["mcp_processes"] = {"sandbox": 0, "kiro_cli": 0}
         data["mcp_total"] = 0
 
-    # Ollama process monitoring — supports local process or remote via port-forward
+    # In-process embedder monitoring — the model runs inside the gateway process
+    # now (no external server), so report functional availability instead of a
+    # separate PID. Field names ollama_running/ollama_remote are kept for
+    # frontend compatibility. "Running" = embeddings are usable: the model file
+    # is present (it lazy-loads into memory on first embed) or already loaded.
     try:
-        # Detect remote ollama config
-        from kiro_crew.config.loader import KiroCrewConfig
-
-        _remote_ollama = False
-        _ollama_port = "11434"
-        try:
-            _cfg = KiroCrewConfig.load()
-            if _cfg.memory.embedding_provider == "ollama":
-                _url = _cfg.memory.embedding_url or ""
-                if _url:
-                    _port_part = _url.rsplit(":", 1)[-1].strip("/")
-                    if _port_part.isdigit():
-                        _ollama_port = _port_part
-                    if "localhost" not in _url and "127.0.0.1" not in _url:
-                        _remote_ollama = True
-        except Exception:
-            pass
-
-        pids: list[str] = []
-        found_remote = False
-        if _ollama_port != "11434" or _remote_ollama:
-            # Match SSH tunnel forwarding the ollama port
-            try:
-                ps_out = subprocess.check_output(
-                    ["pgrep", "-f", f"{_ollama_port}:"], timeout=2, stderr=subprocess.DEVNULL
-                ).decode()
-                pids = [p.strip() for p in ps_out.splitlines() if p.strip()]
-                if pids:
-                    found_remote = _remote_ollama
-            except Exception:
-                pass
-        if not pids:
-            # Fall back to local ollama process
-            try:
-                ps_out = subprocess.check_output(
-                    ["pgrep", "-f", "ollama"], timeout=2, stderr=subprocess.DEVNULL
-                ).decode()
-                pids = [p.strip() for p in ps_out.splitlines() if p.strip()]
-            except Exception:
-                pass
-
-        if pids:
-            data["ollama_running"] = True
-            data["ollama_pid"] = int(pids[0])
-            data["ollama_remote"] = found_remote
-            # Get RSS memory
-            if sys.platform == "darwin":
-                ps_mem = (
-                    subprocess.check_output(
-                        ["ps", "-o", "rss=", "-p", pids[0]], timeout=2, stderr=subprocess.DEVNULL
-                    )
-                    .decode()
-                    .strip()
-                )
-                data["ollama_mem_mb"] = round(int(ps_mem) / 1024, 1) if ps_mem else 0
-            else:
-                statm = Path(f"/proc/{pids[0]}/statm")
-                if statm.exists():
-                    pages = int(statm.read_text().split()[1])
-                    data["ollama_mem_mb"] = round(pages * 4096 / (1024 * 1024), 1)
-        else:
-            data["ollama_running"] = False
+        embedder = get_shared_embedder()
+        data["ollama_running"] = model_file_present() or embedder.is_ready()
+        data["ollama_remote"] = False
+        data["embedding_model_loaded"] = embedder.is_ready()
     except Exception:
         data["ollama_running"] = False
 

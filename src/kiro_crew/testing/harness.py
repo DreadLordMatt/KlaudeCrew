@@ -383,7 +383,7 @@ def _terminate_process_group(proc: subprocess.Popen[bytes]) -> None:
     """Tear down the gateway's whole process tree, then reap.
 
     The gateway spawns child processes (MCP servers, kiro-cli sessions,
-    Ollama, secretary). ``proc.terminate()`` only signals the parent;
+    secretary). ``proc.terminate()`` only signals the parent;
     children can outlive it and hold the ephemeral port or cache files open.
     Delegates the SIGTERM→SIGKILL group kill to ``terminate_pgid`` (shared
     with out-of-process supervisors), passing ``proc.wait`` as the
@@ -467,6 +467,9 @@ def spawn_feature_gateway(
             # "Created default config") would block-buffer when stdout is a
             # pipe and could mask early failures.
             "PYTHONUNBUFFERED": "1",
+            # Embeddings are default-on; never let a harness-spawned gateway
+            # kick the 610MB embedding-model download during a test run.
+            "KIROCREW_SKIP_MODEL_DOWNLOAD": "1",
         }
 
         cmd = [

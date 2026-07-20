@@ -203,15 +203,18 @@ class TestKnowledgeSearchCache:
         self._reset()
         db_path = tmp_path / "knowledge.db"
         cfg_path = tmp_path / "config.json"
-        cfg_path.write_text('{"memory": {"embedding_provider": "none"}}')
+        cfg_path.write_text('{"memory": {}}')
 
         _, emb1 = _get_knowledge_search(db_path, cfg_path)
-        assert emb1 is None
+        # Embeddings are always-on: even without a model key an embedder exists
+        # (model id derived from the active backend).
+        assert emb1 is not None
         cfg_path.write_text(
-            '{"memory": {"embedding_provider": "ollama", "embedding_model": "m"}}'
+            '{"memory": {"embedding_provider": "llama_cpp", "embedding_model": "m"}}'
         )
         _, emb2 = _get_knowledge_search(db_path, cfg_path)
-        assert emb2 is not None  # embedder rebuilt from new config
+        assert emb2 is not None
+        assert emb2 is not emb1  # embedder rebuilt from new config
         self._reset()
 
     def test_failed_rebuild_keeps_old_store_usable(self, tmp_path, monkeypatch):

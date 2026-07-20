@@ -826,7 +826,7 @@ async def api_lessons_create(request: web.Request) -> web.Response:
     if vs:
         # Embed the rule once off the event loop and reuse it for both the
         # contradiction scan and write_lesson's own dedup pass — the store
-        # methods otherwise each perform a blocking Ollama embed of the same
+        # methods otherwise each perform a blocking in-process embed of the same
         # text. find_contradiction_candidates and write_lesson are synchronous
         # (blocking embed + O(N) cosine scan), so run them via to_thread to
         # avoid stalling concurrent dashboard/Slack requests.

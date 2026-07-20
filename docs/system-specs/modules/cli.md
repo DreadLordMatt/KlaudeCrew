@@ -230,7 +230,7 @@ Each step checks if the tool is already installed and skips if present.
 5. **MCP tools**: `@kirocrew-cron` and `@kirocrew-core` in `tools`, `allowedTools`, and `mcpServers` — auto-fixes missing entries
 6. **Global mcp.json**: kirocrew MCP servers present with valid binary paths — auto-fixes stale paths
 7. **Python environment**: checks Python 3.9+ availability and dependency installation
-8. **Vector memory**: Ollama server health and embedding model status
+8. **Vector memory (in-process embeddings)**: vendored llama-cpp-python runtime importable, embedding model file present (downloads in background on gateway start; when absent, a light HTTPS-reachability probe of the resolved model URL runs); embeddings are always-on (`embeddings:  ✅ always-on`)
 9. Slack credentials (optional)
 10. kiro-cli connectivity
 11. Gateway running status

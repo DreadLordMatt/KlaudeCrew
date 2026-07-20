@@ -1007,7 +1007,7 @@ async def get_stats(request: web.Request) -> web.Response:
         available = await embedder.is_available_async()
         stats["embeddings"] = {
             "enabled": True,
-            "provider": "ollama",
+            "provider": "llama_cpp",
             "model": embedder.model,
             "available": available,
             "embedded_items": embedded_count,
@@ -1224,7 +1224,7 @@ async def batch_embed_items(request: web.Request) -> web.Response:
     if not embedder:
         return web.json_response({"error": "Embedding not enabled"}, status=400)
     if not await embedder.is_available_async():
-        return web.json_response({"error": "Ollama not reachable"}, status=503)
+        return web.json_response({"error": "Embedding model not available"}, status=503)
 
     body = await request.json() if request.can_read_body else {}
     rebuild = body.get("rebuild", False)

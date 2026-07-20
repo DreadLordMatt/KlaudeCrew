@@ -107,12 +107,12 @@ Daily conversation summaries with 3-tier natural decay:
 
 ### 4. Semantic Memory (structured key-value)
 
-Structured facts stored as key-value pairs in SQLite. Opt-in — requires enabling Vector Memory via the dashboard.
+Structured facts stored as key-value pairs in SQLite. Always on — embeddings activate automatically once the model downloads.
 
 | Property           | Value                                                    |
 |--------------------|----------------------------------------------------------|
 | Storage            | SQLite table `semantic_memory` + optional FAISS index    |
-| Enabled by default | No — opt-in via dashboard "Enable Vector Memory" button  |
+| Enabled by default | Yes — always-on; keyword-only retrieval until the embedding model lands |
 | Key prefixes       | `pref.*`, `project.*`, `user.*` only (+ user-configurable extras) |
 | Context cap        | 12,000 chars                                             |
 | Retrieval          | Hybrid: `0.6 × vector_score + 0.4 × keyword_score` (keyword-only fallback without embeddings) |
@@ -136,7 +136,7 @@ Short text snippets capturing specific past events from conversations — things
 | Property           | Value                                                    |
 |--------------------|----------------------------------------------------------|
 | Storage            | SQLite table `episodic_memories` + optional FAISS index  |
-| Enabled by default | No — requires Vector Memory enabled                      |
+| Enabled by default | Yes — always-on; keyword fallback until the embedding model lands |
 | Text length        | 10–2,000 chars per entry                                 |
 | Dedup              | FAISS cosine > 0.88 rejects near-duplicates              |
 | Context cap        | 3,000 chars, top-8 results per query                     |
@@ -151,12 +151,11 @@ Example entries:
 
 Search uses decay scoring (see [Fading Mechanism](#fading-mechanism)) with MMR diversity reranking (Jaccard-based, λ=0.6) to avoid redundant results. Two-stage filtering: a raw-cosine pre-filter (`_EPISODIC_RELEVANCE_THRESHOLD = 0.55`, relaxed to `_EPISODIC_LONG_TEXT_THRESHOLD = 0.42` for entries longer than `_EPISODIC_LONG_TEXT_CHARS = 300` chars, since long texts dilute cosine scores) removes irrelevant matches, then decay-adjusted scoring ranks the survivors.
 
-**FAISS embeddings are NOT created by default.** Episodic memory requires Vector Memory to be enabled via the dashboard. The enable flow:
-1. Click "Enable Vector Memory" in dashboard
-2. KiroCrew installs Ollama via `brew install ollama` (recommended). On Linux without brew, it falls back to `curl -fsSL https://ollama.com/install.sh | sh`
-3. Loads `Qwen/Qwen3-Embedding-0.6B` model from internal Gitfarm package
-4. All future episodic writes get FAISS embeddings for vector search
-5. Without embeddings, episodic search falls back to keyword matching (OR logic, LIKE on text + tags)
+**FAISS embeddings are always-on** (`embedding_provider` coerces every value — including legacy `"ollama"`/`"none"` — to `"llama_cpp"`). The flow:
+1. On gateway startup, the `Qwen/Qwen3-Embedding-0.6B` model (~610MB) downloads in the background over HTTPS from the KiroCrew CDN (sha256-verified, retried with backoff; `KIROCREW_EMBED_MODEL_URL` or `memory.embed_model_url` overrides the URL for mirrors) to `~/.kirocrew/models/`
+2. Embeddings run in-process via the vendored llama-cpp-python runtime — no server or install step
+3. Once the model lands, all future episodic writes get FAISS embeddings for vector search (no restart needed)
+4. While the model is absent or not yet loaded, episodic search falls back to keyword matching (OR logic, LIKE on text + tags) — embeddings are always-on and cannot be disabled; keyword fallback is automatic
 
 ### 6. Lessons (learned corrections)
 
@@ -472,7 +471,7 @@ The Knowledge Library is a curated document store (separate from episodic/semant
 - **Sources**: local files (`local_file` type), local folders (`local_folder` type), URLs (fetched via `agent_fetch`)
 - **Ingestion pipeline**: `IngestionPipeline` handles chunking (`HeadingAwareChunker`), entity extraction, and embedding generation
 - **Database**: SQLite with `items` table (title, summary, content, embedding, status, source_id) and `folder_file_state` table for per-file ingestion state within folder sources
-- **Embeddings**: optional vector embeddings for semantic search via Ollama (local or external)
+- **Embeddings**: vector embeddings for semantic search via the in-process llama.cpp runtime (shared with vector memory; local only)
 
 ### Folder Watch (`folder_watcher.py`)
 
@@ -498,17 +497,6 @@ Recursive directory scanning with:
 | `GET /api/knowledge/embedding/status` | Reports enabled state, model info, total vs. embedded item counts |
 | `POST /api/knowledge/embedding/generate` | Batch-embed unembedded items (or `rebuild: true` to re-embed all, 200 items per batch) |
 | `GET /api/knowledge/search` | Search-for-context endpoint with embedding-based ranking |
-
-### SigV4 Auth for Remote Embeddings
-
-For API Gateway-fronted Ollama instances (removes SSH reverse-tunnel dependency):
-
-- Config: `embedding_managed: false` + `embedding_auth: "aws_sigv4"`
-- `_sigv4_sign()` uses botocore `SigV4Auth` (optional dep, import-guarded)
-- Reads `AWS_REGION` / `AWS_DEFAULT_REGION` (defaults to `us-east-1` with warning)
-- Service overridable via `KIROCREW_EMBEDDING_SERVICE` env var
-- Deny-by-default validation: `_VALID_AUTH_SCHEMES = {"none", "aws_sigv4"}` — unknown values raise `ValueError`
-- External Ollama containers: 5-attempt retry loop (8s max) for health check on startup
 
 ### Navigation
 
@@ -545,8 +533,9 @@ Knowledge Library is a built-in surface (positioned in sidebar after Autopilot, 
 **Suggestion**: Add a message-count trigger (e.g., 10 messages) as an alternative to the idle timer for the history path, similar to how the prefs path uses 30 messages.
 
 ### Gap 7: No Embedding Model Hot-Swap
-**Problem**: Changing the embedding model requires re-embedding all entries. No migration path exists.
-**Suggestion**: Store model version per entry. On model change, re-embed in background via background process. Support gradual migration with fallback to keyword search for un-migrated entries.
+**Problem**: Changing the embedding model requires re-embedding all entries.
+**Status**: Partially addressed. The `EmbeddingBackend` ABC + `register_embedding_backend()` in `embeddings.py` provide the swap seam: a backend with a different `model_id`/`dim` automatically changes the knowledge library's `embed_signature`, triggering its sig-gated re-embed, and the sync embed cache is keyed by `(text, model_id)` so old-model vectors are never served post-swap. Vector memory still requires an explicit `migrate`/re-embed.
+**Remaining suggestion**: Store model version per episodic entry and re-embed vector memory in the background on swap, with keyword fallback for un-migrated entries.
 
 ### Gap 8: Observe-Mode History Not Consolidated Into Long-Term Memory
 **Problem**: Observe-mode channel history has a 1-week TTL and is never consolidated into episodic or semantic memory. Important team decisions discussed in channels are lost after 7 days.

@@ -42,7 +42,7 @@ class TestDefaultContext:
         from kiro_crew import agent, embeddings, sandbox
         from kiro_crew.apps import registry
 
-        assert ctx.embeddings.registry_model() == embeddings._OLLAMA_MODEL
+        assert ctx.embeddings.registry_model() == embeddings._MODEL_ID
         assert ctx.sandbox.strict_dirs() == list(sandbox._STRICT_DIRS)
         assert ctx.sandbox.cc_dirs() == list(sandbox._CC_DIRS)
         assert set(ctx.agent_runtime.managed_mcp_servers()) == set(agent._MANAGED_MCP_SERVERS)

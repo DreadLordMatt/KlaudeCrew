@@ -1,97 +1,112 @@
-"""Ollama embedding client with graceful fallback.
+"""In-process embedding client with graceful fallback.
 
-Calls Ollama's /api/embeddings endpoint. Returns None silently if Ollama
-is not running or the model isn't available — no errors, no degraded UX.
+Wraps the shared ``LlamaCppEmbedder`` from ``kiro_crew.embeddings``. Returns
+None silently if the embedding model is not yet available — no errors, no
+degraded UX. Knowledge and vector memory share one loaded model instance
+(~700MB RSS).
 """
+
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import struct
 import time
-import urllib.error
-import urllib.request
+from typing import TYPE_CHECKING
 
+from kiro_crew import embeddings as _embeddings
 from kiro_crew.executors import run_in_embed_pool
 from kiro_crew.knowledge.chunker import CHUNK_OVERLAP, CHUNK_TOKEN_SIZE
 
+if TYPE_CHECKING:
+    from kiro_crew.embeddings import EmbeddingBackend
+
 logger = logging.getLogger(__name__)
 
-# Qwen3-Embedding-0.6B (1024d) — dedicated embedding model, not the generative LLM.
-# Pulled from the public Ollama registry: `ollama pull qwen3-embedding:0.6b`.
-# Documented fallback for smaller installs: `nomic-embed-text` (768d).
+# Qwen3-Embedding-0.6B (1024d) — dedicated embedding model (not the generative LLM).
+# Served in-process via the vendored llama-cpp-python runtime.
 DEFAULT_MODEL = "qwen3-embedding:0.6b"
-DEFAULT_BASE_URL = "http://localhost:11434"
+# Retained for config compatibility (knowledge.embed_timeout_secs). The
+# in-process backend has no per-request network timeout — the value is stored
+# on the embedder but no longer bounds an HTTP call.
 TIMEOUT = 10  # seconds
 NEGATIVE_CACHE_TTL = 300  # seconds before re-checking failed availability
-# Safety bound (chars) on chunk content folded into an item embedding. This is a
-# backstop for a pathological un-chunked blob (e.g. a separator-less minified file or
-# base64 string that the chunker's whitespace-based splitter cannot break), NOT a limit
-# on normal chunks. The HeadingAwareChunker already bounds every chunk to
-# ~CHUNK_TOKEN_SIZE + CHUNK_OVERLAP tokens; we size this above that maximum (using a
-# deliberately generous 10 chars/token — real text runs ~4-6, dense code/paths/URLs
-# higher) so a normally-chunked passage is always embedded whole. Configured embed
-# models have ample context (snowflake-arctic-embed2 8192 tok, qwen3-embedding ~32K),
-# so this only ever fires for inputs that bypassed normal chunk bounding — and when it
-# does, the truncation is logged rather than silent.
+# Safety bound (chars) on chunk content folded into an item embedding.
 _EMBED_CONTENT_BUDGET = (CHUNK_TOKEN_SIZE + CHUNK_OVERLAP) * 10
 
 
-class OllamaEmbedder:
-    """Embed text via Ollama. Returns None on any failure (graceful degradation)."""
+class InProcessEmbedder:
+    """Embed text via the shared EmbeddingBackend. Returns None on any failure."""
 
     def __init__(
         self,
-        model: str = DEFAULT_MODEL,
-        base_url: str = DEFAULT_BASE_URL,
+        model: str | None = None,
         timeout_secs: float = TIMEOUT,
         content_budget: int = _EMBED_CONTENT_BUDGET,
     ):
-        self.model = model
-        self.base_url = base_url.rstrip("/")
-        # Per-request embed timeout and content-fold budget. Both default to the
-        # module constants (preserving prior behavior) but are overridable via
-        # config so operators can raise the timeout when a large chunk times out
-        # on a cold model load (the embed then never completes and the item is
-        # retried every maintenance pass). See create_embedder_from_config.
+        # Default the model identity from the active backend so a swapped
+        # backend (register_embedding_backend) automatically changes the
+        # embed signature and triggers the sig-gated knowledge re-embed.
+        self._model_override = model
+        # Per-instance content-fold budget (overridable via
+        # knowledge.embed_content_budget, see create_embedder_from_config).
+        # ``timeout_secs`` is kept for config compatibility only — the
+        # in-process runtime has no per-request timeout to apply it to.
         self.timeout_secs = timeout_secs
         self.content_budget = content_budget
-        self._available: bool | None = None  # cached availability check
+        self._available: bool | None = None
         self._last_check: float = 0.0
 
-    def is_available(self) -> bool:
-        """Check if Ollama is reachable. Caches positive result; negative cached with TTL.
-
-        Blocking (urllib probe, 3s timeout on a hung connection) — coroutines on
-        the gateway event loop MUST use :meth:`is_available_async` instead.
-        """
-        if self._available is True:
-            return True
-        if self._available is False and (time.time() - self._last_check) < NEGATIVE_CACHE_TTL:
-            return False
+    @property
+    def model(self) -> str:
+        if self._model_override:
+            return self._model_override
         try:
-            req = urllib.request.Request(f"{self.base_url}/api/tags", method="GET")
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                self._available = resp.status == 200
+            return self._get_embedder().model_id
         except Exception:
-            self._available = False
+            return DEFAULT_MODEL
+
+    def _get_embedder(self) -> "EmbeddingBackend":
+        # Module-attribute lookup (not a from-import of the function) so test
+        # patches of kiro_crew.embeddings.get_shared_embedder stay effective.
+        return _embeddings.get_shared_embedder()
+
+    def is_available(self) -> bool:
+        """True when the in-process embedder can produce vectors right now.
+
+        NEVER blocks: ``embed()`` on a not-yet-loaded backend kicks a
+        background model load and returns ``None`` immediately, so this probe
+        is cheap even on the event loop. Negative results are cached with a
+        TTL so we don't probe every call; positives are re-validated after
+        the TTL too (a broken backend must not report available forever).
+        """
+        if self._available is not None and (time.time() - self._last_check) < NEGATIVE_CACHE_TTL:
+            return self._available
+        embedder = self._get_embedder()
+        if embedder.is_ready():
+            self._available = True
+        else:
+            # Non-blocking probe: kicks a background load if the model file
+            # just landed; returns None (→ unavailable) until the load finishes.
+            vec = embedder.embed("_availability_probe")
+            self._available = vec is not None
         self._last_check = time.time()
         if not self._available:
-            logger.info("Ollama not available at %s — embeddings disabled", self.base_url)
+            logger.info("Embedding model not yet available — knowledge embeddings disabled")
         return bool(self._available)
 
     async def is_available_async(self) -> bool:
-        """Loop-safe :meth:`is_available` — runs the blocking probe off-loop.
+        """Loop-safe :meth:`is_available` — runs the probe off-loop.
 
         Single greppable offload point for the availability probe: dashboard
         handlers and the knowledge watcher call this instead of each carrying
-        its own ``run_in_executor(None, embedder.is_available)`` boilerplate
-        (the copy-paste drift that let inline probes stall the gateway loop).
+        its own ``run_in_executor(None, embedder.is_available)`` boilerplate.
+        The in-process probe never blocks on I/O, but a ready backend's probe
+        embed still burns CPU — keep it on the ``mc-embed`` bulkhead pool.
         """
-        # Fast path: cached-positive needs no thread hop.
-        if self._available is True:
-            return True
+        # Fast path: cached result within TTL needs no thread hop.
+        if self._available is not None and (time.time() - self._last_check) < NEGATIVE_CACHE_TTL:
+            return self._available
         return await run_in_embed_pool(self.is_available)
 
     def embed(self, text: str) -> list[float] | None:
@@ -100,33 +115,18 @@ class OllamaEmbedder:
             return None
         if not self.is_available():
             return None
-        try:
-            payload = json.dumps({"model": self.model, "prompt": text}).encode()
-            req = urllib.request.Request(
-                f"{self.base_url}/api/embeddings",
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=self.timeout_secs) as resp:  # nosemgrep
-                data = json.loads(resp.read())
-            return data.get("embedding")
-        except Exception as e:
-            logger.debug("Ollama embed failed: %s", e)
-            self._available = None  # invalidate so next call re-checks
-            return None
+        vec = self._get_embedder().embed(text)
+        if vec is None:
+            # The backend stopped producing vectors (reset/reload failure) —
+            # invalidate the cached availability so the next call re-probes
+            # instead of reporting available-but-embedding-nothing forever.
+            self._available = None
+        return vec
 
     def embed_for_item(
         self, title: str, summary: str | None, content: str | None = None
     ) -> list[float] | None:
-        """Embed title + summary + chunk content for knowledge items.
-
-        Content is included so vector search matches on body text, not just the
-        title/summary, and is appended after them. A normally-chunked passage is
-        embedded whole; ``_EMBED_CONTENT_BUDGET`` is only a backstop for a pathological
-        un-chunked blob, and truncation is logged (never silent) when it fires so the
-        dropped-tail recall gap is observable rather than hidden.
-        """
+        """Embed title + summary + chunk content for knowledge items."""
         parts = [title]
         if summary:
             parts.append(summary)
@@ -134,13 +134,19 @@ class OllamaEmbedder:
             if len(content) > self.content_budget:
                 logger.warning(
                     "Embedding content truncated %d -> %d chars for item %r; chunk "
-                    "exceeds the safety bound (likely un-chunked/separator-less input). "
-                    "Tail is excluded from the vector.",
-                    len(content), self.content_budget, title,
+                    "exceeds the safety bound.",
+                    len(content),
+                    self.content_budget,
+                    title,
                 )
-                content = content[:self.content_budget]
+                content = content[: self.content_budget]
             parts.append(content)
         return self.embed(" ".join(parts))
+
+
+# Keep the old name as an alias so references to OllamaEmbedder in type
+# annotations and isinstance checks continue to work during the transition.
+OllamaEmbedder = InProcessEmbedder
 
 
 def floats_to_bytes(vec: list[float]) -> bytes:
@@ -155,23 +161,17 @@ def bytes_to_floats(data: bytes) -> list[float]:
 
 
 def embed_signature(model: str, content_budget: int = _EMBED_CONTENT_BUDGET) -> str:
-    """Signature over the embedding inputs a re-embed can actually change.
+    """Signature over the embedding configuration for staleness detection.
 
-    Captures the model name and the content budget — change either and a stored
-    vector becomes stale, and re-embedding the same item content fixes it. Items
-    whose stored ``embedding_sig`` differs from the current one are re-embedded by
-    the sig-gated rebuild (manual trigger and watcher self-heal both use it).
-
-    ponytail: does NOT cover edits to ``embed_for_item``'s assembly logic (field
-    set / join separator) — a value hash can't see code. Ceiling: such a change
-    needs a manual ``force`` rebuild. Upgrade path: add an ast-normalized source
-    hash here if that logic starts churning.
+    A change in signature means stored vectors may be from a different vector
+    space and need re-embedding (sig-gated rebuild). Folds in the model id and
+    the content budget — the two inputs a re-embed can actually change.
     """
-    raw = f"{model}|{content_budget}"
+    raw = f"{model}|inprocess|{content_budget}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-def embedder_signature(embedder: OllamaEmbedder) -> str:
+def embedder_signature(embedder: InProcessEmbedder) -> str:
     """Current sig for an embedder. Single source of truth for callsites so the
     set of inputs (model + budget) can't drift between them."""
     return embed_signature(embedder.model, embedder.content_budget)
@@ -183,36 +183,38 @@ def _positive_or(value: object, default: float) -> float:
     Guards a config-sourced timeout/budget: a missing key (None), an explicit
     ``0`` sentinel, a negative value, or a non-numeric all fall back to the
     built-in default rather than passing a nonsensical value to the embedder
-    (a negative timeout makes every embed raise/return None; a negative budget
-    mangles slicing and log output). ``bool`` is excluded so ``True``/``False``
-    can't masquerade as ``1``/``0``.
+    (a negative budget mangles slicing and log output). ``bool`` is excluded
+    so ``True``/``False`` can't masquerade as ``1``/``0``.
     """
     if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
         return value
     return default
 
 
-def create_embedder_from_config(config: dict) -> OllamaEmbedder | None:
-    """Create embedder from shared memory embedding config. Returns None if disabled.
+def create_embedder_from_config(config: dict) -> InProcessEmbedder:
+    """Create the knowledge embedder (embeddings are always-on).
 
-    Uses the same config as Vector Memory (memory.embedding_provider/model/url)
-    so knowledge and memory share one embedding setup.
+    Reads the raw ``config.json`` dict so it works in the MCP server process
+    without a full config load. Every legacy ``embedding_provider`` value
+    ("ollama", "none") is treated as enabled — matching the loader's
+    ``_coerce_embedding_provider`` so knowledge and vector memory never
+    split-brain on the same config file.
     """
-    memory_cfg = config.get("memory", {})
-    if memory_cfg.get("embedding_provider") != "ollama":
-        return None
-    model = memory_cfg.get("embedding_model", DEFAULT_MODEL)
-    base_url = memory_cfg.get("embedding_url", DEFAULT_BASE_URL)
-    # Knowledge-Library-specific embed tuning. Fall back to the module defaults
-    # unless the config supplies a *positive* number: a missing key, an explicit
-    # 0 sentinel, a negative value, or a non-numeric all resolve to the built-in
-    # default rather than passing a nonsensical timeout/budget to the embedder.
+    # The model identity is derived live from the active backend, so a
+    # register_embedding_backend swap changes the embed signature and triggers
+    # the sig-gated knowledge re-embed. A legacy Ollama-era ``embedding_model``
+    # config key is deliberately IGNORED here: honoring it would pin the sig to
+    # a name the in-process runtime doesn't serve (e.g. "nomic-embed-text"),
+    # mislabeling vectors actually produced by the bundled model AND defeating
+    # swap-triggered re-embeds.
+    #
+    # Knowledge-Library-specific embed tuning survives the in-process move:
+    # fall back to the module defaults unless the config supplies a *positive*
+    # number (missing key, 0 sentinel, negative, or non-numeric all resolve to
+    # the built-in default).
     knowledge_cfg = config.get("knowledge", {}) or {}
     timeout_secs = _positive_or(knowledge_cfg.get("embed_timeout_secs"), TIMEOUT)
-    content_budget = int(_positive_or(knowledge_cfg.get("embed_content_budget"), _EMBED_CONTENT_BUDGET))
-    return OllamaEmbedder(
-        model=model,
-        base_url=base_url,
-        timeout_secs=timeout_secs,
-        content_budget=content_budget,
+    content_budget = int(
+        _positive_or(knowledge_cfg.get("embed_content_budget"), _EMBED_CONTENT_BUDGET)
     )
+    return InProcessEmbedder(timeout_secs=timeout_secs, content_budget=content_budget)

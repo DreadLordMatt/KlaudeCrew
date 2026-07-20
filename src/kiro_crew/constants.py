@@ -33,5 +33,3 @@ DATA_WARNING = (
 # ``acp/client.py``); this cap is the upper safety ceiling for genuinely runaway
 # work, not a "this turn took too long" guard.
 CHAT_TURN_TIMEOUT = 7200.0
-
-OLLAMA_DOCKER_CONTAINER = "kirocrew-ollama"

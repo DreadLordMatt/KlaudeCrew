@@ -1,56 +1,121 @@
 """Tests for knowledge search upgrade: embedding endpoints + search-for-context."""
 import pytest
 
-from kiro_crew.knowledge.embedder import OllamaEmbedder, create_embedder_from_config
+from kiro_crew.knowledge.embedder import (
+    InProcessEmbedder,
+    OllamaEmbedder,
+    create_embedder_from_config,
+)
 
 
 class TestCreateEmbedderFromConfig:
     """create_embedder_from_config uses shared memory config."""
 
-    def test_returns_none_when_provider_not_ollama(self):
+    def test_always_returns_embedder_even_with_legacy_none(self):
+        """Embeddings are always-on: even a legacy 'none' config gets an embedder."""
         cfg = {"memory": {"embedding_provider": "none"}}
-        assert create_embedder_from_config(cfg) is None
+        assert isinstance(create_embedder_from_config(cfg), InProcessEmbedder)
 
-    def test_returns_none_when_memory_section_missing(self):
-        assert create_embedder_from_config({}) is None
+    def test_returns_embedder_when_memory_section_missing(self):
+        """Embeddings are default-on: no memory section → llama_cpp embedder."""
+        emb = create_embedder_from_config({})
+        assert isinstance(emb, InProcessEmbedder)
 
-    def test_returns_embedder_when_ollama_enabled(self):
-        cfg = {"memory": {"embedding_provider": "ollama"}}
+    def test_returns_embedder_when_llama_cpp_enabled(self):
+        cfg = {"memory": {"embedding_provider": "llama_cpp"}}
         emb = create_embedder_from_config(cfg)
-        assert isinstance(emb, OllamaEmbedder)
+        assert isinstance(emb, InProcessEmbedder)
         assert emb.model == "qwen3-embedding:0.6b"
 
-    def test_uses_custom_model_and_url(self):
+    def test_legacy_ollama_provider_coerces_to_embedder(self):
+        """'ollama' in an old config transparently upgrades to in-process."""
+        cfg = {"memory": {"embedding_provider": "ollama"}}
+        emb = create_embedder_from_config(cfg)
+        assert isinstance(emb, InProcessEmbedder)
+
+    def test_ollama_embedder_alias_kept(self):
+        """OllamaEmbedder remains an alias of InProcessEmbedder for transition."""
+        assert OllamaEmbedder is InProcessEmbedder
+
+    def test_legacy_embedding_model_key_is_ignored(self):
+        """The Ollama-era embedding_model key must NOT pin the identity —
+        honoring it would mislabel vectors produced by the bundled model and
+        defeat swap-triggered re-embeds (model id derives from the backend)."""
         cfg = {"memory": {
-            "embedding_provider": "ollama",
+            "embedding_provider": "llama_cpp",
             "embedding_model": "custom:latest",
-            "embedding_url": "http://remote:11434",
         }}
         emb = create_embedder_from_config(cfg)
-        assert emb.model == "custom:latest"
-        assert emb.base_url == "http://remote:11434"
+        assert emb is not None
+        assert emb.model != "custom:latest"
 
     def test_ignores_old_knowledge_embeddings_config(self):
-        """Old knowledge.embeddings.enabled path should NOT activate embedder."""
-        cfg = {"knowledge": {"embeddings": {"enabled": True}}}
-        assert create_embedder_from_config(cfg) is None
+        """Old knowledge.embeddings config is ignored; memory config (default-on)
+        decides — an embedder is created regardless of the knowledge section."""
+        cfg = {"knowledge": {"embeddings": {"enabled": False}}}
+        assert isinstance(create_embedder_from_config(cfg), InProcessEmbedder)
 
 
-class TestOllamaEmbedder:
-    """OllamaEmbedder graceful degradation."""
+class TestInProcessEmbedder:
+    """InProcessEmbedder graceful degradation."""
 
     def test_embed_returns_none_for_empty_text(self):
-        emb = OllamaEmbedder()
+        emb = InProcessEmbedder()
         assert emb.embed("") is None
         assert emb.embed("   ") is None
 
     def test_embed_returns_none_when_unavailable(self, monkeypatch):
-        emb = OllamaEmbedder()
+        emb = InProcessEmbedder()
         monkeypatch.setattr(emb, "is_available", lambda: False)
         assert emb.embed("hello world") is None
 
+    def test_embed_delegates_to_shared_embedder(self, monkeypatch):
+        """embed() routes through the process-wide LlamaCppEmbedder singleton."""
+
+        class _FakeShared:
+            def __init__(self):
+                self.texts = []
+
+            def is_ready(self):
+                return True
+
+            def embed(self, text):
+                self.texts.append(text)
+                return [0.1, 0.2]
+
+        fake = _FakeShared()
+        monkeypatch.setattr(
+            "kiro_crew.embeddings.get_shared_embedder", lambda: fake
+        )
+        emb = InProcessEmbedder()
+        assert emb.embed("hello world") == [0.1, 0.2]
+        assert fake.texts == ["hello world"]
+
+    def test_is_available_negative_cached_when_not_ready(self, monkeypatch):
+        """Model not loaded and probe fails → unavailable, negatively cached."""
+
+        class _FakeShared:
+            def __init__(self):
+                self.embed_calls = 0
+
+            def is_ready(self):
+                return False
+
+            def embed(self, text):
+                self.embed_calls += 1
+                return None  # model still downloading
+
+        fake = _FakeShared()
+        monkeypatch.setattr(
+            "kiro_crew.embeddings.get_shared_embedder", lambda: fake
+        )
+        emb = InProcessEmbedder()
+        assert emb.is_available() is False
+        assert emb.is_available() is False  # served from negative cache
+        assert fake.embed_calls == 1
+
     def test_embed_for_item_combines_title_and_summary(self, monkeypatch):
-        emb = OllamaEmbedder()
+        emb = InProcessEmbedder()
         monkeypatch.setattr(emb, "is_available", lambda: False)
         result = emb.embed_for_item("My Title", "A summary of the content")
         assert result is None
@@ -61,7 +126,7 @@ class TestOllamaEmbedder:
         Captures the exact string handed to embed() and asserts the chunk
         content is present — RED before the content param was threaded through.
         """
-        emb = OllamaEmbedder()
+        emb = InProcessEmbedder()
         captured = {}
         monkeypatch.setattr(emb, "embed", lambda text: captured.setdefault("text", text))
         emb.embed_for_item(
@@ -83,7 +148,7 @@ class TestOllamaEmbedder:
         """
         from kiro_crew.knowledge.chunker import CHUNK_OVERLAP, CHUNK_TOKEN_SIZE
 
-        emb = OllamaEmbedder()
+        emb = InProcessEmbedder()
         captured = {}
         monkeypatch.setattr(emb, "embed", lambda text: captured.setdefault("text", text))
         # ~6 chars/token over the full chunk budget — at the high end of observed
@@ -98,7 +163,7 @@ class TestOllamaEmbedder:
         """A blob far past the safety bound is truncated AND logged (never silent)."""
         from kiro_crew.knowledge.embedder import _EMBED_CONTENT_BUDGET
 
-        emb = OllamaEmbedder()
+        emb = InProcessEmbedder()
         captured = {}
         monkeypatch.setattr(emb, "embed", lambda text: captured.setdefault("text", text))
         big = "x" * (_EMBED_CONTENT_BUDGET * 3)
@@ -134,7 +199,7 @@ class TestOllamaEmbedder:
 
     def test_embed_for_item_content_optional(self, monkeypatch):
         """Back-compat: omitting content still embeds title + summary only."""
-        emb = OllamaEmbedder()
+        emb = InProcessEmbedder()
         captured = {}
         monkeypatch.setattr(emb, "embed", lambda text: captured.setdefault("text", text))
         emb.embed_for_item("My Title", "A summary")

@@ -350,7 +350,7 @@ class VectorMemoryStore:
         self.embed_fn: Callable[[str], list[float] | None] | None = None
         # Optional factory that builds an embed_fn on demand. When set, _try_embed()
         # will lazily rebind self.embed_fn if it is None — handles the case where
-        # Ollama was unavailable at gateway boot but came up later, without
+        # the embedding model was unavailable at gateway boot but landed later, without
         # requiring a gateway restart. See Mesh-XXXX (embed_fn lazy rebind fix).
         self.embed_fn_factory: Callable[[], Callable[[str], list[float] | None] | None] | None = None
         self._embed_fn_rebind_cooldown_secs: float = 30.0
@@ -360,7 +360,6 @@ class VectorMemoryStore:
         # write load. Without it, two writers can both observe embed_fn is None and
         # cooldown elapsed at the same instant, then both call the factory + probe.
         self._embed_fn_rebind_lock = threading.Lock()
-        self._ollama_manager: object | None = None
 
     def init(self) -> None:
         """Create DB, apply migrations, set permissions."""
@@ -1588,12 +1587,12 @@ class VectorMemoryStore:
 
         If embed_fn is None but embed_fn_factory is set, attempt to lazily
         rebind embed_fn (rate-limited via cooldown). This recovers from the
-        case where Ollama was unavailable at gateway boot — without it, the
+        case where the embedding model was unavailable at gateway boot — without it, the
         gateway would silently write all subsequent memories without embeddings
         until the next restart.
 
         Concurrency: this is a SYNCHRONOUS method. The factory call and probe
-        perform a blocking HTTP request to Ollama (up to the HTTP client timeout),
+        perform blocking model inference (or a model load on first call),
         so this method MUST be invoked from a sync context (worker thread, sync
         handler, etc.). Callers reaching this from an async event loop should
         wrap the call in `asyncio.to_thread()` to avoid stalling the loop. Async

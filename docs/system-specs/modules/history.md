@@ -105,11 +105,13 @@ is available.
 
 **Loop safety:** the task body runs on the event loop thread, so any blocking
 work inside it must be offloaded. `_write_structured_memory` and `_save_lessons`
-both embed items via blocking `urllib` calls to Ollama (`write_lesson` performs a
-rule embed plus up to `_MAX_BACKFILLS_PER_CALL` lazy backfill embeds per lesson),
-so they are invoked through `asyncio.to_thread()` — running them inline would
-freeze the gateway loop (heartbeats, Slack, dashboard) whenever the embedding
-endpoint is slow or hung, and can trip the faulthandler hard-kill. The same
+both embed items via blocking in-process llama.cpp inference calls
+(`write_lesson` performs a rule embed plus up to `_MAX_BACKFILLS_PER_CALL` lazy
+backfill embeds per lesson), so they are invoked through `asyncio.to_thread()` —
+running them inline would freeze the gateway loop (heartbeats, Slack, dashboard)
+for the duration of each embed, and can trip the faulthandler hard-kill. (The
+model load itself never blocks the embed call — it runs on a background daemon
+thread; embed returns `None` until the model is resident.) The same
 applies to `TaskRunner._extract_lesson`, which calls `write_lesson` after a task
 failure. Dashboard memory handlers that write semantic entries or embed a query
 (`set_semantic`, `_try_embed`) offload the same way. Because these writes now run

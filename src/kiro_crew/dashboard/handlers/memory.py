@@ -14,7 +14,16 @@ from typing import Any
 
 from aiohttp import web
 
+from kiro_crew.config.loader import KiroCrewConfig, config_path
+from kiro_crew.dashboard.handlers.agents import _get_config_lock
 from kiro_crew.dashboard.state import DashboardState
+from kiro_crew.embeddings import (
+    DOWNLOAD_ATTEMPTS_INTERACTIVE,
+    get_shared_embedder,
+    make_sync_embed_fn,
+    model_download_manager,
+    model_file_present,
+)
 from kiro_crew.executors import run_in_embed_pool
 from kiro_crew.sandbox import cgroup_scope_argv, resource_limit_preexec, wrap_argv
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
@@ -81,8 +90,6 @@ async def api_memory_history(request: web.Request) -> web.Response:
 
 async def api_memory_settings(request: web.Request) -> web.Response:
     """GET/PUT /api/memory/settings — memory consolidation config."""
-    from kiro_crew.config.loader import KiroCrewConfig, config_path  # noqa: F811
-
     cfg = KiroCrewConfig.load()
     if request.method == "PUT":
         try:
@@ -90,8 +97,6 @@ async def api_memory_settings(request: web.Request) -> web.Response:
         except Exception:
             return web.json_response({"error": "invalid JSON"}, status=400)
         # Read existing config, update memory section only
-        from kiro_crew.dashboard.handlers.agents import _get_config_lock  # noqa: F811
-
         async with _get_config_lock():
             path = config_path()
             try:
@@ -192,8 +197,8 @@ async def api_memory_semantic_write(request: web.Request) -> web.Response:
     source = body.get("source", "user_explicit")
     if not key or value is None:
         return web.json_response({"error": "key and value required"}, status=400)
-    # set_semantic may embed via a blocking urllib call to Ollama; offload so a
-    # slow/hung endpoint can't stall the dashboard event loop.
+    # set_semantic may embed via blocking in-process model inference (and a
+    # ~1s model load on first call); offload so it can't stall the event loop.
     err = await asyncio.to_thread(store.set_semantic, key, value, confidence, source)
     if err is not None:
         code, message = err
@@ -249,9 +254,6 @@ _migrate_lock: asyncio.Lock | None = None
 
 async def _set_migrated(value: bool) -> None:
     """Set memory.migrated in config.json."""
-    from kiro_crew.config.loader import config_path  # noqa: F811
-    from kiro_crew.dashboard.handlers.agents import _get_config_lock  # noqa: F811
-
     async with _get_config_lock():
         path = config_path()
         try:
@@ -263,36 +265,49 @@ async def _set_migrated(value: bool) -> None:
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+# ModelDownloadManager.status steps → the setup_step vocabulary the shipped
+# frontend polling loop terminates on ("done" / "error" / "idle"). New-style
+# steps are additionally exposed raw as download_step for newer frontends.
+_SETUP_STEP_LEGACY = {
+    "ready": "done",
+    "failed": "error",
+    "idle": "idle",
+    "downloading": "downloading",
+    "verifying": "downloading",
+    "waiting_retry": "downloading",
+}
+
+
 async def api_memory_embedding_status(request: web.Request) -> web.Response:
     """GET /api/memory/embedding-status — embedding system status + setup progress."""
-    from kiro_crew.config.loader import KiroCrewConfig  # noqa: F811
-    from kiro_crew.embeddings import EmbeddingClient, OllamaManager  # noqa: F811
-
-    cfg = KiroCrewConfig.load()
-    mgr = OllamaManager(cfg.memory.embedding_url, model=cfg.memory.embedding_model)
-    enabled = cfg.memory.embedding_provider == "ollama"
-    healthy = False
-    model_available = False
-    needs_docker = mgr._use_docker
-    docker_available = bool(mgr._docker_bin()) if needs_docker else True
-    if enabled and docker_available:
-        _allow_remote = cfg.memory.allow_remote_embedding
-        client = EmbeddingClient(cfg.memory.embedding_url, allow_remote=_allow_remote, model=cfg.memory.embedding_model)
-        healthy = await client.health()
-        model_available = await mgr.model_available()
+    embedder = get_shared_embedder()
+    mgr = model_download_manager()
+    step = str(mgr.status["step"])
+    model_present = model_file_present()
     return web.json_response(
         {
-            "enabled": enabled,
-            "provider": cfg.memory.embedding_provider,
-            "ollama_installed": mgr.ollama_binary is not None,
-            "model_available": model_available,
-            "server_healthy": healthy,
-            "needs_docker": needs_docker,
-            "docker_available": docker_available,
-            "setup_step": _embedding_setup_status["step"],
-            "setup_error": _embedding_setup_status["error"],
-            "can_retry": _embedding_setup_status["step"] == "idle"
-            and bool(_embedding_setup_status["error"]),
+            # Embeddings are always-on since the in-process runtime landed.
+            "enabled": True,
+            # Legacy value kept: the shipped frontend hard-checks
+            # provider === "ollama" to render the healthy state; report the
+            # legacy token until the frontend ships its companion change.
+            "provider": "ollama",
+            # Legacy field names kept for frontend compatibility.
+            "ollama_installed": True,  # n/a — runtime is vendored/always present
+            "model_available": model_present,
+            # "healthy" = embeddings usable now or ready to lazily activate:
+            # the model file being present is what matters — the in-memory
+            # load happens automatically on first embed.
+            "server_healthy": model_present or embedder.is_ready(),
+            "needs_docker": False,
+            "docker_available": True,
+            "setup_step": _SETUP_STEP_LEGACY.get(step, step),
+            "download_step": step,
+            "download_attempt": mgr.status["attempt"],
+            "bytes_downloaded": mgr.status.get("bytes_downloaded", 0),
+            "bytes_total": mgr.status.get("bytes_total", 0),
+            "setup_error": mgr.status["error"],
+            "can_retry": step == "failed" and bool(mgr.status["error"]),
         }
     )
 
@@ -345,84 +360,67 @@ async def _ensure_pip_available() -> tuple[bool, str]:
 
 
 async def api_memory_enable_embeddings(request: web.Request) -> web.Response:
-    """POST /api/memory/enable-embeddings — install Ollama if needed, start, pull model, update config."""
+    """POST /api/memory/enable-embeddings — trigger/retry model download and wire embeddings."""
     global _embedding_setup_status
-    from kiro_crew.config.loader import KiroCrewConfig, config_path  # noqa: F811
-    from kiro_crew.embeddings import OllamaManager  # noqa: F811
-
-    cfg = KiroCrewConfig.load()
 
     # Allow retry — reset any previous error state
     if _embedding_setup_status["step"] == "error":
         _embedding_setup_status = {"step": "idle", "error": ""}
 
     # Prevent concurrent setup attempts
-    if _embedding_setup_status["step"] not in ("idle", "done"):
+    if _embedding_setup_status["step"] not in ("idle", "done", "failed"):
         return web.json_response(
             {"error": f"Setup already in progress: {_embedding_setup_status['step']}"},
             status=409,
         )
 
-    mgr = OllamaManager(cfg.memory.embedding_url, model=cfg.memory.embedding_model)
-    _embedding_setup_status = {"step": "checking", "error": ""}
+    _embedding_setup_status = {"step": "downloading", "error": ""}
+    mgr = model_download_manager()
 
     try:
-        if mgr._use_docker:
-            docker = mgr._docker_bin()
-            if not docker:
-                _embedding_setup_status = {"step": "installing_docker", "error": ""}
-                ok = await mgr._install_docker_ollama()
-                if not ok:
-                    _embedding_setup_status = {
-                        "step": "idle",
-                        "error": "Docker + Ollama install failed — click Enable to retry",
-                    }
-                    return web.json_response(
-                        {
-                            "error": "Docker install failed. Click Enable to retry, or run: sudo yum install docker && sudo systemctl start docker && sudo usermod -aG docker $USER"
-                        },
-                        status=400,
-                    )
-        elif not mgr.ollama_binary:
-            _embedding_setup_status = {"step": "installing_ollama", "error": ""}
-            ok = await mgr.install_ollama()
-            if not ok or not mgr.ollama_binary:
-                import platform as _plat  # noqa: F811
-
-                system = _plat.system()
-                if system == "Darwin":
-                    hint = "Run: brew install ollama (or kirocrew doctor to auto-fix)"
-                else:
-                    hint = "Run: curl -fsSL https://ollama.com/install.sh | sh"
-                _embedding_setup_status = {
-                    "step": "idle",
-                    "error": f"Ollama install failed — {hint}",
-                }
+        # If the model isn't present, kick/adopt the background download and
+        # return immediately — the frontend polls embedding-status for
+        # progress. Never await ensure_model here: the manager's asyncio lock
+        # may be held by the startup background task mid-backoff, which would
+        # pin this HTTP request open for up to hours.
+        if not model_file_present():
+            if mgr.status["step"] in ("downloading", "verifying", "waiting_retry"):
+                # Background download already in flight — surface its progress.
                 return web.json_response(
-                    {"error": f"Ollama install failed. {hint}"},
-                    status=400,
+                    {"ok": True, "status": "downloading", "setup_step": mgr.status["step"]}
                 )
+            state: DashboardState = request.app["state"]
+            task = asyncio.create_task(mgr.ensure_model(attempts=DOWNLOAD_ATTEMPTS_INTERACTIVE))
+            retained = state.__dict__.setdefault("_bg_embed_tasks", set())
+            retained.add(task)
 
-        _embedding_setup_status = {"step": "starting", "error": ""}
-        if not await mgr.start_server():
-            _embedding_setup_status = {
-                "step": "idle",
-                "error": "Server failed to start — click Enable to retry",
-            }
-            return web.json_response(
-                {"error": "Ollama server failed to start. Click Enable to retry."}, status=500
-            )
+            def _on_download_done(t: "asyncio.Task[bool]") -> None:
+                global _embedding_setup_status
+                if t.cancelled():
+                    _embedding_setup_status = {
+                        "step": "failed",
+                        "error": "cancelled",
+                    }
+                elif t.exception():
+                    _embedding_setup_status = {
+                        "step": "failed",
+                        "error": str(t.exception()),
+                    }
+                elif not t.result():
+                    # ensure_model() returning False = download failed after all
+                    # retries without raising — surface it so the frontend shows
+                    # the error + Retry button instead of a silent idle state.
+                    _embedding_setup_status = {
+                        "step": "failed",
+                        "error": str(mgr.status.get("error", "download failed")),
+                    }
+                else:
+                    _embedding_setup_status = {"step": "idle", "error": ""}
 
-        _embedding_setup_status = {"step": "downloading", "error": ""}
-        if not await mgr.pull_model():
-            _embedding_setup_status = {
-                "step": "idle",
-                "error": "Model download failed — click Enable to retry",
-            }
-            return web.json_response(
-                {"error": "Model load failed. Click Enable to retry."}, status=500
-            )
-
+            task.add_done_callback(_on_download_done)
+            task.add_done_callback(retained.discard)
+            _embedding_setup_status = {"step": "downloading", "error": ""}
+            return web.json_response({"ok": True, "status": "downloading"})
     except Exception:
         logger.exception("Embedding setup failed")
         _embedding_setup_status = {
@@ -434,15 +432,11 @@ async def api_memory_enable_embeddings(request: web.Request) -> web.Response:
         )
 
     # Ensure faiss-cpu is installed (required for FAISS vector index).
-    # Security note: uses wrap_argv(mode="standard") for OS-level sandbox,
-    # matching the existing pip install pattern in apps/backend.py.
     async with _faiss_install_lock:
         try:
             import faiss  # noqa: F401
         except ImportError:
             _embedding_setup_status = {"step": "installing_faiss", "error": ""}
-            # Some packaged/minimal Python runtimes ship without pip — bootstrap
-            # it first, else the install below fails with "No module named pip".
             pip_ok, pip_err = await _ensure_pip_available()
             if not pip_ok:
                 _embedding_setup_status = {
@@ -500,54 +494,40 @@ async def api_memory_enable_embeddings(request: web.Request) -> web.Response:
                     except OSError:
                         pass
 
-    path = config_path()
-    from kiro_crew.dashboard.handlers.agents import _get_config_lock  # noqa: F811
+    # Wire embed_fn now that the model file is confirmed present.
+    store = _get_vector_store(request.app["state"])
+    store.embed_fn = make_sync_embed_fn()
 
+    # Build FAISS index for any existing episodic memories with embeddings.
+    # Blocking disk read (can be large) — offload off the event loop.
+    try:
+        await asyncio.to_thread(store.load_faiss_index)
+    except Exception:
+        logger.exception("Failed to load FAISS index")
+        _embedding_setup_status = {
+            "step": "idle",
+            "error": "FAISS index load failed — click Enable to retry",
+        }
+        return web.json_response(
+            {"error": "FAISS index load failed. Click Enable to retry."},
+            status=500,
+        )
+
+    # Persist config
+    path = config_path()
     async with _get_config_lock():
         try:
             data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         except Exception:
             data = {}
-        embed_url = data.get("memory", {}).get("embedding_url", "http://localhost:11434")
-        from kiro_crew.config.loader import KiroCrewConfig  # noqa: F811
-        from kiro_crew.embeddings import _validate_url, make_sync_embed_fn  # noqa: F811
-
-        cfg = KiroCrewConfig.load()
-        try:
-            _validate_url(embed_url, allow_remote=cfg.memory.allow_remote_embedding)
-        except ValueError as exc:
-            _embedding_setup_status = {"step": "idle", "error": str(exc)}
-            return web.json_response({"error": str(exc)}, status=400)
-        embed_fn = make_sync_embed_fn(embed_url, model=cfg.memory.embedding_model)
-
-        store = _get_vector_store(request.app["state"])
-        store.embed_fn = embed_fn
-
-        # Build FAISS index for any existing episodic memories with embeddings
-        try:
-            store.load_faiss_index()
-        except Exception:
-            logger.exception("Failed to load FAISS index")
-            _embedding_setup_status = {
-                "step": "idle",
-                "error": "FAISS index load failed — click Enable to retry",
-            }
-            return web.json_response(
-                {"error": "FAISS index load failed. Click Enable to retry."},
-                status=500,
-            )
-
-        # Persist config only after store is successfully wired up
-        data.setdefault("memory", {})["embedding_provider"] = "ollama"
-        data["memory"].setdefault("embedding_url", "http://localhost:11434")
+        data.setdefault("memory", {})["embedding_provider"] = "llama_cpp"
         data["memory"]["embedding_dim"] = 1024
         data["memory"]["migrated"] = True
-        data["memory"]["embedding_runtime"] = "docker" if mgr._use_docker else "native"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
     # Apply migrated to running consolidator
-    state: DashboardState = request.app["state"]
+    state = request.app["state"]
     if state.consolidator:
         state.consolidator._migrated = True
     _embedding_setup_status = {"step": "done", "error": ""}
@@ -555,22 +535,20 @@ async def api_memory_enable_embeddings(request: web.Request) -> web.Response:
 
 
 async def api_memory_disable_embeddings(request: web.Request) -> web.Response:
-    """POST /api/memory/disable-embeddings — update config to disable embeddings."""
-    from kiro_crew.config.loader import config_path  # noqa: F811
-    from kiro_crew.dashboard.handlers.agents import _get_config_lock  # noqa: F811
+    """POST /api/memory/disable-embeddings — gone: embeddings are always-on.
 
-    path = config_path()
-    async with _get_config_lock():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except Exception:
-            data = {}
-        data.setdefault("memory", {})["embedding_provider"] = "none"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    store = _get_vector_store(request.app["state"])
-    store.embed_fn = None
-    return web.json_response({"ok": True})
+    Kept as a graceful 410 (not a 404) because the shipped frontend still
+    renders a Disable button until its companion change lands. Remove
+    together with the frontend button.
+    """
+    return web.json_response(
+        {
+            "error": "Embeddings are always-on and can no longer be disabled. "
+            "Memory falls back to keyword search automatically whenever the "
+            "model is unavailable."
+        },
+        status=410,
+    )
 
 
 async def api_memory_episodic_search(request: web.Request) -> web.Response:
@@ -582,8 +560,8 @@ async def api_memory_episodic_search(request: web.Request) -> web.Response:
     except (ValueError, TypeError):
         limit = 20
     tag_filter = [t.strip() for t in request.query.get("tags", "").split(",") if t.strip()] or None
-    # _try_embed issues a blocking urllib call to Ollama; offload to keep the
-    # dashboard event loop responsive if the embedding endpoint is slow.
+    # _try_embed runs blocking in-process model inference (and a ~1s model
+    # load on first call); offload to keep the dashboard event loop responsive.
     emb = (
         await asyncio.to_thread(store._try_embed, query)
         if store.embed_fn and query
@@ -659,20 +637,14 @@ async def api_memory_stats(request: web.Request) -> web.Response:
 async def api_memory_migrate(request: web.Request) -> web.Response:
     """POST /api/memory/migrate — migrate legacy markdown memory to vector store."""
     store = _get_vector_store(request.app["state"])
-    # Wire up embedding function so migration generates FAISS vectors
-    from kiro_crew.config.loader import KiroCrewConfig  # noqa: F811
-
-    cfg = KiroCrewConfig.load()
 
     global _migrate_lock
     if _migrate_lock is None:
         _migrate_lock = asyncio.Lock()
     async with _migrate_lock:
         prev_embed_fn = store.embed_fn
-        if cfg.memory.embedding_provider == "ollama":
-            from kiro_crew.embeddings import make_sync_embed_fn  # noqa: F811
-
-            store.embed_fn = make_sync_embed_fn(cfg.memory.embedding_url, timeout=15.0, model=cfg.memory.embedding_model)
+        # Embeddings are always-on — wire the embed_fn for migration vectors.
+        store.embed_fn = make_sync_embed_fn()
 
         # Run in executor to avoid blocking event loop (can take 30+ seconds)
         loop = asyncio.get_running_loop()
@@ -703,9 +675,9 @@ async def api_memory_import(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
-    # import_memory embeds each imported entry via blocking urllib to Ollama
-    # (unbounded — one per entry); offload so a large import can't stall the
-    # gateway event loop.
+    # import_memory embeds each imported entry via blocking in-process model
+    # inference (unbounded — one per entry); offload so a large import can't
+    # stall the gateway event loop.
     counts = await run_in_embed_pool(store.import_memory, data)
     return web.json_response(counts)
 
@@ -721,8 +693,8 @@ async def api_memory_context_preview(request: web.Request) -> web.Response:
         q_lower = query.lower()
         filtered = [ln for ln in lines if q_lower in ln.lower() or ln.startswith("[")]
         semantic_ctx = "\n".join(filtered) if any(not ln.startswith("[") for ln in filtered) else ""
-    # get_episodic_context embeds the query via blocking urllib to Ollama;
-    # offload to keep the dashboard event loop responsive.
+    # get_episodic_context embeds the query via blocking in-process model
+    # inference; offload to keep the dashboard event loop responsive.
     episodic_ctx = (
         await run_in_embed_pool(store.get_episodic_context, query_text=query) if query else ""
     )

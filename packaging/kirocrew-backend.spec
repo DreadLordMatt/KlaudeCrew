@@ -80,6 +80,7 @@ for rel in [
     "static",          # css/js + the staged dashboard dist
     "skills",          # bundled SKILL.md (if present under the pkg)
     "builtin_skills",  # packaged builtin skills (e.g. image-authoring)
+    "_vendor",         # vendored llama-cpp-python + per-platform native libs
 ]:
     _add_tree(rel, rel)
 

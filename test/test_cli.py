@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from kiro_crew.cli_commands import _cron
-from kiro_crew.cli_doctor import _doctor, _doctor_ollama_install
+from kiro_crew.cli_doctor import _doctor
 from kiro_crew.cli_server import _update
 
 
@@ -2858,67 +2858,25 @@ class TestSeedDispatch:
         mock_seed.assert_called_once()
 
 
-class TestDoctorOllamaDocker:
-    """Tests for doctor detecting Ollama via Docker container."""
+class TestDoctorEmbeddings:
+    """Tests for the doctor Vector Memory (in-process embeddings) section."""
 
     @pytest.fixture(autouse=True)
     def _hermetic_config(self, monkeypatch):
         """Pin config to a pristine default (see ``_pin_default_config``)."""
         _pin_default_config(monkeypatch)
 
-    def test_doctor_detects_ollama_docker(self, tmp_path, capsys):
-        """When native ollama is missing but Docker container exists, report as installed."""
+    @staticmethod
+    def _run_doctor(tmp_path, monkeypatch, *, runtime_ok: bool, model_present: bool):
+        """Run _doctor with the embeddings runtime/model state stubbed."""
         agent_file = tmp_path / "kirocrew.json"
         _healthy_agent_file(agent_file)
+        import kiro_crew.cli_doctor as doc
 
-        def which_side_effect(binary):
-            if binary == "ollama":
-                return None
-            return f"/usr/local/bin/{binary}"
-
-        docker_result = MagicMock(returncode=0, stdout="running", stderr="")
+        monkeypatch.setattr(doc, "_load_llama_class", lambda: object if runtime_ok else None)
+        monkeypatch.setattr(doc, "model_file_present", lambda path=None: model_present)
         default_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
-
-        def run_side_effect(*args, **kwargs):
-            cmd = args[0] if args else kwargs.get("args", [])
-            if (
-                isinstance(cmd, list)
-                and len(cmd) > 1
-                and cmd[0] == "/usr/local/bin/docker"
-                and "inspect" in cmd
-            ):
-                return docker_result
-            return default_run
-
         with (
-            patch("kiro_crew.cli_doctor.shutil.which", side_effect=which_side_effect),
-            patch("kiro_crew.cli_doctor.KIRO_AGENTS_DIR", tmp_path),
-            patch("kiro_crew.cli_doctor.subprocess.run", side_effect=run_side_effect),
-            patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no")),
-            patch("kiro_crew.cli_doctor.is_local_only", return_value=True),
-            patch("kiro_crew.cli_doctor.config_dir", return_value=tmp_path),
-            patch("kiro_crew.cli_doctor.probe_server", side_effect=_noop_probe_server),
-        ):
-            _doctor()
-        out = capsys.readouterr().out
-        assert "Docker (" in out
-        assert "[running]" in out
-        assert "not installed" not in out
-
-    def test_doctor_no_ollama_no_docker(self, tmp_path, capsys):
-        """When neither native ollama nor Docker container exists, report not installed."""
-        agent_file = tmp_path / "kirocrew.json"
-        _healthy_agent_file(agent_file)
-
-        def which_side_effect(binary):
-            if binary in ("ollama", "docker"):
-                return None
-            return f"/usr/local/bin/{binary}"
-
-        default_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
-
-        with (
-            patch("kiro_crew.cli_doctor.shutil.which", side_effect=which_side_effect),
             patch("kiro_crew.cli_doctor.KIRO_AGENTS_DIR", tmp_path),
             patch("kiro_crew.cli_doctor.subprocess.run", return_value=default_run),
             patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no")),
@@ -2926,138 +2884,89 @@ class TestDoctorOllamaDocker:
             patch("kiro_crew.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_crew.cli_doctor.probe_server", side_effect=_noop_probe_server),
         ):
-            _doctor()
-        out = capsys.readouterr().out
-        assert "not installed" in out
+            with contextlib.suppress(SystemExit):
+                _doctor()
 
-    def test_doctor_docker_container_not_found(self, tmp_path, capsys):
-        """When docker exists but container doesn't, fall through to not installed."""
+    def test_doctor_reports_runtime_and_missing_model(self, tmp_path, capsys, monkeypatch):
+        """Vendored runtime loads but no model file -> runtime OK, model pending."""
+        self._run_doctor(tmp_path, monkeypatch, runtime_ok=True, model_present=False)
+        out = capsys.readouterr().out
+        assert "runtime:     ✅ vendored llama-cpp-python importable" in out
+        assert "model:       ⏹ not downloaded yet" in out
+        assert "embeddings:  ✅ always-on" in out
+
+    def test_doctor_reports_runtime_failure(self, tmp_path, capsys, monkeypatch):
+        """Vendored runtime failing to import is surfaced as an issue."""
+        self._run_doctor(tmp_path, monkeypatch, runtime_ok=False, model_present=False)
+        out = capsys.readouterr().out
+        assert "runtime:     ❌ vendored runtime failed to load" in out
+
+    def test_doctor_reports_model_present(self, tmp_path, capsys, monkeypatch):
+        """Model file present -> reported with its path."""
+        self._run_doctor(tmp_path, monkeypatch, runtime_ok=True, model_present=True)
+        out = capsys.readouterr().out
+        assert "model:       ✅" in out
+
+    def test_doctor_probes_model_url_when_model_absent(self, tmp_path, capsys, monkeypatch):
+        """Fork-added: with the model absent, doctor probes the resolved model URL."""
+        import kiro_crew.cli_doctor as doc
+
+        probed: list[str] = []
+
+        def _fake_urlopen(req, timeout=None, **kw):
+            url = getattr(req, "full_url", str(req))
+            probed.append(url)
+            if "cloudfront" in url or "mirror" in url:
+                resp = MagicMock(status=200)
+                cm = MagicMock()
+                cm.__enter__ = MagicMock(return_value=resp)
+                cm.__exit__ = MagicMock(return_value=False)
+                return cm
+            raise urllib.error.URLError("no")
+
         agent_file = tmp_path / "kirocrew.json"
         _healthy_agent_file(agent_file)
-
-        def which_side_effect(binary):
-            if binary == "ollama":
-                return None
-            return f"/usr/local/bin/{binary}"
-
-        docker_not_found = MagicMock(returncode=1, stdout="", stderr="No such object")
+        monkeypatch.setattr(doc, "_load_llama_class", lambda: object)
+        monkeypatch.setattr(doc, "model_file_present", lambda path=None: False)
+        monkeypatch.setattr(doc, "_resolve_model_url", lambda: "https://mirror.example/m.gguf")
         default_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
-
-        def run_side_effect(*args, **kwargs):
-            cmd = args[0] if args else kwargs.get("args", [])
-            if (
-                isinstance(cmd, list)
-                and len(cmd) > 1
-                and cmd[0] == "/usr/local/bin/docker"
-                and "inspect" in cmd
-            ):
-                return docker_not_found
-            return default_run
-
         with (
-            patch("kiro_crew.cli_doctor.shutil.which", side_effect=which_side_effect),
             patch("kiro_crew.cli_doctor.KIRO_AGENTS_DIR", tmp_path),
-            patch("kiro_crew.cli_doctor.subprocess.run", side_effect=run_side_effect),
+            patch("kiro_crew.cli_doctor.subprocess.run", return_value=default_run),
+            patch("urllib.request.urlopen", side_effect=_fake_urlopen),
+            patch("kiro_crew.cli_doctor.is_local_only", return_value=True),
+            patch("kiro_crew.cli_doctor.config_dir", return_value=tmp_path),
+            patch("kiro_crew.cli_doctor.probe_server", side_effect=_noop_probe_server),
+        ):
+            with contextlib.suppress(SystemExit):
+                _doctor()
+        out = capsys.readouterr().out
+        assert "https://mirror.example/m.gguf" in probed
+        assert "model url:   ✅ reachable" in out
+
+    def test_doctor_reports_unreachable_model_url(self, tmp_path, capsys, monkeypatch):
+        """Fork-added: an unreachable model URL is flagged with a fix hint."""
+        import kiro_crew.cli_doctor as doc
+
+        agent_file = tmp_path / "kirocrew.json"
+        _healthy_agent_file(agent_file)
+        monkeypatch.setattr(doc, "_load_llama_class", lambda: object)
+        monkeypatch.setattr(doc, "model_file_present", lambda path=None: False)
+        monkeypatch.setattr(doc, "_resolve_model_url", lambda: "https://mirror.example/m.gguf")
+        default_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
+        with (
+            patch("kiro_crew.cli_doctor.KIRO_AGENTS_DIR", tmp_path),
+            patch("kiro_crew.cli_doctor.subprocess.run", return_value=default_run),
             patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no")),
             patch("kiro_crew.cli_doctor.is_local_only", return_value=True),
             patch("kiro_crew.cli_doctor.config_dir", return_value=tmp_path),
             patch("kiro_crew.cli_doctor.probe_server", side_effect=_noop_probe_server),
         ):
-            _doctor()
+            with contextlib.suppress(SystemExit):
+                _doctor()
         out = capsys.readouterr().out
-        assert "not installed" in out
-
-    def test_doctor_docker_inspect_timeout(self, tmp_path, capsys):
-        """When docker inspect times out, fall through gracefully to not installed."""
-        agent_file = tmp_path / "kirocrew.json"
-        _healthy_agent_file(agent_file)
-
-        def which_side_effect(binary):
-            if binary == "ollama":
-                return None
-            return f"/usr/local/bin/{binary}"
-
-        default_run = MagicMock(returncode=0, stdout="kiro-cli 1.0.0", stderr="")
-
-        def run_side_effect(*args, **kwargs):
-            cmd = args[0] if args else kwargs.get("args", [])
-            if (
-                isinstance(cmd, list)
-                and len(cmd) > 1
-                and cmd[0] == "/usr/local/bin/docker"
-                and "inspect" in cmd
-            ):
-                raise subprocess.TimeoutExpired(cmd, 5)
-            return default_run
-
-        with (
-            patch("kiro_crew.cli_doctor.shutil.which", side_effect=which_side_effect),
-            patch("kiro_crew.cli_doctor.KIRO_AGENTS_DIR", tmp_path),
-            patch("kiro_crew.cli_doctor.subprocess.run", side_effect=run_side_effect),
-            patch("urllib.request.urlopen", side_effect=urllib.error.URLError("no")),
-            patch("kiro_crew.cli_doctor.is_local_only", return_value=True),
-            patch("kiro_crew.cli_doctor.config_dir", return_value=tmp_path),
-            patch("kiro_crew.cli_doctor.probe_server", side_effect=_noop_probe_server),
-        ):
-            _doctor()
-        out = capsys.readouterr().out
-        assert "not installed" in out
-
-    def test_doctor_ollama_brew_info_timeout_macos(self, capsys):
-        """macOS: a slow ``brew info ollama`` must warn, not crash doctor.
-
-        Regression for the unhandled ``subprocess.TimeoutExpired`` on the Darwin
-        branch of ``_doctor_ollama_install`` (Homebrew auto-update can push
-        ``brew info`` past the 30s timeout). Ollama is optional, so this must
-        degrade to a warning like the Linux branch already does.
-        """
-        with (
-            patch("kiro_crew.cli_doctor._plat.system", return_value="Darwin"),
-            patch("kiro_crew.cli_doctor.shutil.which", return_value="/opt/homebrew/bin/brew"),
-            patch(
-                "kiro_crew.cli_doctor.subprocess.run",
-                side_effect=subprocess.TimeoutExpired(["brew", "info", "ollama"], 30),
-            ),
-        ):
-            issues: list[str] = []
-            # Must not raise — the bug let TimeoutExpired abort the whole run.
-            _doctor_ollama_install(issues)
-        out = capsys.readouterr().out
-        assert "timed out checking formula" in out
-        # A slow optional-dependency probe must not be flagged as a hard issue.
-        assert issues == []
-
-    def test_doctor_ollama_brew_info_macos_formula_available(self, capsys):
-        # macOS: brew resolves the formula -> report available, no hard issue.
-        with (
-            patch("kiro_crew.cli_doctor._plat.system", return_value="Darwin"),
-            patch("kiro_crew.cli_doctor.shutil.which", return_value="/opt/homebrew/bin/brew"),
-            patch(
-                "kiro_crew.cli_doctor.subprocess.run",
-                return_value=MagicMock(returncode=0, stdout="", stderr=""),
-            ),
-        ):
-            issues: list[str] = []
-            _doctor_ollama_install(issues)
-        out = capsys.readouterr().out
-        assert "formula available" in out
-        assert issues == []
-
-    def test_doctor_ollama_brew_info_macos_formula_missing(self, capsys):
-        # macOS: brew cannot resolve the formula -> flag a hard issue.
-        with (
-            patch("kiro_crew.cli_doctor._plat.system", return_value="Darwin"),
-            patch("kiro_crew.cli_doctor.shutil.which", return_value="/opt/homebrew/bin/brew"),
-            patch(
-                "kiro_crew.cli_doctor.subprocess.run",
-                return_value=MagicMock(returncode=1, stdout="", stderr="No formula"),
-            ),
-        ):
-            issues: list[str] = []
-            _doctor_ollama_install(issues)
-        out = capsys.readouterr().out
-        assert "brew info" in out
-        assert issues == ["ollama (brew cannot resolve formula)"]
+        assert "model url:   ❌ unreachable" in out
+        assert "Check network connectivity" in out
 
 
 class TestPrintTokenUrl:

@@ -183,6 +183,27 @@ def _isolate_subagents_dir(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_model_download(monkeypatch, tmp_path_factory):
+    """Never let a test trigger the 610MB embedding-model download.
+
+    Embeddings are always-on, so any test that boots the gateway/server
+    startup path would otherwise kick ``start_background_model_download()``.
+    The env escape hatch is honored by ``ModelDownloadManager.ensure_model``
+    and ``start_background_model_download`` — a test that wants to exercise
+    the download path monkeypatches the manager's HTTP calls directly
+    (see test_embeddings.py) rather than unsetting this.
+
+    ``OLLAMA_MODELS`` is additionally pinned to an empty tmp dir so the
+    legacy-blob salvage fast-path (``_salvage_legacy_ollama_blob``) can never
+    read the developer's real ``~/.ollama`` store — without this, download
+    tests would pass/fail machine-dependently on hosts that ran the
+    Ollama-era embeddings.
+    """
+    monkeypatch.setenv("KIROCREW_SKIP_MODEL_DOWNLOAD", "1")
+    monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path_factory.mktemp("ollama-models")))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_agent_state_sidecar(tmp_path_factory, monkeypatch):
     """Pin the agent_state sidecar to a tmp dir for the whole suite.
 

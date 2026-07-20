@@ -944,14 +944,9 @@
       "hasChildren": true,
       "enumValues": null,
       "defaultValue": {
-        "embedding_provider": "none",
-        "embedding_url": "http://localhost:11434",
-        "allow_remote_embedding": false,
-        "embedding_managed": true,
-        "embedding_auth": "none",
+        "embedding_provider": "llama_cpp",
         "embedding_dim": 1024,
-        "embedding_model": "qwen3-embedding:0.6b",
-        "embedding_timeout_secs": 5.0,
+        "embed_model_url": "",
         "semantic_confidence_threshold": 0.8,
         "episodic_dedup_threshold": 0.88,
         "episodic_max_results": 8,
@@ -959,7 +954,6 @@
         "semantic_keys": [],
         "history_idle_hours": 3.0,
         "history_max_days": 365,
-        "embedding_runtime": "native",
         "migrated": false
       }
     },
@@ -972,69 +966,12 @@
       "sensitive": false,
       "tags": [],
       "label": "Embedding Provider",
-      "help": "Vector embedding backend.",
+      "help": "Vector embedding backend (always-on). In-process via vendored llama-cpp-python. Legacy configs with 'ollama' or 'none' are auto-migrated to 'llama_cpp'.",
       "hasChildren": false,
       "enumValues": [
-        "none",
-        "ollama"
+        "llama_cpp"
       ],
-      "defaultValue": "none"
-    },
-    {
-      "path": "memory.embedding_url",
-      "kind": "core",
-      "type": "string",
-      "required": false,
-      "deprecated": false,
-      "sensitive": false,
-      "tags": [],
-      "label": "Embedding URL",
-      "help": "URL for the embedding service.",
-      "hasChildren": false,
-      "enumValues": null,
-      "defaultValue": "http://localhost:11434"
-    },
-    {
-      "path": "memory.allow_remote_embedding",
-      "kind": "core",
-      "type": "boolean",
-      "required": false,
-      "deprecated": false,
-      "sensitive": false,
-      "tags": [],
-      "label": "Allow Remote Embedding",
-      "help": "Allow non-localhost embedding endpoints.",
-      "hasChildren": false,
-      "enumValues": null,
-      "defaultValue": false
-    },
-    {
-      "path": "memory.embedding_managed",
-      "kind": "core",
-      "type": "boolean",
-      "required": false,
-      "deprecated": false,
-      "sensitive": false,
-      "tags": [],
-      "label": "Managed Embedding Server",
-      "help": "When true, KiroCrew starts/stops a local Ollama server. Set to false for external or SSH-forwarded Ollama instances.",
-      "hasChildren": false,
-      "enumValues": null,
-      "defaultValue": true
-    },
-    {
-      "path": "memory.embedding_auth",
-      "kind": "core",
-      "type": "string",
-      "required": false,
-      "deprecated": false,
-      "sensitive": false,
-      "tags": [],
-      "label": "Embedding Auth",
-      "help": "Auth scheme for embedding requests. Default 'none' (local Ollama). Advanced: 'aws_sigv4' signs requests for an AWS-fronted endpoint (opt-in).",
-      "hasChildren": false,
-      "enumValues": null,
-      "defaultValue": "none"
+      "defaultValue": "llama_cpp"
     },
     {
       "path": "memory.embedding_dim",
@@ -1051,32 +988,18 @@
       "defaultValue": 1024
     },
     {
-      "path": "memory.embedding_model",
+      "path": "memory.embed_model_url",
       "kind": "core",
       "type": "string",
       "required": false,
       "deprecated": false,
       "sensitive": false,
       "tags": [],
-      "label": "Embedding Model",
-      "help": "Ollama model name for embeddings. Must match embedding_dim (e.g. qwen3-embedding:0.6b=1024, nomic-embed-text=768).",
+      "label": "Embedding Model URL",
+      "help": "Override HTTPS URL for the embedding model GGUF download (mirrored/airgapped deployments). Empty uses the public KiroCrew CDN default; the KIROCREW_EMBED_MODEL_URL env var wins over both. The download is sha256-verified regardless of source.",
       "hasChildren": false,
       "enumValues": null,
-      "defaultValue": "qwen3-embedding:0.6b"
-    },
-    {
-      "path": "memory.embedding_timeout_secs",
-      "kind": "core",
-      "type": "number",
-      "required": false,
-      "deprecated": false,
-      "sensitive": false,
-      "tags": [],
-      "label": "Embedding Timeout",
-      "help": "Timeout in seconds for embedding requests.",
-      "hasChildren": false,
-      "enumValues": null,
-      "defaultValue": 5.0
+      "defaultValue": ""
     },
     {
       "path": "memory.semantic_confidence_threshold",
@@ -1189,23 +1112,6 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": 365
-    },
-    {
-      "path": "memory.embedding_runtime",
-      "kind": "core",
-      "type": "string",
-      "required": false,
-      "deprecated": false,
-      "sensitive": false,
-      "tags": [],
-      "label": "Embedding Runtime",
-      "help": "How Ollama runs: 'native' (direct binary) or 'docker' (container fallback for AL2 glibc).",
-      "hasChildren": false,
-      "enumValues": [
-        "native",
-        "docker"
-      ],
-      "defaultValue": "native"
     },
     {
       "path": "memory.migrated",
@@ -3440,12 +3346,11 @@
       "sensitive": false,
       "tags": [],
       "label": "Embedding Provider",
-      "help": "Override embedding backend for this store. Empty inherits from top-level memory.",
+      "help": "Override embedding backend for this store. Empty inherits from top-level memory (embeddings are always-on; per-store disable is not supported).",
       "hasChildren": false,
       "enumValues": [
         "",
-        "none",
-        "ollama"
+        "llama_cpp"
       ],
       "defaultValue": ""
     },

@@ -1,8 +1,17 @@
-"""Tests for faiss-cpu installation block in enable-embeddings handler."""
+"""Tests for faiss-cpu installation block in enable-embeddings handler.
+
+The enable flow no longer boots Ollama: when the GGUF is absent it kicks (or
+adopts) a background ``ensure_model`` download task and returns 200
+"downloading" immediately; when the model file is present it pip-installs
+faiss-cpu (flow unchanged), wires ``make_sync_embed_fn()`` onto the vector
+store, and loads the FAISS index. Model download and embedder are fully
+faked here.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,32 +20,25 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 import kiro_crew.dashboard.handlers.memory as mem_mod
+from kiro_crew.embeddings import DOWNLOAD_ATTEMPTS_INTERACTIVE
 
 _MOD = "kiro_crew.dashboard.handlers.memory"
+_EMB = "kiro_crew.embeddings"
 
 
 def _make_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/api/memory/enable-embeddings", mem_mod.api_memory_enable_embeddings)
+    app.router.add_get("/api/memory/embedding-status", mem_mod.api_memory_embedding_status)
     app["state"] = MagicMock(consolidator=None)
     return app
 
 
-def _mock_mgr():
+def _mock_mgr(ensure_ok: bool = True):
     mgr = MagicMock()
-    mgr._use_docker = False
-    mgr.ollama_binary = "/usr/bin/ollama"
-    mgr.start_server = AsyncMock(return_value=True)
-    mgr.pull_model = AsyncMock(return_value=True)
+    mgr.ensure_model = AsyncMock(return_value=ensure_ok)
+    mgr.status = {"step": "ready" if ensure_ok else "failed", "error": "", "attempt": 1}
     return mgr
-
-
-def _mock_cfg():
-    cfg = MagicMock()
-    cfg.memory.embedding_url = "http://localhost:11434"
-    cfg.memory.embedding_model = "test"
-    cfg.memory.allow_remote_embedding = False
-    return cfg
 
 
 def _mock_proc(rc: int = 0, stderr: bytes = b""):
@@ -53,30 +55,31 @@ def _reset_status():
     mem_mod._embedding_setup_status = {"step": "idle", "error": ""}
 
 
-def _common_patches(cfg_path, faiss_available=False, proc_rc=0, proc_stderr=b""):
-    """Return a list of context managers for the common mocks."""
+def _common_patches(cfg_path, faiss_available=False, proc_rc=0, proc_stderr=b"",
+                    model_present=True, ensure_ok=True):
+    """Return a dict of context managers for the common mocks."""
     store = MagicMock()
     store.embed_fn = None
     store.load_faiss_index = MagicMock()
 
-    cfg = _mock_cfg()
     proc = _mock_proc(proc_rc, proc_stderr)
     faiss_mod = MagicMock() if faiss_available else None
+    mgr = _mock_mgr(ensure_ok)
 
     patches = {
-        "ollama": patch("kiro_crew.embeddings.OllamaManager", return_value=_mock_mgr()),
-        "cfg_load": patch("kiro_crew.config.loader.KiroCrewConfig.load", return_value=cfg),
-        "cfg_path": patch("kiro_crew.config.loader.config_path", return_value=cfg_path),
+        "mgr": patch(f"{_MOD}.model_download_manager", return_value=mgr),
+        "model_present": patch(f"{_MOD}.model_file_present", return_value=model_present),
+        "cfg_load": patch(f"{_MOD}.KiroCrewConfig.load", return_value=MagicMock()),
+        "cfg_path": patch(f"{_MOD}.config_path", return_value=cfg_path),
         "subprocess": patch("asyncio.create_subprocess_exec", return_value=proc),
-        "validate": patch("kiro_crew.embeddings._validate_url"),
-        "embed_fn": patch("kiro_crew.embeddings.make_sync_embed_fn", return_value=lambda t: [0.0]),
+        "embed_fn": patch(f"{_MOD}.make_sync_embed_fn", return_value=lambda t: [0.0]),
         # Inject a fake ``pip`` so ``_ensure_pip_available`` short-circuits and
         # these faiss-focused tests see exactly one subprocess (the faiss install).
         "faiss": patch.dict("sys.modules", {"faiss": faiss_mod, "pip": MagicMock()}),
         "store": patch(f"{_MOD}._get_vector_store", return_value=store),
         "wrap_argv": patch(f"{_MOD}.wrap_argv", side_effect=lambda argv, **kw: (argv, None)),
     }
-    return patches, store, proc
+    return patches, store, proc, mgr
 
 
 class TestFaissInstallSuccess:
@@ -84,10 +87,10 @@ class TestFaissInstallSuccess:
     async def test_pip_install_runs_when_faiss_missing(self, tmp_path: Path) -> None:
         cfg_path = tmp_path / "kirocrew.json"
         cfg_path.write_text("{}", encoding="utf-8")
-        patches, store, proc = _common_patches(cfg_path, faiss_available=False, proc_rc=0)
+        patches, store, proc, mgr = _common_patches(cfg_path, faiss_available=False, proc_rc=0)
 
-        with patches["ollama"], patches["cfg_load"], patches["cfg_path"], \
-             patches["subprocess"] as mock_exec, patches["validate"], \
+        with patches["mgr"], patches["model_present"], patches["cfg_load"], \
+             patches["cfg_path"], patches["subprocess"] as mock_exec, \
              patches["embed_fn"], patches["faiss"], patches["store"], \
              patches["wrap_argv"]:
             async with TestClient(TestServer(_make_app())) as c:
@@ -99,6 +102,8 @@ class TestFaissInstallSuccess:
             args = mock_exec.call_args[0]
             assert "faiss-cpu" in args
             assert "--only-binary=:all:" in args
+            # Model already present — no download attempted.
+            mgr.ensure_model.assert_not_awaited()
 
 
 class TestFaissInstallFailure:
@@ -106,13 +111,13 @@ class TestFaissInstallFailure:
     async def test_returns_500_and_resets_status(self, tmp_path: Path) -> None:
         cfg_path = tmp_path / "kirocrew.json"
         cfg_path.write_text("{}", encoding="utf-8")
-        patches, store, proc = _common_patches(
+        patches, store, proc, mgr = _common_patches(
             cfg_path, faiss_available=False, proc_rc=1, proc_stderr=b"No matching distribution"
         )
 
-        with patches["ollama"], patches["cfg_load"], patches["cfg_path"], \
-             patches["subprocess"], patches["faiss"], patches["store"], \
-             patches["wrap_argv"]:
+        with patches["mgr"], patches["model_present"], patches["cfg_load"], \
+             patches["cfg_path"], patches["subprocess"], patches["faiss"], \
+             patches["store"], patches["wrap_argv"]:
             async with TestClient(TestServer(_make_app())) as c:
                 resp = await c.post("/api/memory/enable-embeddings")
                 assert resp.status == 500
@@ -120,7 +125,7 @@ class TestFaissInstallFailure:
                 assert "faiss-cpu installation failed" in body["error"]
 
         assert mem_mod._embedding_setup_status["step"] == "idle"
-        assert "faiss-cpu" in mem_mod._embedding_setup_status["error"]
+        assert "faiss-cpu" in str(mem_mod._embedding_setup_status["error"])
 
 
 class TestFaissAlreadyInstalled:
@@ -128,10 +133,10 @@ class TestFaissAlreadyInstalled:
     async def test_skips_pip_when_faiss_importable(self, tmp_path: Path) -> None:
         cfg_path = tmp_path / "kirocrew.json"
         cfg_path.write_text("{}", encoding="utf-8")
-        patches, store, proc = _common_patches(cfg_path, faiss_available=True)
+        patches, store, proc, mgr = _common_patches(cfg_path, faiss_available=True)
 
-        with patches["ollama"], patches["cfg_load"], patches["cfg_path"], \
-             patches["subprocess"] as mock_exec, patches["validate"], \
+        with patches["mgr"], patches["model_present"], patches["cfg_load"], \
+             patches["cfg_path"], patches["subprocess"] as mock_exec, \
              patches["embed_fn"], patches["faiss"], patches["store"], \
              patches["wrap_argv"]:
             async with TestClient(TestServer(_make_app())) as c:
@@ -141,22 +146,103 @@ class TestFaissAlreadyInstalled:
             mock_exec.assert_not_called()
 
 
-class TestLoadFaissIndexCalled:
+class TestModelDownloadFlow:
+    """Model absent → the endpoint kicks a background ensure_model task and
+    returns 200 "downloading" immediately (never awaits the download; failures
+    surface via the embedding-status endpoint)."""
+
     @pytest.mark.asyncio
-    async def test_called_after_successful_setup(self, tmp_path: Path) -> None:
+    async def test_downloads_model_when_absent(self, tmp_path: Path) -> None:
         cfg_path = tmp_path / "kirocrew.json"
         cfg_path.write_text("{}", encoding="utf-8")
-        patches, store, proc = _common_patches(cfg_path, faiss_available=True)
+        patches, store, proc, mgr = _common_patches(
+            cfg_path, faiss_available=True, model_present=False, ensure_ok=True
+        )
+        mgr.status = {"step": "idle", "error": "", "attempt": 0}
 
-        with patches["ollama"], patches["cfg_load"], patches["cfg_path"], \
-             patches["subprocess"], patches["validate"], \
+        app = _make_app()
+        with patches["mgr"], patches["model_present"], patches["cfg_load"], \
+             patches["cfg_path"], patches["subprocess"] as mock_exec, \
+             patches["embed_fn"], patches["faiss"], patches["store"], \
+             patches["wrap_argv"]:
+            async with TestClient(TestServer(app)) as c:
+                resp = await c.post("/api/memory/enable-embeddings")
+                assert resp.status == 200
+                body = await resp.json()
+                assert body == {"ok": True, "status": "downloading"}
+
+                # Let the spawned background task tick (ensure_model is an
+                # AsyncMock, so one loop iteration completes it).
+                await asyncio.sleep(0)
+                mgr.ensure_model.assert_awaited_once_with(attempts=DOWNLOAD_ATTEMPTS_INTERACTIVE)
+
+                # Cleanup: cancel anything still retained on state.
+                for task in list(app["state"].__dict__.get("_bg_embed_tasks", set())):
+                    task.cancel()
+
+            # Returned immediately — no faiss install / embed_fn wiring yet.
+            mock_exec.assert_not_called()
+            assert store.embed_fn is None
+
+    @pytest.mark.asyncio
+    async def test_download_in_flight_returns_without_new_task(self, tmp_path: Path) -> None:
+        """A download already in flight is adopted — no second ensure_model task."""
+        cfg_path = tmp_path / "kirocrew.json"
+        cfg_path.write_text("{}", encoding="utf-8")
+        patches, store, proc, mgr = _common_patches(
+            cfg_path, faiss_available=True, model_present=False, ensure_ok=True
+        )
+        mgr.status = {"step": "downloading", "error": "", "attempt": 1}
+
+        with patches["mgr"], patches["model_present"], patches["cfg_load"], \
+             patches["cfg_path"], patches["subprocess"] as mock_exec, \
              patches["embed_fn"], patches["faiss"], patches["store"], \
              patches["wrap_argv"]:
             async with TestClient(TestServer(_make_app())) as c:
                 resp = await c.post("/api/memory/enable-embeddings")
                 assert resp.status == 200
+                body = await resp.json()
+                assert body == {"ok": True, "status": "downloading", "setup_step": "downloading"}
+                await asyncio.sleep(0)
+                mgr.ensure_model.assert_not_awaited()
+
+            mock_exec.assert_not_called()
+            assert store.embed_fn is None
+
+
+class TestLoadFaissIndexCalled:
+    @pytest.mark.asyncio
+    async def test_called_after_successful_setup(self, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "kirocrew.json"
+        cfg_path.write_text("{}", encoding="utf-8")
+        patches, store, proc, mgr = _common_patches(cfg_path, faiss_available=True)
+
+        with patches["mgr"], patches["model_present"], patches["cfg_load"], \
+             patches["cfg_path"], patches["subprocess"], patches["embed_fn"], \
+             patches["faiss"], patches["store"], patches["wrap_argv"]:
+            async with TestClient(TestServer(_make_app())) as c:
+                resp = await c.post("/api/memory/enable-embeddings")
+                assert resp.status == 200
 
             store.load_faiss_index.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_persists_llama_cpp_provider(self, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "kirocrew.json"
+        cfg_path.write_text("{}", encoding="utf-8")
+        patches, store, proc, mgr = _common_patches(cfg_path, faiss_available=True)
+
+        with patches["mgr"], patches["model_present"], patches["cfg_load"], \
+             patches["cfg_path"], patches["subprocess"], patches["embed_fn"], \
+             patches["faiss"], patches["store"], patches["wrap_argv"]:
+            async with TestClient(TestServer(_make_app())) as c:
+                resp = await c.post("/api/memory/enable-embeddings")
+                assert resp.status == 200
+
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        assert data["memory"]["embedding_provider"] == "llama_cpp"
+        assert data["memory"]["embedding_dim"] == 1024
+        assert data["memory"]["migrated"] is True
 
 
 class TestLoadFaissIndexFailure:
@@ -164,13 +250,12 @@ class TestLoadFaissIndexFailure:
     async def test_returns_500_when_load_faiss_raises(self, tmp_path: Path) -> None:
         cfg_path = tmp_path / "kirocrew.json"
         cfg_path.write_text("{}", encoding="utf-8")
-        patches, store, proc = _common_patches(cfg_path, faiss_available=True)
+        patches, store, proc, mgr = _common_patches(cfg_path, faiss_available=True)
         store.load_faiss_index.side_effect = RuntimeError("corrupted index")
 
-        with patches["ollama"], patches["cfg_load"], patches["cfg_path"], \
-             patches["subprocess"], patches["validate"], \
-             patches["embed_fn"], patches["faiss"], patches["store"], \
-             patches["wrap_argv"]:
+        with patches["mgr"], patches["model_present"], patches["cfg_load"], \
+             patches["cfg_path"], patches["subprocess"], patches["embed_fn"], \
+             patches["faiss"], patches["store"], patches["wrap_argv"]:
             async with TestClient(TestServer(_make_app())) as c:
                 resp = await c.post("/api/memory/enable-embeddings")
                 assert resp.status == 500
@@ -178,7 +263,7 @@ class TestLoadFaissIndexFailure:
                 assert "FAISS index load failed" in body["error"]
 
         assert mem_mod._embedding_setup_status["step"] == "idle"
-        assert "FAISS index load failed" in mem_mod._embedding_setup_status["error"]
+        assert "FAISS index load failed" in str(mem_mod._embedding_setup_status["error"])
 
 
 class TestFaissInstallTimeout:
@@ -186,7 +271,7 @@ class TestFaissInstallTimeout:
     async def test_returns_500_on_timeout(self, tmp_path: Path) -> None:
         cfg_path = tmp_path / "kirocrew.json"
         cfg_path.write_text("{}", encoding="utf-8")
-        patches, store, proc = _common_patches(cfg_path, faiss_available=False, proc_rc=0)
+        patches, store, proc, mgr = _common_patches(cfg_path, faiss_available=False, proc_rc=0)
         proc.kill = MagicMock()
         proc.wait = AsyncMock()
 
@@ -194,9 +279,9 @@ class TestFaissInstallTimeout:
             coro.close()  # clean up the coroutine
             raise asyncio.TimeoutError
 
-        with patches["ollama"], patches["cfg_load"], patches["cfg_path"], \
-             patches["subprocess"], patches["faiss"], patches["store"], \
-             patches["wrap_argv"], \
+        with patches["mgr"], patches["model_present"], patches["cfg_load"], \
+             patches["cfg_path"], patches["subprocess"], patches["faiss"], \
+             patches["store"], patches["wrap_argv"], \
              patch("asyncio.wait_for", side_effect=_timeout_wait_for):
             async with TestClient(TestServer(_make_app())) as c:
                 resp = await c.post("/api/memory/enable-embeddings")
@@ -206,7 +291,72 @@ class TestFaissInstallTimeout:
 
         proc.kill.assert_called_once()
         assert mem_mod._embedding_setup_status["step"] == "idle"
-        assert "timed out" in mem_mod._embedding_setup_status["error"]
+        assert "timed out" in str(mem_mod._embedding_setup_status["error"])
+
+
+class TestEmbeddingStatusEndpoint:
+    """embedding-status reports download-manager state + legacy field names."""
+
+    @pytest.mark.asyncio
+    async def test_status_reports_manager_and_embedder_state(self) -> None:
+        cfg = MagicMock()
+        cfg.memory.embedding_provider = "llama_cpp"
+        embedder = MagicMock()
+        embedder.is_ready.return_value = True
+        mgr = MagicMock()
+        mgr.status = {"step": "downloading", "error": "", "attempt": 2}
+
+        with patch("kiro_crew.config.loader.KiroCrewConfig.load", return_value=cfg), \
+             patch(f"{_MOD}.get_shared_embedder", return_value=embedder), \
+             patch(f"{_MOD}.model_download_manager", return_value=mgr), \
+             patch(f"{_MOD}.model_file_present", return_value=False):
+            async with TestClient(TestServer(_make_app())) as c:
+                resp = await c.get("/api/memory/embedding-status")
+                assert resp.status == 200
+                body = await resp.json()
+
+        assert body["enabled"] is True
+        # Legacy token: the shipped frontend hard-checks provider === "ollama"
+        # to render the healthy state; kept until KiroCrewWebsite ships its
+        # companion change.
+        assert body["provider"] == "ollama"
+        assert body["model_available"] is False
+        assert body["server_healthy"] is True
+        # "downloading" maps to itself in the legacy setup_step vocabulary;
+        # download_step/download_attempt expose the raw manager state.
+        assert body["setup_step"] == "downloading"
+        assert body["download_step"] == "downloading"
+        assert body["download_attempt"] == 2
+        # Legacy field names kept for frontend compatibility.
+        assert body["ollama_installed"] is True
+        assert body["needs_docker"] is False
+        assert body["docker_available"] is True
+
+    @pytest.mark.asyncio
+    async def test_status_can_retry_after_failure(self) -> None:
+        cfg = MagicMock()
+        cfg.memory.embedding_provider = "llama_cpp"
+        embedder = MagicMock()
+        embedder.is_ready.return_value = False
+        mgr = MagicMock()
+        mgr.status = {"step": "failed", "error": "sha256 mismatch", "attempt": 6}
+
+        with patch("kiro_crew.config.loader.KiroCrewConfig.load", return_value=cfg), \
+             patch(f"{_MOD}.get_shared_embedder", return_value=embedder), \
+             patch(f"{_MOD}.model_download_manager", return_value=mgr), \
+             patch(f"{_MOD}.model_file_present", return_value=False):
+            async with TestClient(TestServer(_make_app())) as c:
+                resp = await c.get("/api/memory/embedding-status")
+                body = await resp.json()
+
+        # Embeddings are always-on — "enabled" is unconditionally True.
+        assert body["enabled"] is True
+        # Raw "failed" maps to the legacy "error" token the frontend
+        # polling loop terminates on; the raw step stays on download_step.
+        assert body["setup_step"] == "error"
+        assert body["download_step"] == "failed"
+        assert body["setup_error"] == "sha256 mismatch"
+        assert body["can_retry"] is True
 
 
 class TestEnsurePipBootstrap:
@@ -262,9 +412,10 @@ class TestEnsurePipBootstrap:
         store.load_faiss_index = MagicMock()
         proc = _mock_proc(rc=1, stderr=b"ensurepip is not available")
 
-        with patch("kiro_crew.embeddings.OllamaManager", return_value=_mock_mgr()), \
-             patch("kiro_crew.config.loader.KiroCrewConfig.load", return_value=_mock_cfg()), \
-             patch("kiro_crew.config.loader.config_path", return_value=cfg_path), \
+        with patch(f"{_MOD}.model_download_manager", return_value=_mock_mgr()), \
+             patch(f"{_MOD}.model_file_present", return_value=True), \
+             patch(f"{_MOD}.KiroCrewConfig.load", return_value=MagicMock()), \
+             patch(f"{_MOD}.config_path", return_value=cfg_path), \
              patch("asyncio.create_subprocess_exec", return_value=proc), \
              patch.dict("sys.modules", {"faiss": None, "pip": None}), \
              patch(f"{_MOD}._get_vector_store", return_value=store), \
@@ -276,4 +427,4 @@ class TestEnsurePipBootstrap:
                 assert "pip bootstrap" in body["error"]
 
         assert mem_mod._embedding_setup_status["step"] == "idle"
-        assert "pip bootstrap" in mem_mod._embedding_setup_status["error"]
+        assert "pip bootstrap" in str(mem_mod._embedding_setup_status["error"])

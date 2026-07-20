@@ -34,7 +34,7 @@ from kiro_crew.dashboard.origin import (
     resolve_dashboard_host,
 )
 from kiro_crew.dashboard.token_auth import parse_duration
-from kiro_crew.embeddings import OllamaManager, make_sync_embed_fn
+from kiro_crew.embeddings import make_sync_embed_fn, model_file_present
 from kiro_crew.env import activate_mise
 from kiro_crew.frontend import build_frontend_sync, ensure_dev_dist_symlink
 from kiro_crew.history import ConversationLog, HistoryConsolidator
@@ -887,21 +887,19 @@ async def _run_task(args: argparse.Namespace) -> None:
         embedding_dim=cfg.memory.embedding_dim,
     )
     vector_memory.init()
-    if cfg.memory.embedding_provider == "ollama":
-        _ollama_mgr = OllamaManager(cfg.memory.embedding_url, model=cfg.memory.embedding_model)
-        vector_memory._ollama_manager = _ollama_mgr
-        # Wire factory FIRST so lazy rebind works even if ensure_running() fails now
-        # but Ollama becomes available later (e.g., container started slowly).
-        _embed_url = cfg.memory.embedding_url
-        _embed_model = cfg.memory.embedding_model
-        vector_memory.embed_fn_factory = lambda: make_sync_embed_fn(_embed_url, model=_embed_model)
-        if await _ollama_mgr.ensure_running():
-            vector_memory.embed_fn = make_sync_embed_fn(_embed_url, model=_embed_model)
-        else:
-            print(
-                "⚠️  Ollama not ready at boot — embeddings will lazily reconnect when available",
-                file=sys.stderr,
-            )
+    # Embeddings are always-on: wire the factory; bind embed_fn when the model
+    # is already present. Deliberately NO download kick here — `kirocrew run`
+    # is a one-shot CLI and must not start a 610MB download it will abandon at
+    # exit; the long-lived gateway owns the background download.
+    vector_memory.embed_fn_factory = make_sync_embed_fn
+    if model_file_present():
+        vector_memory.embed_fn = make_sync_embed_fn()
+    else:
+        print(
+            "Embedding model not downloaded yet — keyword search for this run "
+            "(the gateway downloads it in the background)",
+            file=sys.stderr,
+        )
     memory.vector_store = vector_memory
 
     conv_log = ConversationLog()

@@ -254,54 +254,56 @@ def test_untrusted_ssh_host_stays_strict_under_amazon(amazon_ctx) -> None:
 
 
 # ── embeddings (point 2) ──
+#
+# Since the in-process embeddings landed (vendored llama.cpp, always-on) the
+# core no longer routes embed requests over HTTP: the async EmbeddingClient +
+# SigV4 signing were deleted, and the EmbeddingSource endpoint_url/sign_request
+# slots are a dormant seam. The active companion swap path is now
+# embeddings.register_embedding_backend — asserted below. The amazon overlay's
+# EmbeddingSource stays composable (registry_model still resolves).
 
 
-def test_embedding_client_uses_amazon_model_and_endpoint(amazon_ctx) -> None:
-    client = embeddings.EmbeddingClient()
-    assert client._model == _AMZN_EMBED_MODEL
-    # The amazon endpoint replaced the default localhost URL.
-    assert client._url == _AMZN_EMBED_ENDPOINT.rstrip("/")
+def test_embedding_source_registry_model_resolves(amazon_ctx) -> None:
+    """The context's EmbeddingSource still composes and resolves the model id."""
+    assert current_context().embeddings.registry_model() == _AMZN_EMBED_MODEL
 
 
-def test_embedding_explicit_model_still_wins(amazon_ctx) -> None:
-    """A caller-pinned model is NOT overridden by the context source."""
-    client = embeddings.EmbeddingClient(model="pinned:1.0", allow_remote=True)
-    assert client._model == "pinned:1.0"
+def test_embedding_backend_swap_seam(amazon_ctx) -> None:
+    """A companion swaps runtimes via register_embedding_backend: the shared
+    embedder is constructed through the registered factory and its model_id
+    names the (incomparable) vector space."""
 
+    class _AmazonBackend(embeddings.EmbeddingBackend):
+        @property
+        def model_id(self) -> str:
+            return _AMZN_EMBED_MODEL
 
-def test_embedding_model_endpoint_resolution_is_atomic(monkeypatch) -> None:
-    """If endpoint_url() raises after registry_model() returns an edition model,
-    the resolver must NOT commit the edition model alone — that would point an
-    amazon model at the local Ollama default endpoint (silent embed failures).
-    Both fields land together or neither does."""
+        @property
+        def dim(self) -> int:
+            return 4
 
-    class _HalfBrokenSource:
-        def registry_model(self) -> str:
-            return "amazon-internal-embed:1.0"
+        def is_ready(self) -> bool:
+            return True
 
-        def endpoint_url(self):
-            raise RuntimeError("endpoint lookup failed mid-resolution")
+        def embed(self, text: str):
+            return [0.0, 1.0, 2.0, 3.0]
 
-    class _Ctx:
-        embeddings = _HalfBrokenSource()
+        def embed_batch(self, texts):
+            return [[0.0, 1.0, 2.0, 3.0] for _ in texts]
 
-    monkeypatch.setattr(embeddings, "current_context", lambda: _Ctx())
-    model, endpoint = embeddings.EmbeddingClient._resolve_model_endpoint(None)
-    # The partial edition model must be rolled back to the local default …
-    assert model == embeddings._OLLAMA_MODEL
-    # … and no endpoint leaks, so __init__ keeps the localhost Ollama URL.
-    assert endpoint is None
+        def close(self) -> None:
+            pass
 
-
-def test_embedding_context_signer_is_used(amazon_ctx) -> None:
-    """The embed client signs via the amazon source's sign_request."""
-    client = embeddings.EmbeddingClient()
-    signed = client._context_sign(
-        "POST", "https://embed.internal.amazon.dev/api/embed", {"Content-Type": "application/json"}, b"{}"
-    )
-    assert signed is not None
-    assert "Authorization" in signed
-    assert signed["Authorization"].startswith("AWS4-HMAC-SHA256")
+    embeddings.register_embedding_backend(_AmazonBackend)
+    embeddings.reset_shared_embedder()
+    try:
+        emb = embeddings.get_shared_embedder()
+        assert isinstance(emb, _AmazonBackend)
+        assert emb.model_id == _AMZN_EMBED_MODEL
+        assert emb.embed("x") == [0.0, 1.0, 2.0, 3.0]
+    finally:
+        embeddings.register_embedding_backend(None)
+        embeddings.reset_shared_embedder()
 
 
 # ── credentials (point 6) ──

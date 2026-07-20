@@ -77,14 +77,42 @@ Common Python lint issues:
 - Missing type annotations (mypy) — add them
 - Variable naming (flake8 N806) — use lowercase in functions
 
-### Vector memory issues
+### Embedding model download failed
 
-- "Ollama not found": click "Enable Vector Memory" on the dashboard to install,
-  or install Ollama from https://ollama.com
-- "Model not loaded": pull the embedding model with
-  `ollama pull qwen3-embedding:0.6b`
-- Docker fallback: if your platform's glibc < 2.27, set
-  `memory.embedding_runtime` to `docker` and Ollama runs in a container
+The embedding model (~610MB) downloads in the background over plain HTTPS
+from the KiroCrew CDN (sha256-verified) on gateway startup. Failed downloads
+retry automatically with exponential backoff (up to 6 attempts), and again on
+every gateway start. If it keeps failing:
+
+- Run `kirocrew doctor` — it probes the resolved model URL and reports
+  reachability
+- Check outbound HTTPS connectivity (no git or cloud SDK is needed)
+- Mirrored/airgapped hosts: point `KIROCREW_EMBED_MODEL_URL` (or the
+  `memory.embed_model_url` config knob) at a mirror hosting the GGUF — the
+  sha256 pin still verifies whatever is downloaded
+- Retry via the dashboard Overview → Memory tab → Enable/Retry button (it
+  kicks the download in the background and shows progress) — or do nothing;
+  it retries automatically on the next gateway start
+- Migrating from an Ollama-era install? The download is usually skipped
+  entirely: KiroCrew finds the identical model in the local Ollama blob
+  store (`~/.ollama/models`) and copies it (sha256-verified) instead of
+  re-downloading
+
+### Embeddings not working
+
+- Run `kirocrew doctor` — it checks the bundled embedding runtime and whether
+  the model file is downloaded (embeddings themselves are always-on)
+- If `KIROCREW_SKIP_MODEL_DOWNLOAD=1` is set, the model never downloads —
+  unset it or download once from a machine where it isn't set
+- While the model is absent, memory falls back to keyword search — this is
+  expected, not an error; semantic search resumes once the model is ready
+
+### High memory usage with embeddings
+
+~700MB RSS is expected while the embedding model is loaded — it is shared by
+vector memory and the Knowledge Library. The model loads lazily in the
+background on first use and stays resident afterwards; embeddings are
+always-on and cannot be disabled.
 
 ## Log Levels
 

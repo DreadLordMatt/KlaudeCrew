@@ -1778,6 +1778,9 @@ class TestRunMethod:
 
         # Mock all init methods
         orch._init_services = MagicMock()
+        # _init_services is mocked so vector_memory never gets created — mock
+        # the default-on embeddings wiring too (it dereferences vector_memory).
+        orch._start_embeddings = AsyncMock()
         orch._init_cron = AsyncMock()
         orch._init_heartbeat = AsyncMock()
         orch._init_mcp_discovery = MagicMock()
@@ -1818,6 +1821,7 @@ class TestRunMethod:
         orch = _make_orchestrator(no_dashboard=True)
 
         orch._init_services = MagicMock()
+        orch._start_embeddings = AsyncMock()
         orch._init_cron = AsyncMock()
         orch._init_heartbeat = AsyncMock()
         orch._init_mcp_discovery = MagicMock()
@@ -2593,25 +2597,45 @@ class TestTaskRunnerApproval:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Tests: _start_ollama
+# Tests: _start_embeddings
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestStartOllama:
-    """Ollama embedding server startup."""
+class TestStartEmbeddings:
+    """In-process embedding wiring + background model download kick."""
 
     @pytest.mark.asyncio
-    async def test_ollama_success(self):
+    async def test_model_present_binds_embed_fn_immediately(self):
         orch = _make_orchestrator()
-        orch.vector_memory = MagicMock()
-        with patch("kiro_crew.slack.gateway.OllamaManager") as mock_mgr:
-            mock_inst = MagicMock()
-            mock_inst.ensure_running = AsyncMock(return_value=True)
-            mock_mgr.return_value = mock_inst
-            with patch("kiro_crew.slack.gateway.make_sync_embed_fn", return_value=lambda x: x):
-                await orch._start_ollama()
-        assert orch._ollama_manager is not None
-        assert orch.vector_memory.embed_fn is not None
+        orch.vector_memory = MagicMock(embed_fn=None, embed_fn_factory=None)
+        fake_embed_fn = lambda text: [0.1]  # noqa: E731
+        with patch("kiro_crew.slack.gateway.model_file_present", return_value=True), \
+             patch("kiro_crew.slack.gateway.make_sync_embed_fn",
+                   return_value=fake_embed_fn) as mock_make, \
+             patch("kiro_crew.slack.gateway.start_background_model_download",
+                   return_value=None) as mock_start:
+            await orch._start_embeddings()
+        # Factory wired unconditionally (lazy rebind), fn bound immediately.
+        assert orch.vector_memory.embed_fn_factory is mock_make
+        assert orch.vector_memory.embed_fn is fake_embed_fn
+        mock_start.assert_called_once_with()
+        assert orch._model_download_task is None
+
+    @pytest.mark.asyncio
+    async def test_model_absent_defers_embed_fn_and_kicks_download(self):
+        orch = _make_orchestrator()
+        orch.vector_memory = MagicMock(embed_fn=None, embed_fn_factory=None)
+        fake_task = MagicMock()
+        with patch("kiro_crew.slack.gateway.model_file_present", return_value=False), \
+             patch("kiro_crew.slack.gateway.start_background_model_download",
+                   return_value=fake_task) as mock_start:
+            await orch._start_embeddings()
+        # embed_fn stays unbound (lazy rebind picks it up once the model lands)
+        # but the factory is wired and the background download task is stored.
+        assert orch.vector_memory.embed_fn is None
+        assert orch.vector_memory.embed_fn_factory is not None
+        mock_start.assert_called_once_with()
+        assert orch._model_download_task is fake_task
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3374,10 +3398,10 @@ class TestRunSignalAndBgSession:
         # branch (otherwise it races on _local_only/_dashboard_port set by the
         # mocked _init_dashboard).
         orch = _make_orchestrator(no_dashboard=True)
-        orch._cfg.memory.embedding_provider = "ollama"
+        orch._cfg.memory.embedding_provider = "llama_cpp"
 
         orch._init_services = MagicMock()
-        orch._start_ollama = AsyncMock()
+        orch._start_embeddings = AsyncMock()
         orch._init_cron = AsyncMock()
         orch._init_heartbeat = AsyncMock()
         orch._init_mcp_discovery = MagicMock()
@@ -3410,7 +3434,7 @@ class TestRunSignalAndBgSession:
         finally:
             pass
 
-        orch._start_ollama.assert_awaited_once()
+        orch._start_embeddings.assert_awaited_once()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3427,7 +3451,7 @@ class TestBgSessionDashboardBranch:
         orch = _make_orchestrator(no_dashboard=False, no_open=True)
 
         orch._init_services = MagicMock()
-        orch._start_ollama = AsyncMock()
+        orch._start_embeddings = AsyncMock()
         orch._init_cron = AsyncMock()
         orch._init_heartbeat = AsyncMock()
         orch._init_mcp_discovery = MagicMock()

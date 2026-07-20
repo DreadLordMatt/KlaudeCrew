@@ -28,7 +28,7 @@ kirocrew gateway              # open http://localhost:5476
 
 > **Windows is supported natively** (via `kiro_crew.platform_compat`), alongside macOS and Linux. Note the **OS-level sandbox** is POSIX-only — it relies on Linux namespaces or macOS Seatbelt — so on Windows that isolation layer is unavailable; the core gateway, chat, cron, and dashboard all work. See [WINDOWS_INSTALL.md](WINDOWS_INSTALL.md) for per-feature status.
 >
-> **Vector memory** uses Ollama for embeddings. Install via `brew install ollama` (recommended on all platforms). Markdown memory works without Ollama.
+> **Vector memory** embeddings run in-process via a bundled llama-cpp-python runtime — nothing to install. The embedding model (~610MB) downloads automatically in the background on first gateway start; memory uses keyword search until it lands.
 >
 > **Node.js**: Standardized on Node 16 via nvm for GLIBC compatibility across all platforms. Vite 5 supports Node 16+.
 
@@ -546,7 +546,7 @@ src/kiro_crew/
 ├── cron.py              # scheduled job service (silent mode, per-cron approval)
 ├── transcribe.py        # voice memo STT (whisper or AWS Transcribe Streaming)
 ├── voice_reply.py       # voice reply synthesis
-├── embeddings.py        # embedding provider with LRU cache
+├── embeddings.py        # in-process embedding runtime (EmbeddingBackend) + background model download, LRU cache
 ├── validation.py        # input validation for cron, config, user actions
 ├── mcp_core.py          # MCP server for spawn, learn, task, wait, hook, send_message, file_send tools
 ├── mcp_cron.py          # MCP server for cron tools

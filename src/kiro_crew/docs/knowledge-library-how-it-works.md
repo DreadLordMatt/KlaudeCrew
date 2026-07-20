@@ -71,7 +71,7 @@ Every entity-in-chunk creates a `mention` record linking the item (chunk) to the
 
 ## 4. Search & Retrieval
 
-### Without Embeddings (Current)
+### Without Embeddings (Fallback)
 
 Two retrieval paths, fused with RRF (Reciprocal Rank Fusion):
 
@@ -105,14 +105,16 @@ Two retrieval paths, fused with RRF (Reciprocal Rank Fusion):
 
 Results whose source is missing or unmapped degrade cleanly — the extra lines are simply absent.
 
-### With Embeddings (Optional, Future)
+### With Embeddings (Default)
 
-If an embedding model is available:
+Embeddings are available by default (in-process, shared with vector memory —
+see `memory.embedding_provider`). When the embedding model is present:
 - Chunks get vector embeddings stored in the `embedding` column
 - Adds a third retrieval path: cosine similarity search
 - Three-way RRF fusion: keyword + graph + vector
 
-The system degrades gracefully — graph + FTS works without any embedding model.
+The system degrades gracefully — graph + FTS works without any embedding model
+(e.g. while the model is still downloading in the background).
 
 ## 5. Limitations & Future Improvements
 
@@ -153,7 +155,7 @@ The system degrades gracefully — graph + FTS works without any embedding model
 | **Cognee** | Shared names + entity resolution pass | Higher (merge pass) |
 | **Graphify** | AST edges for code + shared names for docs | Free for code, LLM for docs |
 
-## 8. Embedding Integration (Optional)
+## 8. Embedding Integration (Default-On)
 
 ### What Changes With Embeddings
 
@@ -172,43 +174,38 @@ Without embeddings, searching "how do we handle authentication" only finds chunk
 
 ### Configuration
 
-Embeddings are configured in `~/.kirocrew/config.json`:
+Embeddings share the vector-memory setting in `~/.kirocrew/config.json` —
+knowledge and memory use one embedding setup (and one loaded model):
 
 ```json
 {
-  "knowledge": {
-    "embeddings": {
-      "enabled": false,
-      "provider": "ollama",
-      "model": "nomic-embed-text",
-      "dimensions": 768
-    }
+  "memory": {
+    "embedding_provider": "llama_cpp"
   }
 }
 ```
-
-For the local Ollama provider, pull the model first:
-`ollama pull nomic-embed-text`.
 
 **Provider options:**
 
 | Provider | Model | Dimensions | Cost | Requires |
 |----------|-------|-----------|------|----------|
-| `ollama` | `nomic-embed-text` | 768 | Free (local) | Ollama running locally |
-| `ollama` | `mxbai-embed-large` | 1024 | Free (local) | Ollama running locally |
-| `none` | — | — | Free | Nothing (current default) |
+| `llama_cpp` *(default)* | `qwen3-embedding:0.6b` (in-process, bundled runtime) | 1024 | Free (local) | ~610MB model, auto-downloaded in background |
+| `none` | — | — | Free | Nothing |
+
+Existing items embedded before the in-process switch carry a stale embedding
+signature and are transparently re-embedded once by the signature-gated rebuild.
 
 ### Graceful Degradation
 
 The system works at three levels:
 
 ```
-Level 3: FTS5 + Graph + Vector  (best quality, requires embedding provider)
-Level 2: FTS5 + Graph           (good quality, current default, zero cost)
+Level 3: FTS5 + Graph + Vector  (best quality, default once the model is downloaded)
+Level 2: FTS5 + Graph           (good quality, while the model is absent/downloading)
 Level 1: FTS5 only              (basic, works even if extraction pool is down)
 ```
 
-If `embeddings.enabled = false` or the provider is unavailable:
+While the model is unavailable (still downloading, or not yet loaded):
 - Ingestion still works (embedding column stays NULL)
 - Search still works (skips vector path, uses FTS5 + graph only)
 - No errors, no degraded UX — just slightly less semantic recall

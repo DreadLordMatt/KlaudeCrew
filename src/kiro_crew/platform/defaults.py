@@ -2,7 +2,7 @@
 
 Each ``Default*`` adapter delegates to the existing module-level symbol it
 replaces (``agent._MANAGED_MCP_SERVERS``, ``sandbox._STRICT_DIRS``,
-``security.redact``, ``midway.*``, ``embeddings._OLLAMA_MODEL``, …) so the
+``security.redact``, ``midway.*``, ``embeddings._MODEL_ID``, …) so the
 standalone edition is behaviorally identical to today — the contract adds an
 indirection layer, not a behavior change.
 
@@ -129,21 +129,28 @@ class DefaultIdentityProvider:
 
 
 class DefaultEmbeddingSource:
-    """Public Ollama registry, unsigned local requests."""
+    """Bundled in-process model (vendored llama.cpp), unsigned local inference.
+
+    Since the in-process embeddings landed the core no longer routes embed
+    requests over HTTP, so ``endpoint_url``/``sign_request`` have no active
+    consumption site — the seam stays for contract stability (a companion can
+    still supply a remote/signed source and compose a custom
+    ``EmbeddingBackend`` via ``embeddings.register_embedding_backend``).
+    """
 
     def registry_model(self) -> str:
         from kiro_crew import embeddings  # circular import: embeddings imports platform
 
-        return embeddings._OLLAMA_MODEL
+        return embeddings._MODEL_ID
 
     def endpoint_url(self) -> Optional[str]:
-        # Public default uses the local Ollama daemon, not a remote endpoint.
+        # In-process runtime — no remote endpoint.
         return None
 
     def sign_request(
         self, method: str, url: str, headers: dict, body: "bytes | str"
     ) -> Optional[dict]:
-        # Unsigned: the local Ollama daemon needs no SigV4.
+        # Unsigned: in-process inference makes no HTTP requests.
         return None
 
 

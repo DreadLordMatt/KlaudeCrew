@@ -76,6 +76,7 @@ Set via `kirocrew config set sandbox.mode auto`.
     "language_code": "en-US"
   },
   "memory": {
+    "embedding_provider": "llama_cpp",
     "history_idle_hours": 3.0,
     "history_max_days": 365
   },
@@ -127,9 +128,8 @@ Set via `kirocrew config set sandbox.mode auto`.
 | `memory.history_idle_hours` | Hours idle before history consolidation | `3.0` |
 | `memory.history_max_days` | Days to keep history before pruning | `365` |
 | `memory.episodic_max_results` | Max episodic memories injected per session | `8` |
-| `memory.embedding_provider` | Vector embedding backend: `"none"` or `"ollama"` | `"none"` |
-| `memory.embedding_model` | Ollama model name for embeddings | `"qwen3-embedding:0.6b"` |
-| `memory.embedding_runtime` | How Ollama runs: `"native"` or `"docker"` (AL2 glibc fallback) | `"native"` |
+| `memory.embedding_provider` | Vector embedding backend — always-on, in-process via the bundled llama-cpp-python runtime. Every legacy value (including `"ollama"` and `"none"`) is coerced to `"llama_cpp"`; setting `"none"` no longer disables embeddings. The old `embedding_url` / `embedding_model` / `embedding_runtime` / `embedding_managed` / `embedding_auth` / `embedding_timeout_secs` / `allow_remote_embedding` keys are removed and ignored if present (`embedding_model` in particular is ignored — the model identity comes from the active backend) | `"llama_cpp"` |
+| `memory.embed_model_url` | Override HTTPS URL for the embedding-model GGUF download (mirrored/airgapped hosts). Empty uses the public KiroCrew CDN; the `KIROCREW_EMBED_MODEL_URL` env var wins over both. Downloads are sha256-verified regardless of source | `""` |
 | `skills.max_triggered` | Maximum skills loaded per message (≥1) | `3` |
 | `knowledge.auto_ingest_artifacts` | Auto-ingest content-bearing local artifacts into the Knowledge Library (searchable "Artifacts" source); kept in sync and removed when the artifact is deleted (see [Knowledge Library](knowledge-library-how-it-works.md)) | `true` |
 | `knowledge.auto_ingest_artifact_kinds` | Artifact kinds eligible for auto-ingest (`widget` excluded as UI/dashboards; `svg` excluded — no reader support) | `["markdown", "text", "html", "json"]` |
@@ -141,6 +141,8 @@ Set via `kirocrew config set sandbox.mode auto`.
 | `KIROCREW_HOME` | Override config/data directory | `~/.kirocrew` |
 | `KIROCREW_PORT` | Override dashboard port | `5476` |
 | `KIROCREW_PROJECT_DIR` | Override agent config/skills directory | Auto-detected |
+| `KIROCREW_SKIP_MODEL_DOWNLOAD` | Set to `1` to skip the background embedding-model download at gateway startup (tests/CI, air-gapped hosts) | unset |
+| `KIROCREW_EMBED_MODEL_URL` | Override HTTPS URL for the embedding-model GGUF (mirrors); wins over `memory.embed_model_url` and the CDN default | unset |
 | `KIROCREW_WORKSPACE` | Override workspace root directory | Platform default |
 
 ### Timezone
@@ -171,6 +173,7 @@ KIROCREW_OWNER_ID=UXXXXXXXX
 | `~/.kirocrew/skills/` | User skills |
 | `~/.kirocrew/crons.json` | Scheduled jobs |
 | `~/.kirocrew/lessons.jsonl` | Learned corrections |
+| `~/.kirocrew/models/` | Embedding model (downloaded in background at startup) |
 | `~/.kirocrew/history/` | Chat history (JSONL) |
 | `~/.kirocrew/workspace/memory/` | Memory files |
 | `~/.kirocrew/session_map.json` | Session resume mapping |

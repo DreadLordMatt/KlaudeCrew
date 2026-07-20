@@ -1660,7 +1660,7 @@ def _get_ppid(pid: int) -> int:
 # local_knowledge_search runs per LLM tool call in a long-lived MCP server.
 # Rebuilding KnowledgeStore every call re-runs the schema DDL, an orphan-cleanup
 # DELETE transaction, and a full SELECT of all entities/relations into the
-# in-memory graph; rebuilding the embedder re-runs Ollama's /api/tags probe
+# in-memory graph; rebuilding the embedder re-runs the model availability probe
 # (up to 3s when configured). We cache both, keyed on a signature of the DB
 # files (main + -wal, since WAL commits land in -wal) and config.json, so
 # out-of-band dashboard ingestion or config edits trigger a rebuild on the next
@@ -1693,7 +1693,7 @@ def _get_knowledge_search(db_path: Path, cfg_path: Path) -> tuple[Any, Any]:
 
     Rebuilds (and closes the prior connection) only when the DB/WAL/config
     signature changes; otherwise reuses the live store + embedder, avoiding the
-    per-call schema/migrate/graph-load and Ollama availability probe.
+    per-call schema/migrate/graph-load and embedder availability probe.
     """
     global _KNOWLEDGE_CACHE
     sig = _knowledge_db_signature(db_path, cfg_path)
@@ -4022,7 +4022,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         # Reuse a cached store + embedder across calls; rebuilt only when the
         # knowledge DB (or its -wal) or config.json changes (see
         # _get_knowledge_search). Avoids the per-call schema/migrate/graph-load
-        # and the Ollama availability probe.
+        # and the embedder availability probe.
         cfg_path = Path(config_dir()) / "config.json"
         store, embedder = _get_knowledge_search(db_path, cfg_path)
         embed_fn = embedder.embed if embedder and embedder.is_available() else None

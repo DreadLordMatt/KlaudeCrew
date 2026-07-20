@@ -11,7 +11,8 @@
     "**/*.egg-info/**",
     "**/defaults.json",
     "**/static/css/**",
-    "**/pages/scenes/**"
+    "**/pages/scenes/**",
+    "**/_vendor/**"
   ],
   "absolute": true,
   "gitignore": true
