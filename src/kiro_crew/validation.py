@@ -1198,6 +1198,19 @@ MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "artifact_folder_move": ARTIFACT_FOLDER_MOVE_SCHEMA,
     "artifact_folder_delete": ARTIFACT_FOLDER_DELETE_SCHEMA,
     "artifact_move": ARTIFACT_MOVE_SCHEMA,
+    # These tools validate their args internally via validate_tool_args(), but
+    # were absent from this registry — so the outer guard in
+    # call_tool_with_logging passed args through raw and the internal
+    # ValidationError propagated out of the stdio loop, killing the whole
+    # kirocrew-core server (same crash class as the delete_message fix).
+    # Registering them here routes the validation through the guarded outer
+    # step, which returns a clean "Error:" string instead.
+    "workflow_author": WORKFLOW_AUTHOR_SCHEMA,
+    "workflow_run": WORKFLOW_RUN_SCHEMA,
+    "workflow_status": WORKFLOW_RUN_ID_SCHEMA,
+    "workflow_result": WORKFLOW_RUN_ID_SCHEMA,
+    "workflow_cancel": WORKFLOW_RUN_ID_SCHEMA,
+    "workflow_rerun_subtree": WORKFLOW_RERUN_SCHEMA,
     "deploy_artifact": DEPLOY_ARTIFACT_SCHEMA,
 }
 
