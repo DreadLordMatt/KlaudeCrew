@@ -255,33 +255,132 @@ function ImgWithFallback({
 // are treated as math now; single $ is plain text.
 
 /**
- * Rehype plugin: strip dangerous HTML elements from the HAST tree.
- * Prevents XSS via raw HTML in markdown (iframe srcdoc, script, etc.)
- * while preserving safe structural elements authors expect.
+ * Rehype plugin: ALLOWLIST-based HTML sanitization of the HAST tree.
+ * Unknown/unrecognized tags are converted to escaped text (renders literally)
+ * rather than passed to React as elements -- prevents React error #290 crashes
+ * from bare XML tags like `<dynamoDBClient>` in agent output.
  */
-const DANGEROUS_TAGS = new Set([
-  'script', 'iframe', 'object', 'embed', 'applet', 'form',
-  'input', 'textarea', 'button', 'select', 'option',
-  'link', 'meta', 'base', 'noscript', 'foreignObject',
+const ALLOWED_TAGS = new Set([
+  // Block structure
+  'div', 'span', 'p', 'br', 'hr',
+  // Headings
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  // Lists
+  'ul', 'ol', 'li',
+  // Inline formatting
+  'strong', 'b', 'em', 'i', 'del', 's', 'u', 'mark', 'small',
+  'sup', 'sub', 'kbd', 'abbr', 'cite', 'q', 'var', 'samp',
+  // Code
+  'code', 'pre',
+  // Links & media
+  'a', 'img', 'picture', 'source', 'video', 'audio',
+  // Tables
+  'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption', 'colgroup', 'col',
+  // Semantic blocks
+  'blockquote', 'details', 'summary', 'figure', 'figcaption',
+  // Semantic HTML5 structure (remark-gfm emits <section> for footnotes)
+  'section', 'article', 'header', 'footer', 'nav', 'aside', 'time',
+  // Forms (only checkbox for GFM task lists -- further constrained below)
+  'input',
+  // Misc safe elements
+  'dl', 'dt', 'dd', 'ruby', 'rt', 'rp', 'wbr',
+  // SVG (inline diagrams)
+  'svg', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'text', 'g', 'defs', 'use',
+  'tspan', 'ellipse', 'lineargradient', 'radialgradient', 'stop', 'title', 'desc', 'clippath', 'marker',
+  // Math (rehypeKatex pipeline -- pass through rehypeRaw)
+  'math', 'inlinemath',
 ])
 const DANGEROUS_ATTR_RE = /^on/i  // onclick, onerror, onload, etc.
 const DANGEROUS_PROTOCOLS = ['javascript:', 'data:', 'vbscript:']
 const cleanUrl = (url: string) => url.replace(/[\x00-\x1f\x7f]/g, '').trim().toLowerCase()
 
+/** Elements that cannot have children per HTML spec (used by escapedNodeTree). */
+const VOID_ELEMENTS = new Set(['img', 'br', 'hr', 'input', 'source', 'wbr', 'col'])
+
+/** HAST element node shape (subset used by sanitize pipeline). */
+interface HastNode {
+  type: string
+  tagName?: string
+  value?: string
+  properties?: Record<string, unknown>
+  children?: HastNode[]
+}
+
+/** Tags never reconstructed — even as escaped text, faithful reconstruction of
+ * executable elements is a liability. They collapse to an [unsupported:] marker. */
+const UNSAFE_RECONSTRUCT_TAGS = new Set([
+  'script', 'style', 'iframe', 'object', 'embed', 'form', 'link', 'meta', 'base', 'noscript',
+])
+
+const textNode = (value: string): HastNode => ({ type: 'text', value })
+
+/** Convert a non-allowlisted element into a SAFE HAST element tree for display.
+ *
+ * frontend-security: no HTML string is ever materialized from untrusted content.
+ * The node's source form is represented as a `<span class="escaped-tag">` whose
+ * children are discrete TEXT fragments — the `<` / `>` delimiters live in their
+ * own text nodes, separate from the tag/attribute content — so no single string
+ * anywhere in the tree contains parseable markup, and React renders text nodes
+ * safely by construction. Filters retained from the sanitizer: `on*` handler
+ * attributes dropped, tag/attr names restricted to a safe charset, and
+ * dangerous-protocol attribute values (javascript:/data:/vbscript:) dropped.
+ */
+function escapedNodeTree(node: HastNode): HastNode {
+  const tag = (node.tagName ?? '').replace(/[^a-zA-Z0-9-]/g, '')
+  const wrap = (children: HastNode[]): HastNode => ({
+    type: 'element',
+    tagName: 'span',
+    properties: { className: ['escaped-tag'] },
+    children,
+  })
+  if (UNSAFE_RECONSTRUCT_TAGS.has(tag.toLowerCase())) {
+    return wrap([textNode(`[unsupported: ${tag}]`)])
+  }
+  const attrs = node.properties
+    ? Object.entries(node.properties)
+        .filter(([k]) => k !== 'className' && !/^on/i.test(k) && /^[a-zA-Z0-9_:-]+$/.test(k))
+        .filter(([, v]) => typeof v !== 'string' || !DANGEROUS_PROTOCOLS.some(p => cleanUrl(v).startsWith(p)))
+        .map(([k, v]) => (v === true ? k : `${k}="${String(v)}"`))
+        .join(' ')
+    : ''
+  const children: HastNode[] = [textNode('<'), textNode(attrs ? `${tag} ${attrs}` : tag), textNode('>')]
+  for (const c of node.children || []) {
+    if (c.type === 'text') children.push(textNode(c.value ?? ''))
+    else if (c.type === 'element') children.push(escapedNodeTree(c))
+  }
+  if (!VOID_ELEMENTS.has(tag)) {
+    children.push(textNode('</'), textNode(tag), textNode('>'))
+  }
+  return wrap(children)
+}
+
 function rehypeSanitize() {
-  return (tree: HastRoot) => {
-    const walk = (node: RootContent, parent: HastRoot | HastElement, index: number): number | void => {
+  return (tree: HastNode) => {
+    const walk = (node: HastNode, parent: HastNode, index: number) => {
+      // TS strict-null: HastNode.children is `HastNode[] | undefined`. Callers only
+      // recurse into nodes whose children array they are iterating, so this cannot
+      // happen for a well-formed HAST tree — guard defensively and move on.
+      if (!parent.children) return index + 1
       if (node.type === 'element') {
-        // Remove dangerous elements entirely
-        if (DANGEROUS_TAGS.has(node.tagName)) {
-          // Allow GFM task-list checkboxes (safe: disabled, no handlers)
-          if (node.tagName === 'input' && node.properties?.type === 'checkbox') {
+        const tagLower = (node.tagName || '').toLowerCase()
+
+        // Allowlist check: unknown tags become a safe element tree of text
+        // fragments (no HTML string is ever built from untrusted content)
+        if (!ALLOWED_TAGS.has(tagLower)) {
+          parent.children.splice(index, 1, escapedNodeTree(node))
+          return index + 1  // skip past the replacement (already safe)
+        }
+
+        // input: only allow GFM task-list checkboxes
+        if (tagLower === 'input') {
+          if (node.properties?.type === 'checkbox') {
             node.properties = { type: 'checkbox', checked: !!node.properties.checked, disabled: true }
           } else {
             parent.children.splice(index, 1)
-            return index  // re-check this index (shifted)
+            return index
           }
         }
+
         // Strip event handler attributes, dangerous protocol URLs, and srcdoc
         if (node.properties) {
           for (const [key, val] of Object.entries(node.properties)) {
@@ -301,16 +400,18 @@ function rehypeSanitize() {
           delete node.properties.srcdoc
         }
       }
-      if ('children' in node && node.children) {
+      if (node.children) {
         for (let i = 0; i < node.children.length; i++) {
           const result = walk(node.children[i], node, i)
           if (typeof result === 'number') i = result - 1  // re-check after splice
         }
       }
     }
-    for (let i = 0; i < tree.children.length; i++) {
-      const result = walk(tree.children[i], tree, i)
-      if (typeof result === 'number') i = result - 1
+    if (tree.children) {
+      for (let i = 0; i < tree.children.length; i++) {
+        const result = walk(tree.children[i], tree, i)
+        if (typeof result === 'number') i = result - 1
+      }
     }
   }
 }

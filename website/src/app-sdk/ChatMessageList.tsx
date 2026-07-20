@@ -15,6 +15,7 @@ import CollapsibleToolGroup from '../pages/chat/CollapsibleToolGroup'
 import TurnBlock from '../pages/chat/TurnBlock'
 import { renderMcpOAuthMessage } from '../pages/chat/McpOAuthBanner'
 import MarkdownRenderer from '../components/MarkdownRenderer'
+import MessageErrorBoundary from '../components/MessageErrorBoundary'
 import type { ChatMessage } from '../types'
 import type { TurnItem, DisplayItem } from '../pages/chat/types'
 
@@ -36,7 +37,7 @@ export interface ChatMessageListProps {
 // ── Stable helpers (outside component) ──
 
 function renderUserContent(content: string, _meta: Record<string, unknown> | undefined): React.ReactNode {
-  return <MarkdownRenderer content={content} />
+  return <MessageErrorBoundary rawContent={content}><MarkdownRenderer content={content} /></MessageErrorBoundary>
 }
 
 const GROUPABLE = new Set(['thinking', 'permission'])
@@ -223,7 +224,7 @@ const ChatMessageList = memo(function ChatMessageList({
         <>
           {cronLabel && <span className="text-muted text-[11px] font-medium px-1 mb-0.5"><Clock size={11} className="inline mr-0.5" />{cronLabel}</span>}
           <div className="msg-content px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap rounded-lg bg-warning-subtle text-fg border border-warning/30 rounded-bl-[4px] overflow-hidden min-w-0" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
-            <MarkdownRenderer content={cleanContent} />
+            <MessageErrorBoundary rawContent={cleanContent}><MarkdownRenderer content={cleanContent} /></MessageErrorBoundary>
           </div>
         </>
       )

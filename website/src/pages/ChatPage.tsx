@@ -84,6 +84,7 @@ import { useVoiceInput, voiceInputSupported } from '../hooks/useVoiceInput'
 import VoiceDisabledModal from '../components/VoiceDisabledModal'
 import { ChatFooter, AssistantMessage, UserMessage } from './chat'
 import MarkdownRenderer from '../components/MarkdownRenderer'
+import MessageErrorBoundary from '../components/MessageErrorBoundary'
 import TypewriterText from '../components/TypewriterText'
 import { useChatNavigation } from '../hooks/useChatNavigation'
 import SubagentProgressBar from './chat/SubagentProgressBar'
@@ -218,6 +219,17 @@ function KnowledgeBubbleChip({ knowledge }: { knowledge: { items: number; tokens
 }
 
 export function renderUserContent(content: string, meta: Record<string, unknown> | undefined, onFileOpen: (path: string) => void) {
+  // Per-message containment (React #290 defense-in-depth): a render crash in a
+  // user/inject bubble must degrade to a per-message fallback, not unwind to
+  // the root boundary and blank the whole dashboard.
+  return (
+    <MessageErrorBoundary rawContent={content}>
+      {renderUserContentInner(content, meta, onFileOpen)}
+    </MessageErrorBoundary>
+  )
+}
+
+function renderUserContentInner(content: string, meta: Record<string, unknown> | undefined, onFileOpen: (path: string) => void) {
   const pastes = (meta?.pastes as PasteBlock[] | undefined) || []
   const knowledge = meta?.knowledge as { items: number; tokens: number; titles: string[]; content?: { title: string; text: string }[] } | undefined
 
@@ -2547,7 +2559,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
                 : m.content
               return <>
                 {cronLabel && <span className="text-muted text-[11px] font-medium px-1 mb-0.5"><Clock className="lucide-inline" /> {cronLabel}</span>}
-                <div className="msg-content px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap rounded-lg bg-warning-subtle text-fg border border-warning/30 rounded-bl-[4px] overflow-hidden min-w-0" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}><MarkdownRenderer content={cleanContent} /></div>
+                <div className="msg-content px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap rounded-lg bg-warning-subtle text-fg border border-warning/30 rounded-bl-[4px] overflow-hidden min-w-0" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}><MessageErrorBoundary rawContent={cleanContent}><MarkdownRenderer content={cleanContent} /></MessageErrorBoundary></div>
                 {chatConfig.showTimestamps && msgTime && <span className="text-muted text-[12px] font-mono px-1">{msgTime}</span>}
               </>
             })()
