@@ -112,13 +112,26 @@ _GATEWAY_INIT_ID = "mcp-gateway-init-0"
 # :meth:`Backend._route_backend_line` and never delivered to a stub.
 HEARTBEAT_PING_ID = 0x6D63_6862  # 1835100258 ("mchb")
 
-# An in-flight request outstanding longer than this is treated as a wedged
-# backend (process alive, ``returncode`` still None, but a stub is blocked on
-# a response that will never arrive). Deliberately generous: the cr-guide
-# over-reaping regression (breaker/heartbeat docs, MCPool 0.2.7) showed that
-# an aggressive timeout recycles healthy-but-slow backends. Only genuinely
-# pathological calls run past five minutes. Tunable by the gatewayd loop.
+# An in-flight request is considered *potentially* wedged if outstanding longer
+# than this. However, shared backends (kirocrew-core) host legitimately long
+# tools: ``wait`` (60-1800s) and ``spawn_sub_agents`` (blocking). A backend is
+# only recycled when BOTH the oldest pending request exceeds this age AND the
+# backend has not responded to a heartbeat ping within PING_STALE_SECS — a
+# backend that answers pings is slow, not wedged.
+#
+# Previously (pre-2026-07-19), exceeding this threshold alone caused immediate
+# recycle, which killed an 18-refcount kirocrew-core backend with fresh pings.
 HEARTBEAT_TIMEOUT_SECS = 300.0
+
+# A backend's ping response is considered stale if no ping response has arrived
+# within 2.5x the gatewayd heartbeat sweep interval (60s). This ensures at
+# least 2 full sweep cycles pass before concluding the backend is unresponsive.
+PING_STALE_SECS = 150.0
+
+# Absolute ceiling: recycle regardless of ping freshness. Protects against a
+# pathological case where the tool itself is stuck but the MCP server's read
+# loop still services ping requests. Set to wait_max (1800s) + 5-min margin.
+HARD_WEDGE_CEILING_SECS = 2100.0
 
 # Upper bound on a single stub's pending-delivery inbox. Backend->stub frames
 # are enqueued by the stdout pump without awaiting the stub's socket drain, so
@@ -316,6 +329,12 @@ class Backend:
     _stderr_task: Optional[asyncio.Task[None]] = None
     # Quarantine: no new stubs may attach; kill when refcount drains to 0.
     quarantined: bool = False
+    # Ping-gated wedge detection: updated each time the heartbeat ping response
+    # is swallowed in _route_backend_line. Initialized to creation time so a
+    # cold-start backend isn't immediately considered stale.
+    _last_ping_response_mono: float = 0.0
+    # Track request ids already warned as slow-but-responsive to avoid log spam.
+    _warned_slow_ids: set = field(default_factory=set)
     # Best-effort latency-metric emits, fired off the stdout-pump hot path so a
     # slow/NFS metrics volume cannot add head-of-line latency to frame routing.
     # Tracked (with a discard done-callback) so a task is not GC'd before it
@@ -812,6 +831,7 @@ class Backend:
             # ping is sent under HEARTBEAT_PING_ID and its reply (result or
             # error) is consumed here, never routed to a stub.
             if _is_heartbeat_id(msg_id):
+                self._last_ping_response_mono = time.monotonic()
                 return
             # Response to a previously-forwarded request.
             pending = self._pending_requests.pop(str(msg_id), None)
@@ -1174,22 +1194,18 @@ class Backend:
           the idle-sweep owns eviction of these on its own timer. Recycling
           idle-but-healthy backends here would re-introduce the cr-guide
           over-reaping regression (MCPool 0.2.7).
-        * ``"wedged"`` -- a stub is attached AND an in-flight request has been
-          outstanding longer than :data:`HEARTBEAT_TIMEOUT_SECS`. The stub is
-          blocked on a response that will never come, so the backend is marked
-          dead and the waiting stub(s) errored, freeing them to reconnect onto
-          a fresh backend.
+        * ``"wedged"`` -- a stub is attached AND BOTH: (1) an in-flight request
+          exceeds :data:`HEARTBEAT_TIMEOUT_SECS`, AND (2) no ping response has
+          arrived within :data:`PING_STALE_SECS` (backend unresponsive). OR the
+          hard ceiling :data:`HARD_WEDGE_CEILING_SECS` is exceeded regardless
+          of ping freshness. Shared backends (kirocrew-core) host long tools
+          like ``wait`` (60-1800s) and ``spawn_sub_agents``; recycling them on
+          request age alone kills healthy-but-slow backends.
         * ``"alive"``  -- everything else. A best-effort JSON-RPC ``ping`` is
           written under the reserved :data:`HEARTBEAT_PING_ID`; the response is
           swallowed in :meth:`_route_backend_line`. A failed ping write
           (broken pipe) is itself a liveness failure and downgrades to
           ``"gone"``.
-
-        Wedge detection keys off per-request age (``_PendingRequest.t_start_ms``,
-        monotonic milliseconds) rather than a single last-activity timestamp, so
-        a backend that keeps answering pings while one specific call hangs is
-        still caught. ``now`` is a monotonic-seconds clock supplied by the
-        caller so the sweep loop and tests share one time source.
         """
         # 1. Process already reaped by the OS.
         if self.process.returncode is not None:
@@ -1202,27 +1218,69 @@ class Backend:
         if self.refcount == 0:
             return "idle"
 
-        # 3. Wedged: an in-flight request outstanding past the timeout.
+        # 3. Wedge detection: two-condition rule + hard ceiling.
         oldest_age = 0.0
-        for pending in self._pending_requests.values():
+        oldest_fid: Optional[str] = None
+        oldest_pending: Optional[_PendingRequest] = None
+        for fid, pending in self._pending_requests.items():
             age = now - (pending.t_start_ms / 1000.0)
             if age > oldest_age:
                 oldest_age = age
-        if self._pending_requests and oldest_age >= HEARTBEAT_TIMEOUT_SECS:
-            self._dead_reason = (
-                f"wedged: in-flight request outstanding {oldest_age:.1f}s "
-                f">= {HEARTBEAT_TIMEOUT_SECS:.0f}s timeout"
-            )
-            logger.warning(
-                "backend pid=%s pool=%s %s; recycling",
-                self.pid, self.pool_key.human_readable(), self._dead_reason,
-            )
-            await self._broadcast_backend_gone(self._dead_reason)
-            return "wedged"
+                oldest_fid = fid
+                oldest_pending = pending
 
-        # 4. Alive: probe with a reserved-id ping. A broken pipe on the write
-        #    is a definitive liveness failure that the stdout-EOF path would
-        #    only notice once the kernel tears the pipe down.
+        if self._pending_requests and oldest_age >= HEARTBEAT_TIMEOUT_SECS:
+            ping_age = now - self._last_ping_response_mono
+            ping_stale = ping_age >= PING_STALE_SECS
+
+            # Hard ceiling: recycle regardless of ping freshness (pathological)
+            if oldest_age >= HARD_WEDGE_CEILING_SECS:
+                self._dead_reason = (
+                    f"wedged: in-flight request outstanding {oldest_age:.1f}s "
+                    f">= {HARD_WEDGE_CEILING_SECS:.0f}s hard ceiling "
+                    f"(ping_age={ping_age:.1f}s)"
+                )
+                logger.warning(
+                    "backend pid=%s pool=%s %s; recycling",
+                    self.pid, self.pool_key.human_readable(), self._dead_reason,
+                )
+                await self._broadcast_backend_gone(self._dead_reason)
+                return "wedged"
+
+            # Two-condition: old request + stale ping -> wedged
+            if ping_stale:
+                self._dead_reason = (
+                    f"wedged: in-flight request outstanding {oldest_age:.1f}s "
+                    f">= {HEARTBEAT_TIMEOUT_SECS:.0f}s timeout AND "
+                    f"ping stale {ping_age:.1f}s >= {PING_STALE_SECS:.0f}s"
+                )
+                logger.warning(
+                    "backend pid=%s pool=%s %s; recycling",
+                    self.pid, self.pool_key.human_readable(), self._dead_reason,
+                )
+                await self._broadcast_backend_gone(self._dead_reason)
+                return "wedged"
+
+            # Old request + fresh pings: backend responsive but tool slow.
+            # Log once per request id, don't recycle.
+            if oldest_fid and oldest_fid not in self._warned_slow_ids:
+                self._warned_slow_ids.add(oldest_fid)
+                logger.warning(
+                    "slow in-flight request %.1fs (method=%s, stub=%s, fid=%s) "
+                    "but backend pid=%s responsive (ping_age=%.1fs); not recycling",
+                    oldest_age,
+                    oldest_pending.method if oldest_pending else "?",
+                    oldest_pending.stub_uuid if oldest_pending else "?",
+                    oldest_fid,
+                    self.pid,
+                    ping_age,
+                )
+
+        # Prune warned ids for completed requests
+        if self._warned_slow_ids:
+            self._warned_slow_ids &= set(self._pending_requests.keys())
+
+        # 4. Alive: probe with a reserved-id ping.
         try:
             await _write_json_line(
                 self.stdin,
@@ -1482,6 +1540,7 @@ async def spawn_backend(
         created_at=now,
         last_used_at=now,
     )
+    backend._last_ping_response_mono = now  # cold-start: not insta-stale
     backend._stderr_task = stderr_task
     return backend
 

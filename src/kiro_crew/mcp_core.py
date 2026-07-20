@@ -47,7 +47,12 @@ from kiro_crew.knowledge.dedup import dedup_sweep
 from kiro_crew.knowledge.embedder import create_embedder_from_config
 from kiro_crew.knowledge.retrieval import HybridRetriever
 from kiro_crew.knowledge.store import KnowledgeStore
-from kiro_crew.mcp_shared import call_tool_with_logging, run_mcp_stdio_loop
+from kiro_crew.mcp_shared import (
+    ToolCancelled,
+    call_tool_with_logging,
+    is_tool_cancelled,
+    run_mcp_stdio_loop,
+)
 from kiro_crew.platform import redact_via_context as redact
 from kiro_crew.security import (
     BINARY_MIME_ALLOWLIST,
@@ -2784,6 +2789,9 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             remaining = deadline - now
             if remaining <= 0:
                 break
+            # Check for cancellation from notifications/cancelled handler
+            if is_tool_cancelled():
+                raise ToolCancelled(f"wait cancelled after {seconds - remaining:.0f}s")
             if now >= _next_ping:
                 try:
                     _post("/api/session-keepalive", {})

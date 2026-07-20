@@ -7,19 +7,50 @@ import json
 import logging
 import os
 import platform
+import select
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
+from kiro_crew import platform_compat
 from kiro_crew.config.loader import KiroCrewConfig, config_dir
 from kiro_crew.dashboard.origin import parse_dashboard_url
 from kiro_crew.sel import sel
+from kiro_crew.validation import (
+    ValidationError,
+    build_tool_response,
+    validate_jsonrpc_request,
+    validate_jsonrpc_response,
+)
 
 logger = logging.getLogger(__name__)
+
+# Thread-local cancel event set by run_mcp_stdio_loop worker threads.
+# Cooperative tools (wait, spawn_sub_agents) should call is_tool_cancelled()
+# in their polling loops.
+_thread_cancel_event: Optional[threading.Event] = None
+
+
+def is_tool_cancelled() -> bool:
+    """Return True if the current in-flight tool call has been cancelled.
+
+    Cooperative tools like ``wait`` should check this in their sleep loop
+    and exit early (raising ``ToolCancelled``) when True.
+    """
+    evt = _thread_cancel_event
+    return evt is not None and evt.is_set()
+
+
+class ToolCancelled(Exception):
+    """Raised by cooperative tools when ``is_tool_cancelled()`` returns True."""
+
+    pass
+
 
 # Module-level flag: set True once we detect Content-Length framing from client.
 _use_content_length = False
@@ -273,8 +304,6 @@ def respond(req_id: Any, result: Any, error: dict | None = None) -> None:
         resp["error"] = error
     else:
         resp["result"] = result
-    from kiro_crew.validation import ValidationError, validate_jsonrpc_response
-
     try:
         resp = validate_jsonrpc_response(resp)
     except ValidationError:
@@ -303,9 +332,6 @@ def call_tool_with_logging(
     downstream_service: str,
 ) -> str:
     """Validate args, call inner tool function, and log the invocation."""
-    from kiro_crew.sel import sel
-    from kiro_crew.validation import ValidationError
-
     try:
         args = validate_fn(name, raw_args)
     except ValidationError as e:
@@ -398,10 +424,164 @@ def run_mcp_stdio_loop(
     list_tools_fn: Callable[[], list[dict[str, Any]]],
     call_tool_fn: Callable[[str, dict[str, Any]], str],
 ) -> None:
-    """Generic MCP stdio server loop — reads JSON-RPC from stdin, writes to stdout."""
-    from kiro_crew.validation import ValidationError, build_tool_response, validate_jsonrpc_request
+    """Generic MCP stdio server loop — reads JSON-RPC from stdin, writes to stdout.
+
+    Tool calls run in a worker thread so the main read loop stays responsive to
+    ``notifications/cancelled`` messages from the gateway. When a cancel is
+    received for an in-flight request, the worker thread is interrupted via
+    a threading.Event that cooperative tools (``wait``, ``spawn_sub_agents``)
+    check periodically. The cancelled request emits no response (per MCP spec).
+
+    On Windows ``select.select`` cannot poll ``sys.stdin`` (it only accepts
+    sockets), so tool calls dispatch synchronously exactly as the pre-worker
+    loop did — no in-flight cancel/ping interleave there (POSIX-only feature).
+    """
+    # In-flight tool execution state: at most one at a time (sequential dispatch).
+    _current_req_id: Any = None
+    _cancel_event: Optional[threading.Event] = None
+    _worker_thread: Optional[threading.Thread] = None
+    _result_lock = threading.Lock()
+    _result_ready = threading.Event()
+    _result_box: list = []  # [response_payload] or [] if cancelled
+    _cancelled_ids: set = set()
+    _current_tool_name: str = ""
+    _worker_audited: list = [False]  # [bool], guarded by _result_lock
+
+    def _sel_audit(outcome: str, tool_name: str, req_id: Any) -> None:
+        """Emit a SEL audit event for a tool invocation outcome.
+
+        SEL failure must not break the response path, but a missed audit
+        record must be visible (security-controls guideline: callback
+        failures are logged, never bare pass)."""
+        try:
+            sel().log_tool_invocation(
+                session_key=os.environ.get("KIROCREW_SESSION_KEY", "mcp"),
+                source="mcp",
+                tool_name=tool_name,
+                tool_kind=server_name,
+                outcome=outcome,
+                request_id=str(req_id),
+            )
+        except Exception as sel_exc:
+            logger.warning(
+                "SEL audit failed for %s tool %s (request %s): %s",
+                outcome, tool_name, req_id, sel_exc,
+            )
+
+    def _run_tool(
+        req_id: Any, tool_name: str, tool_args: dict, cancel_evt: threading.Event
+    ) -> None:
+        """Worker thread: run tool, store result unless cancelled."""
+        global _thread_cancel_event
+        # Inject cancel event into thread-local so cooperative tools can check it
+        _thread_cancel_event = cancel_evt
+        try:
+            result_text = call_tool_fn(tool_name, tool_args)
+        except ToolCancelled:
+            # Tool cooperatively exited on cancel -- suppress response
+            logger.info("tool cancelled for request %s", req_id)
+            # SEL audit: cancelled tool invocations must emit audit events
+            _sel_audit("cancelled", tool_name, req_id)
+            _thread_cancel_event = None
+            _result_ready.set()
+            return
+        except Exception as exc:
+            result_text = f"Error: {exc}"
+            _tool_errored = True
+        else:
+            _tool_errored = False
+        finally:
+            _thread_cancel_event = None
+        # Audit decision is made atomically with the cancellation check, under
+        # the same lock that guards response delivery: exactly ONE audit event
+        # per request (a failed+late-cancel race must not emit two).
+        with _result_lock:
+            if not cancel_evt.is_set():
+                _result_box.append(build_tool_response(result_text))
+                if _tool_errored:
+                    # Exception escaped call_tool_fn (may bypass its internal
+                    # logging) -- audit the failure.
+                    _sel_audit("failed", tool_name, req_id)
+                    _worker_audited[0] = True
+            else:
+                # Late-cancel race: tool finished (or errored) but cancel
+                # arrived before delivery. From the client's perspective this
+                # invocation was cancelled.
+                _sel_audit("cancelled", tool_name, req_id)
+                _worker_audited[0] = True
+        _result_ready.set()
 
     while True:
+        # If a worker is running, poll for completion while also reading stdin
+        if _worker_thread is not None and _worker_thread.is_alive():
+            # Non-blocking stdin read with short timeout to interleave
+            readable, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if not readable:
+                if _result_ready.is_set():
+                    _worker_thread.join(timeout=1.0)
+                    _worker_thread = None
+                    with _result_lock:
+                        if _result_box and str(_current_req_id) not in _cancelled_ids:
+                            respond(_current_req_id, _result_box[0])
+                        elif _result_box and not _worker_audited[0]:
+                            # Boxed result dropped due to cancellation (cancel
+                            # arrived after the worker delivered) -- audit it.
+                            _sel_audit("cancelled", _current_tool_name, _current_req_id)
+                        _result_box.clear()
+                    _current_req_id = None
+                    _cancel_event = None
+                    _result_ready.clear()
+                continue
+            req = _read_message(sys.stdin)
+            if req is None:
+                # EOF: wait for worker then exit
+                if _worker_thread:
+                    _worker_thread.join(timeout=5.0)
+                break
+            # Process only cancel notifications while tool is running
+            try:
+                method, req_id, _params = validate_jsonrpc_request(req)
+            except ValidationError:
+                continue
+            if method == "notifications/cancelled":
+                params = req.get("params", {})
+                cancelled_rid = params.get("requestId")
+                if cancelled_rid is not None:
+                    _cancelled_ids.add(str(cancelled_rid))
+                    if str(cancelled_rid) == str(_current_req_id) and _cancel_event:
+                        _cancel_event.set()
+                        logger.info("cancel received for in-flight request %s", cancelled_rid)
+            # Answer gateway pings even while a tool is in-flight so the
+            # ping-gated wedge detector sees the backend as responsive.
+            elif method == "ping" and req_id is not None:
+                respond(req_id, {})
+            # Other messages while busy: queue for later? For now, drop gracefully.
+            # The MCP spec says servers SHOULD NOT receive new requests while one is
+            # in-flight in a sequential server. Notifications are fine to drop.
+            elif method == "tools/list" and req_id is not None:
+                excluded = _resolve_excluded_tools()
+                tools = list_tools_fn()
+                if excluded:
+                    tools = [t for t in tools if t.get("name") not in excluded]
+                respond(req_id, {"tools": tools})
+            continue
+
+        # Check if worker just finished
+        if _worker_thread is not None:
+            _worker_thread.join(timeout=0.1)
+            _worker_thread = None
+            with _result_lock:
+                if _result_box and str(_current_req_id) not in _cancelled_ids:
+                    respond(_current_req_id, _result_box[0])
+                elif _result_box and not _worker_audited[0]:
+                    # Boxed result dropped due to cancellation (cancel arrived
+                    # after the worker delivered) -- audit it.
+                    _sel_audit("cancelled", _current_tool_name, _current_req_id)
+                _result_box.clear()
+            _current_req_id = None
+            _cancel_event = None
+            _result_ready.clear()
+
         req = _read_message(sys.stdin)
         if req is None:
             break
@@ -422,12 +602,20 @@ def run_mcp_stdio_loop(
             )
         elif method == "notifications/initialized":
             pass
+        elif method == "notifications/cancelled":
+            # Cancel for a request that already completed -- ignore
+            params = req.get("params", {})
+            cancelled_rid = params.get("requestId")
+            if cancelled_rid is not None:
+                _cancelled_ids.add(str(cancelled_rid))
         elif method == "tools/list":
             excluded = _resolve_excluded_tools()
             tools = list_tools_fn()
             if excluded:
                 tools = [t for t in tools if t.get("name") not in excluded]
             respond(req_id, {"tools": tools})
+        elif method == "ping":
+            respond(req_id, {})
         elif method == "tools/call":
             params = req.get("params", {})
             tool_name = params.get("name", "")
@@ -452,8 +640,25 @@ def run_mcp_stdio_loop(
                         f"Error: tool '{tool_name}' is not available for this agent"
                     ),
                 )
-            else:
+            elif not platform_compat.IS_POSIX:
+                # Windows: select.select() cannot poll sys.stdin (WinError
+                # 10038), so no worker-thread interleave — dispatch the tool
+                # synchronously exactly as the pre-worker loop did.
                 result_text = call_tool_fn(tool_name, tool_args)
                 respond(req_id, build_tool_response(result_text))
+            else:
+                # Dispatch tool in worker thread so we can receive cancel notifications
+                _cancel_event = threading.Event()
+                _current_req_id = req_id
+                _current_tool_name = tool_name
+                _worker_audited[0] = False
+                _result_ready.clear()
+                _result_box.clear()
+                _worker_thread = threading.Thread(
+                    target=_run_tool,
+                    args=(req_id, tool_name, tool_args, _cancel_event),
+                    daemon=True,
+                )
+                _worker_thread.start()
         elif req_id is not None:
             respond(req_id, None, error={"code": -32601, "message": f"Unknown method: {method}"})
