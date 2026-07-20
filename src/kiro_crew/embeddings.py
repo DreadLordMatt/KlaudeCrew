@@ -329,7 +329,7 @@ class LlamaCppEmbedder(EmbeddingBackend):
                 # Not a failure — the background download may still be in flight.
                 return
             self._load_thread = threading.Thread(
-                target=self._load_model, name="mc-embed-load", daemon=True
+                target=self._load_model, name="kc-embed-load", daemon=True
             )
             self._load_thread.start()
 
@@ -502,7 +502,7 @@ async def _run_download_on_daemon_thread(fn: "Callable[[], tuple[bool, str]]") -
         finally:
             loop.call_soon_threadsafe(done.set)
 
-    threading.Thread(target=_worker, name="mc-model-download", daemon=True).start()
+    threading.Thread(target=_worker, name="kc-model-download", daemon=True).start()
     await done.wait()
     return result[0]
 
