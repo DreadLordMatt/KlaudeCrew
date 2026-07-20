@@ -42,7 +42,7 @@ boot holding the chosen adapter for every extension point, plus three carriers:
 | `security` | **concrete** | `PolicyAuthority()` (baseline only) | `PolicyAuthority(overlay=…)` ADD-only |
 | `slack_gate` | adapter | `DefaultSlackEnterpriseGate` (default-open) | fail-closed Amazon allowlist |
 | `identity` | adapter | `DefaultIdentityProvider` (`midway.py` stub) | Midway / MCS |
-| `embeddings` | adapter | `DefaultEmbeddingSource` (Ollama, unsigned) | internal source + SigV4 |
+| `embeddings` | adapter | `DefaultEmbeddingSource` (dormant seam — the public runtime is the bundled in-process llama-cpp model via `embeddings.register_embedding_backend`; `endpoint_url`/`sign_request` kept for contract stability) | internal source + SigV4 |
 | `mcp_tooling` | adapter | `DefaultMcpToolingProvider` (empty) | builder-mcp + AIM skills |
 | `registry` | adapter | `DefaultAppRegistryPolicy` (public-forge baseline) | internal git hosts |
 | `apps_loader` | adapter | `DefaultAppsLoader` (OSS builtins) | internal app sources (code-reviewer; team_manager/mimir follow-on) |
@@ -449,7 +449,13 @@ delegates to that same global. Wired sites:
   un-jailed (`exit 2`). The mode is re-normalized at the gate via `_normalize_jail`
   (so a programmatically-set off-spec value is handled like the load-time path);
   `--no-jail` is accepted on every jailed subparser. `cli_doctor` reports
-  `jail.available()` / `status_detail()`.
+  `jail.available()` / `status_detail()`. The host probes a companion backend
+  builds on — `sandbox.userns_available()` / `sandbox.is_wsl()` — are CACHED
+  and never block on a running event loop (`userns_available()` delegates to
+  the probe-cache machinery; a cold on-loop call defers to the background warm
+  and returns `False` with a transient classification). Boot code should call
+  `sandbox.prewarm_backend()` before companion composition so the cache is warm
+  by the time a jail backend probes it.
 
 ### Deferred / non-mapping sites
 
