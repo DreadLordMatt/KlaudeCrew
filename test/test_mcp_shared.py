@@ -237,7 +237,7 @@ class TestCallToolWithLoggingRedaction:
         def _inner(_name, _args):
             return "ok"
 
-        with patch("kiro_crew.sel.sel", return_value=_FakeSel()):
+        with patch("kiro_crew.mcp_shared.sel", return_value=_FakeSel()):
             call_tool_with_logging(
                 "artifact_post_comment",
                 {"slug": "doc", "text": f"leak {secret} here"},
