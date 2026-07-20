@@ -135,6 +135,17 @@ of failure.
      aggregate guarantee across many concurrent scopes. This is a true RSS cap (not virtual),
      so it does not trip on Node/V8's large virtual mappings; the kernel OOM-kills the scope on
      breach.
+   - `CPUWeight` (default **50**, from `cpu_weight`; systemd's default weight is 100) — the
+     **CPU fair-share** control, emitted only when the `cpu` controller is delegated. It is a
+     proportional share, never a hard throttle: agent scopes use 100% of an idle host but
+     yield to interactive work under CPU contention. A hard cap, `CPUQuota`, is available as
+     **opt-in only** via `max_cpu_percent` (e.g. `200` = 2 cores); it is off by default
+     because hard quotas slow legitimate builds — grok-build and OpenClaw likewise ship no
+     default CPU quota, relying on fair scheduling plus timeouts.
+
+   The RLIMIT preexec additionally writes `oom_score_adj=1000` on every spawned child
+   (inherited by its descendants), biasing the kernel OOM killer toward tool subprocesses so a
+   memory-ballooning command is killed *before* `memory.max` takes out the entire agent scope.
 
    The kernel enforces both at `fork()`/allocation time — no reaper race. `--scope` execs into
    the target (it does not fork a wrapper), so the gateway's PID tracking / `killpg` /

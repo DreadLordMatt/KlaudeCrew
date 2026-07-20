@@ -1677,6 +1677,13 @@ _CGROUP_DEFAULT_MAX_PROCESSES = 8192  # pids.max counts TASKS (threads), not pro
 # while the host is idle); 8192 still bounds fork bombs which spawn tens of
 # thousands of tasks near-instantly. Override via resource_limits.max_processes.
 
+# CPUWeight — proportional CPU share for agent scopes (systemd default is 100).
+# Setting 50 makes agent scopes yield to interactive work under CPU contention
+# while still using 100% of idle CPU — proportional share, never a hard throttle.
+# Both grok-build and OpenClaw ship no default CPU quota; fair-share weight is
+# the correct default for agent workloads that include legitimate builds.
+_CGROUP_DEFAULT_CPU_WEIGHT = 50
+
 # The memory.max default is HOST-PROPORTIONAL, not a flat cap: the agent
 # subprocess tree may occupy up to this fraction of physical RAM before the
 # kernel OOM-kills the scope. This is a PER-SCOPE ceiling (each spawn gets its
@@ -1761,18 +1768,55 @@ def _compute_cgroup_scope_probe() -> tuple[bool, str]:
     return (True, "ok")
 
 
-def _cgroup_limits_from_config() -> tuple[int, int]:
-    """Return ``(max_processes, max_memory_mb)`` for the cgroup scope.
+_CPU_DELEGATED: bool | None = None
+
+
+def _cpu_controller_delegated() -> bool:
+    """Return True when the ``cpu`` controller is delegated to our user slice.
+
+    CPUWeight / CPUQuota on a ``systemd-run --user`` scope are only enforced
+    when the cpu controller is delegated; emitting them without delegation is
+    a silent no-op at best and a warning at worst, so callers gate the CPU
+    properties on this check. Cached alongside the main probe (the environment
+    is process-stable). Failure to read → False (skip CPU properties, keep
+    pids/memory enforcement).
+    """
+    global _CPU_DELEGATED
+    if _CPU_DELEGATED is None:
+        try:
+            uid = os.getuid()
+            ctrl_path = f"/sys/fs/cgroup/user.slice/user-{uid}.slice/cgroup.controllers"
+            with open(ctrl_path, encoding="utf-8") as fh:
+                _CPU_DELEGATED = "cpu" in fh.read().split()
+        except OSError:
+            _CPU_DELEGATED = False
+    return _CPU_DELEGATED
+
+
+def _cgroup_limits_from_config() -> tuple[int, int, int, int]:
+    """Return ``(max_processes, max_memory_mb, cpu_weight, max_cpu_percent)``
+    for the cgroup scope.
 
     Reads the same ``resource_limits`` config block as apply_resource_limits;
     falls back to the module defaults. ``0`` (or junk) means "use default" for
     the cgroup ceiling — unlike the RLIMIT path, we never leave the cgroup DoS
     ceiling unset by default (that is the whole point of this control). The
     memory default is host-proportional (see :func:`_default_max_memory_mb`).
+
+    ``max_cpu_percent`` is the OPT-IN hard CPU quota (``CPUQuota``): ``0``
+    (the default) means "no quota property emitted at all" — hard CPU caps
+    slow legitimate builds, so unlike the other ceilings this one is off
+    unless an operator explicitly sets ``resource_limits.max_cpu_percent``.
     """
     max_procs = _CGROUP_DEFAULT_MAX_PROCESSES
     max_mem_mb = _default_max_memory_mb()
+    cpu_weight = _CGROUP_DEFAULT_CPU_WEIGHT
+    max_cpu_percent = 0  # opt-in: 0 = emit no CPUQuota
     try:
+        # circular import: sandbox is a low-level module imported by
+        # config/security consumers — importing kiro_crew.config.loader at
+        # module load would create an import cycle, so it stays function-level
+        # (same pattern as resource_limit_preexec below).
         from kiro_crew.config.loader import _raw_config
 
         rl = _raw_config().get("resource_limits")
@@ -1783,17 +1827,28 @@ def _cgroup_limits_from_config() -> tuple[int, int]:
             m = rl.get("max_memory_mb")
             if isinstance(m, (int, float)) and not isinstance(m, bool) and m > 0:
                 max_mem_mb = int(m)
+            w = rl.get("cpu_weight")
+            if isinstance(w, (int, float)) and not isinstance(w, bool) and 1 <= w <= 10000:
+                cpu_weight = int(w)
+            q = rl.get("max_cpu_percent")
+            if isinstance(q, (int, float)) and not isinstance(q, bool) and q > 0:
+                max_cpu_percent = int(q)
     except Exception:
         logger.debug("cgroup limits: config unavailable, using defaults")
-    return max_procs, max_mem_mb
+    return max_procs, max_mem_mb, cpu_weight, max_cpu_percent
 
 
 def cgroup_scope_argv(argv: list[str]) -> list[str]:
     """Wrap *argv* in a transient systemd --user --scope with cgroup v2 limits.
 
     Prepends ``systemd-run --user --scope`` with ``TasksMax`` (pids.max, the
-    fork-bomb ceiling) and ``MemoryMax`` + ``MemorySwapMax=0`` (memory.max, the
-    RSS balloon ceiling), so the spawned agent AND all its MCP-server/tool
+    fork-bomb ceiling), ``MemoryMax`` + ``MemorySwapMax=0`` (memory.max, the
+    RSS balloon ceiling), and — when the cpu controller is delegated —
+    ``CPUWeight`` (proportional fair-share: agents run full speed on an idle
+    host but yield to interactive work under contention; never a hard
+    throttle) plus an OPT-IN ``CPUQuota`` hard cap
+    (``resource_limits.max_cpu_percent``, off by default because hard quotas
+    slow legitimate builds), so the spawned agent AND all its MCP-server/tool
     descendants are bounded as one cgroup and the kernel kills the scope on
     breach. ``--scope`` execs into the target (it does NOT fork a wrapper), so
     the returned argv's eventual PID is the real child — parent PID tracking,
@@ -1820,19 +1875,28 @@ def cgroup_scope_argv(argv: list[str]) -> list[str]:
                 reason,
             )
         return argv
-    max_procs, max_mem_mb = _cgroup_limits_from_config()
-    return [
-        "systemd-run",
-        "--user",
-        "--scope",
-        "-q",
-        "--slice=kirocrew-agents.slice",
+    max_procs, max_mem_mb, cpu_weight, max_cpu_percent = _cgroup_limits_from_config()
+    props = [
         "-p",
         f"TasksMax={max_procs}",
         "-p",
         f"MemoryMax={max_mem_mb}M",
         "-p",
         "MemorySwapMax=0",
+    ]
+    # CPU properties only when the cpu controller is delegated — otherwise the
+    # kernel won't enforce them and systemd may warn on every spawn.
+    if _cpu_controller_delegated():
+        props += ["-p", f"CPUWeight={cpu_weight}"]
+        if max_cpu_percent > 0:
+            props += ["-p", f"CPUQuota={max_cpu_percent}%"]
+    return [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "-q",
+        "--slice=kirocrew-agents.slice",
+        *props,
         "--",
         *argv,
     ]

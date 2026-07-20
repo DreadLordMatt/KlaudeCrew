@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -2341,6 +2343,74 @@ class TestApplyResourceLimits:
     def test_returns_callable(self) -> None:
         assert callable(apply_resource_limits())
         assert callable(apply_resource_limits({"resource_limits": {"max_processes": 64}}))
+
+    def test_bias_helper_writes_oom_score_adj(self) -> None:
+        """In-process check of the helper: opens /proc/self/oom_score_adj
+        write-only and writes b"1000" (intercepted — we must not re-bias the
+        test worker itself)."""
+        from unittest.mock import patch
+
+        from kiro_crew.security import _bias_child_oom_score
+
+        calls: dict = {}
+
+        def fake_open(path, flags):
+            calls["path"] = path
+            calls["flags"] = flags
+            return 42
+
+        with (
+            patch("kiro_crew.security.sys.platform", "linux"),
+            patch("kiro_crew.security.os.open", side_effect=fake_open),
+            patch("kiro_crew.security.os.write", return_value=4) as mwrite,
+            patch("kiro_crew.security.os.close") as mclose,
+        ):
+            _bias_child_oom_score()
+        assert calls["path"] == "/proc/self/oom_score_adj"
+        assert calls["flags"] == os.O_WRONLY
+        mwrite.assert_called_once_with(42, b"1000")
+        mclose.assert_called_once_with(42)
+
+    def test_bias_helper_swallows_oserror(self) -> None:
+        """A read-only /proc or containerized denial must never fail the spawn."""
+        from unittest.mock import patch
+
+        from kiro_crew.security import _bias_child_oom_score
+
+        with (
+            patch("kiro_crew.security.sys.platform", "linux"),
+            patch("kiro_crew.security.os.open", side_effect=OSError("denied")),
+        ):
+            _bias_child_oom_score()  # must not raise
+
+    def test_bias_helper_noop_off_linux(self) -> None:
+        from unittest.mock import patch
+
+        from kiro_crew.security import _bias_child_oom_score
+
+        with (
+            patch("kiro_crew.security.sys.platform", "darwin"),
+            patch("kiro_crew.security.os.open") as mopen,
+        ):
+            _bias_child_oom_score()
+        mopen.assert_not_called()
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="oom_score_adj is Linux-only")
+    def test_child_oom_score_adj_biased(self) -> None:
+        """The preexec biases the OOM killer toward the child (oom_score_adj
+        = 1000) so a memory-ballooning tool dies before the whole agent scope
+        does. Descendants inherit the value automatically."""
+        import subprocess
+
+        out = subprocess.run(
+            [sys.executable, "-c", "print(open('/proc/self/oom_score_adj').read().strip())"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            preexec_fn=apply_resource_limits(),
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "1000"
 
     def test_defaults_set_nofile_only(self) -> None:
         """With no config only NOFILE is capped (per-process, safe); NPROC/CPU/AS

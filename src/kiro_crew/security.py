@@ -14,6 +14,7 @@ import re
 import shlex
 import socket
 import string
+import sys
 import uuid
 from collections import Counter
 
@@ -2799,6 +2800,27 @@ _RLIMIT_DEFAULTS = {
 }
 
 
+def _bias_child_oom_score() -> None:
+    """Bias the kernel OOM killer toward the calling process (``oom_score_adj``
+    = 1000, inherited by descendants) so a memory-ballooning tool subprocess is
+    killed BEFORE the cgroup ``memory.max`` ceiling takes out the whole agent
+    scope. Linux-only, unprivileged, best-effort — never raises. Kept
+    async-signal-safe (single open/write/close, no allocation-heavy work) so it
+    is callable from a ``preexec_fn``. Pattern from OpenClaw's linux-oom-score
+    child shim.
+    """
+    if sys.platform != "linux":
+        return
+    try:
+        fd = os.open("/proc/self/oom_score_adj", os.O_WRONLY)
+        try:
+            os.write(fd, b"1000")
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 def apply_resource_limits(config: dict | None = None) -> "Callable[[], None]":
     """Return a preexec_fn that applies POSIX resource limits to a child process.
 
@@ -2887,5 +2909,7 @@ def apply_resource_limits(config: dict | None = None) -> "Callable[[], None]":
                 # Platform doesn't support this rlimit, or the kernel rejected
                 # the value — leave it inherited rather than fail the spawn.
                 continue
+        # Bias the OOM killer toward this child (see _bias_child_oom_score).
+        _bias_child_oom_score()
 
     return _set_limits

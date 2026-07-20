@@ -954,8 +954,9 @@ class TestCgroupScopeArgv:
                 patch("kiro_crew.sandbox._probe_cgroup_scope", return_value=(True, "ok")),
                 patch(
                     "kiro_crew.sandbox._cgroup_limits_from_config",
-                    return_value=(8192, 8192),
+                    return_value=(8192, 8192, 50, 0),
                 ),
+                patch("kiro_crew.sandbox._cpu_controller_delegated", return_value=True),
             ):
                 out = sb.cgroup_scope_argv(["kiro-cli", "chat"])
             assert out[0] == "systemd-run"
@@ -963,7 +964,76 @@ class TestCgroupScopeArgv:
             assert "TasksMax=8192" in out
             assert "MemoryMax=8192M" in out
             assert "MemorySwapMax=0" in out
+            assert "CPUWeight=50" in out
+            # CPUQuota is opt-in: absent unless max_cpu_percent > 0.
+            assert not any(a.startswith("CPUQuota=") for a in out)
             assert out[out.index("--") + 1 :] == ["kiro-cli", "chat"]
+        finally:
+            self._reset_probe()
+
+    def test_cpu_controller_delegated_real_path(self):
+        """Cover the uncached probe body: reads the user-slice controllers file
+        and reports cpu presence; failures report False (skip CPU properties,
+        keep pids/memory enforcement)."""
+        from unittest.mock import mock_open
+
+        import kiro_crew.sandbox as sb
+
+        try:
+            sb._CPU_DELEGATED = None
+            with patch("builtins.open", mock_open(read_data="cpu memory pids\n")):
+                assert sb._cpu_controller_delegated() is True
+            sb._CPU_DELEGATED = None
+            with patch("builtins.open", mock_open(read_data="memory pids\n")):
+                assert sb._cpu_controller_delegated() is False
+            sb._CPU_DELEGATED = None
+            with patch("builtins.open", side_effect=OSError("no cgroup")):
+                assert sb._cpu_controller_delegated() is False
+            # Cached: second call must not re-read.
+            with patch("builtins.open", side_effect=AssertionError("must not open")):
+                assert sb._cpu_controller_delegated() is False
+        finally:
+            sb._CPU_DELEGATED = None
+
+    def test_cpu_quota_emitted_when_configured(self):
+        import kiro_crew.sandbox as sb
+
+        self._reset_probe()
+        try:
+            with (
+                patch("kiro_crew.sandbox._probe_cgroup_scope", return_value=(True, "ok")),
+                patch(
+                    "kiro_crew.sandbox._cgroup_limits_from_config",
+                    return_value=(8192, 8192, 75, 200),
+                ),
+                patch("kiro_crew.sandbox._cpu_controller_delegated", return_value=True),
+            ):
+                out = sb.cgroup_scope_argv(["kiro-cli", "chat"])
+            assert "CPUWeight=75" in out
+            assert "CPUQuota=200%" in out
+        finally:
+            self._reset_probe()
+
+    def test_no_cpu_properties_without_cpu_delegation(self):
+        """pids/memory enforcement must not be lost when only cpu delegation
+        is missing — the scope is still created, minus the CPU properties."""
+        import kiro_crew.sandbox as sb
+
+        self._reset_probe()
+        try:
+            with (
+                patch("kiro_crew.sandbox._probe_cgroup_scope", return_value=(True, "ok")),
+                patch(
+                    "kiro_crew.sandbox._cgroup_limits_from_config",
+                    return_value=(8192, 8192, 50, 200),
+                ),
+                patch("kiro_crew.sandbox._cpu_controller_delegated", return_value=False),
+            ):
+                out = sb.cgroup_scope_argv(["kiro-cli", "chat"])
+            assert out[0] == "systemd-run"
+            assert "TasksMax=8192" in out
+            assert not any(a.startswith("CPUWeight=") for a in out)
+            assert not any(a.startswith("CPUQuota=") for a in out)
         finally:
             self._reset_probe()
 
@@ -996,11 +1066,20 @@ class TestCgroupScopeArgv:
         try:
             with patch(
                 "kiro_crew.config.loader._raw_config",
-                return_value={"resource_limits": {"max_processes": 200, "max_memory_mb": 2048}},
+                return_value={
+                    "resource_limits": {
+                        "max_processes": 200,
+                        "max_memory_mb": 2048,
+                        "cpu_weight": 80,
+                        "max_cpu_percent": 400,
+                    }
+                },
             ):
-                procs, mem = sb._cgroup_limits_from_config()
+                procs, mem, weight, quota = sb._cgroup_limits_from_config()
             assert procs == 200
             assert mem == 2048
+            assert weight == 80
+            assert quota == 400
         finally:
             self._reset_probe()
 
@@ -1012,16 +1091,27 @@ class TestCgroupScopeArgv:
             # Missing block -> module defaults (never leave the cgroup ceiling
             # unset). Memory default is host-proportional (65% of RAM).
             with patch("kiro_crew.config.loader._raw_config", return_value={}):
-                procs, mem = sb._cgroup_limits_from_config()
+                procs, mem, weight, quota = sb._cgroup_limits_from_config()
             assert procs == sb._CGROUP_DEFAULT_MAX_PROCESSES
             assert mem == sb._default_max_memory_mb()
+            assert weight == sb._CGROUP_DEFAULT_CPU_WEIGHT
+            assert quota == 0  # opt-in: no CPUQuota by default
             with patch(
                 "kiro_crew.config.loader._raw_config",
-                return_value={"resource_limits": {"max_processes": 0, "max_memory_mb": "x"}},
+                return_value={
+                    "resource_limits": {
+                        "max_processes": 0,
+                        "max_memory_mb": "x",
+                        "cpu_weight": 0,
+                        "max_cpu_percent": -5,
+                    }
+                },
             ):
-                procs, mem = sb._cgroup_limits_from_config()
+                procs, mem, weight, quota = sb._cgroup_limits_from_config()
             assert procs == sb._CGROUP_DEFAULT_MAX_PROCESSES
             assert mem == sb._default_max_memory_mb()
+            assert weight == sb._CGROUP_DEFAULT_CPU_WEIGHT
+            assert quota == 0
         finally:
             self._reset_probe()
 
@@ -1058,7 +1148,7 @@ class TestCgroupScopeArgv:
             available, _ = sb._probe_cgroup_scope()
             if not available:
                 pytest.skip("no cgroup v2 delegation on this host")
-            with patch("kiro_crew.sandbox._cgroup_limits_from_config", return_value=(20, 8192)):
+            with patch("kiro_crew.sandbox._cgroup_limits_from_config", return_value=(20, 8192, 50, 0)):
                 argv = sb.cgroup_scope_argv(
                     [
                         sys.executable,
