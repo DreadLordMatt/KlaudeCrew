@@ -1,6 +1,6 @@
 import { copyToClipboard } from '../utils/clipboard'
 import { resizeImageForModel, type ResizeInfo } from '../utils/resizeImage'
-import type { McpApplyChange, PublishProviderDescriptor } from '../types'
+import type { McpApplyChange, SessionDoc, PublishProviderDescriptor } from '../types'
 import { refreshOnce, __resetRefreshOnceForTests } from './refreshOnce'
 import { queryClient } from './queryClient'
 
@@ -846,7 +846,7 @@ export const api = {
     get(`/api/artifacts/${encodeURIComponent(slug)}/versions`).then(j),
   artifactEvents: (slug: string) =>
     get(`/api/artifacts/${encodeURIComponent(slug)}/events`).then(j),
-  createArtifact: (body: { name: string; content: string; kind?: string; source?: string; description?: string; tags?: string[]; slug?: string; source_path?: string }) =>
+  createArtifact: (body: { name: string; content: string; kind?: string; source?: string; description?: string; tags?: string[]; slug?: string; source_path?: string; origin_session_key?: string }) =>
     post('/api/artifacts', body).then(j),
   updateArtifact: (slug: string, body: { content?: string; name?: string; description?: string; tags?: string[]; actor?: 'user' | 'agent'; event_type?: 'edited' | 'iterated' | 'reverted'; from_version?: number; snapshot?: boolean }) =>
     patch(`/api/artifacts/${encodeURIComponent(slug)}`, body).then(j),
@@ -862,6 +862,17 @@ export const api = {
   /** Move an artifact into a folder ("" = unfile to root). Metadata-only — no version bump. */
   setArtifactFolder: (slug: string, folderId: string) =>
     patch(`/api/artifacts/${encodeURIComponent(slug)}/folder`, { folder_id: folderId }).then(j),
+  /** Pin/unpin (favorite) an artifact. Metadata-only — no version bump. */
+  setArtifactPinned: (slug: string, pinned: boolean) =>
+    patch(`/api/artifacts/${encodeURIComponent(slug)}/pin`, { pinned }).then(j),
+  /** Virtual list of non-code documents from chat sessions. Pass `session`
+   * (a slot key) to scope to a single session. */
+  artifactSessionDocs: (session?: string) =>
+    get(`/api/artifacts/session-docs${session ? `?session=${encodeURIComponent(session)}` : ''}`).then(j) as Promise<{ docs: SessionDoc[] }>,
+  /** Turn a session document path into a real, saved (pinned) file-backed artifact.
+   * `originSessionKey` records which chat session saved it (for the Source column). */
+  materializeArtifact: (path: string, originSessionKey?: string) =>
+    post('/api/artifacts/materialize', { path, ...(originSessionKey ? { origin_session_key: originSessionKey } : {}) }).then(j),
   // Artifact publishing / sharing (Mesh-1880). Local publish/sharing management
   // only — remote-browse / clone / fork surfaces are not part of this edition.
   publishArtifact: (slug: string, body: { visibility?: 'PRIVATE' | 'SHARED' | 'PUBLIC'; shared_with?: string[]; provider?: string }) =>
@@ -917,15 +928,32 @@ export const api = {
   researchReport: (id: string) => get("/api/apps/auto-research/campaigns/" + id + "/report").then(j),
   researchDelete: (id: string) => del("/api/apps/auto-research/campaigns/" + id).then(j),
 
-  // Web Deploy (deploy-web). deploy/recall/destroy are status-aware: the backend
-  // uses 200+requires_confirm (confirm-gate) and 409 (pre-publish scan-block) as
-  // normal control flow, so we surface {status, data} instead of throwing via j().
-  deployWebConfig: () => get('/api/apps/deploy-web/config').then(j) as Promise<{ profile: string; region: string }>,
-  deployWebSaveConfig: (body: { profile: string; region: string }) => put('/api/apps/deploy-web/config', body).then(j) as Promise<{ profile: string; region: string }>,
-  deployWebIamPolicy: (customDomain = false) => get('/api/apps/deploy-web/iam-policy' + (customDomain ? '?custom_domain=1' : '')).then(j) as Promise<{ policy: string }>,
-  deployWebVerify: () => post('/api/apps/deploy-web/verify', {}).then(async r => ({ status: r.status, data: await r.json() })),
-  deployWebSites: () => get('/api/apps/deploy-web/sites').then(j) as Promise<{ sites: Array<{ site_id: string; bucket: string; distribution_id: string }>; configured: boolean }>,
-  deployWebDeploy: (body: object) => post('/api/apps/deploy-web/deploy', body).then(async r => ({ status: r.status, data: await r.json() })),
-  deployWebRecall: (body: object) => post('/api/apps/deploy-web/recall', body).then(async r => ({ status: r.status, data: await r.json() })),
-  deployWebDestroy: (body: object) => post('/api/apps/deploy-web/destroy', body).then(async r => ({ status: r.status, data: await r.json() })),
+  artifactTeardown: (slug: string) => post(`/api/deploy/teardown/${slug}`, { confirm: true }).then(j),
+  publishProviders: () => get('/api/publish-providers').then(j) as Promise<{ providers: AppPublishProvider[] }>,
+  publishToProvider: async (slug: string, providerId: string, provider?: AppPublishProvider, ttlHours?: number) => {
+    // Route to the provider's declared endpoint with the payload shape
+    // that _do_deploy expects (site_id + artifact_slug). ttl_hours is sent on
+    // BOTH preview and confirm so the previewed TTL matches what is deployed
+    // (R12 F3 — omitting it here made preview use the backend 72h default).
+    const endpoint = provider?.endpoint || '/api/deploy/deploy'
+    const payload: Record<string, unknown> = { site_id: slug, artifact_slug: slug, provider_id: providerId }
+    if (ttlHours !== undefined) payload.ttl_hours = ttlHours
+    const r = await post(endpoint, payload)
+    checkSessionExpired(r)
+    if (r.ok) { removeAuthBanner(); return r.json() }
+    // 409 = scan blocked — parse body so PublishHub can render findings panel
+    if (r.status === 409) { return r.json() }
+    const errText = await r.text()
+    throw new ApiError(r.status, errText || `HTTP ${r.status}`)
+  },
+}
+
+export interface AppPublishProvider {
+  id: string
+  label: string
+  icon: string
+  kinds: string[]
+  configured: boolean
+  setupRoute: string
+  endpoint: string
 }

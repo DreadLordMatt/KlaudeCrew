@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, type ReactNode } from 'react'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { Reorder } from 'framer-motion'
-import { FileText, Bot, Workflow, ScrollText, MessageSquare, TerminalSquare, GitCompare, Package, Plus, X, Hash, Pen, Columns2, PanelRightClose } from 'lucide-react'
+import { FileText, Bot, Workflow, ScrollText, MessageSquare, TerminalSquare, GitCompare, Package, Plus, X, Hash, Pen, Columns2, PanelRightClose, Component } from 'lucide-react'
 import ActivityViewer from './ActivityViewer'
 import DiffPanel from '../../components/DiffPanel'
 import DetailPanel from '../../components/DetailPanel'
@@ -18,7 +18,7 @@ import type { TouchedFile } from '../../hooks/useTouchedFiles'
 import type { ExtractedLink } from '../../utils/extractChatLinks'
 
 const KIND_ICON: Record<TabKind, ReactNode> = {
-  files: <FileText size={13} />, subagents: <Bot size={13} />, workflows: <Workflow size={13} />,
+  files: <FileText size={13} />, artifacts: <Component size={13} />, subagents: <Bot size={13} />, workflows: <Workflow size={13} />,
   logs: <ScrollText size={13} />, side: <MessageSquare size={13} />, terminal: <TerminalSquare size={13} />,
   file: <FileText size={13} />, diff: <GitCompare size={13} />, artifact: <Package size={13} />,
 }
@@ -26,6 +26,7 @@ const KIND_ICON: Record<TabKind, ReactNode> = {
 /** Views offered by the + menu. */
 const NEW_MENU: { kind: ViewKind; label: string; icon: ReactNode; desc: string }[] = [
   { kind: 'files', label: 'Files', icon: <FileText size={15} />, desc: 'Browse & edit files' },
+  { kind: 'artifacts', label: 'Artifacts', icon: <Component size={15} />, desc: 'In-session documents & stars' },
   { kind: 'subagents', label: 'Subagents', icon: <Bot size={15} />, desc: 'Live agent activity & transcripts' },
   { kind: 'workflows', label: 'Workflows', icon: <Workflow size={15} />, desc: 'Runs, phases & restartable steps' },
   { kind: 'logs', label: 'Logs', icon: <ScrollText size={15} />, desc: 'Gateway log stream' },
@@ -33,7 +34,7 @@ const NEW_MENU: { kind: ViewKind; label: string; icon: ReactNode; desc: string }
   { kind: 'terminal', label: 'Terminal', icon: <TerminalSquare size={15} />, desc: 'Shell on the gateway host' },
 ]
 
-const VIEW_KINDS = new Set<TabKind>(['files', 'subagents', 'workflows', 'logs', 'side'])
+const VIEW_KINDS = new Set<TabKind>(['files', 'artifacts', 'subagents', 'workflows', 'logs', 'side'])
 
 interface SidePanelProps {
   tabsCtl: ReturnType<typeof usePanelTabs>
@@ -318,7 +319,7 @@ export default function SidePanel({
             return isActive ? (
               <div key={t.id} className="absolute inset-0">
                 <ActivityViewer
-                  view={t.kind as 'files' | 'subagents' | 'workflows' | 'logs' | 'side'}
+                  view={t.kind as 'files' | 'artifacts' | 'subagents' | 'workflows' | 'logs' | 'side'}
                   open onToggle={onClose} slot={slot}
                   subagents={subagents} toolLog={toolLog}
                   files={files}

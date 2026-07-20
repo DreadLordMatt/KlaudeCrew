@@ -48,6 +48,15 @@ from typing import Any, Callable, Iterator
 from typing import List as _List
 
 from kiro_crew.config.loader import config_dir
+from kiro_crew.deploy.webapp_types import (  # noqa: F401 — re-export for API compatibility
+    WebAppArchitecture,
+    WebAppCost,
+    WebAppDeployTarget,
+    WebAppLifecycle,
+    WebAppMetadata,
+    WebAppTeardown,
+    webapp_metadata_from_dict,
+)
 from kiro_crew.security import is_sensitive_path
 
 logger = logging.getLogger(__name__)
@@ -84,11 +93,18 @@ ALLOWED_KINDS = frozenset(
         "json",  # structured data
         "text",  # plain text
         "image",  # generated image (source_path points to PNG/JPEG)
+        "webapp",  # a deployed web application; rendered as an infra control card
     }
 )
 
 #: Allowed source markers (provenance).
-ALLOWED_SOURCES = frozenset({"chat", "cron", "subagent", "manual", "import"})
+ALLOWED_SOURCES = frozenset({
+    # Provenance/creation buckets (back-compat) + actual session origins from
+    # ``infer_use_case`` so an artifact's source can reflect WHERE the saving
+    # session came from rather than a generic "manual".
+    "chat", "cron", "subagent", "manual", "import",
+    "dashboard", "slack", "cli", "task-runner", "unknown",
+})
 
 #: Allowed lifecycle event types. ``referenced`` is reserved for chat-mention
 #: scanning (added in a follow-up CR); the in-line save/update path emits
@@ -293,6 +309,18 @@ class Artifact:
     #: unfiled). Only local artifacts carry a folder; remote/shared artifacts
     #: have no local record to hang one on.
     folder_id: str = ""
+    #: User "pin"/favorite mark (Mesh — artifact pinning). Metadata-only,
+    #: persisted to meta.json; toggling it does NOT bump the version or emit a
+    #: lifecycle event (same class as retag/rename/set_folder). Tolerant-loaded
+    #: for legacy meta.json (defaults to unpinned). Lets the library UI filter
+    #: to pinned-only vs all.
+    pinned: bool = False
+    #: Session key of the chat/session that saved this artifact (Mesh — artifact
+    #: session provenance). Persisted; the dashboard live-resolves it to the
+    #: session's current title for the Source column (falling back to
+    #: "(deleted session)" when the session no longer exists). Empty for
+    #: non-session origins (bulk import, older artifacts).
+    session_key: str = ""
     #: Artifactory publication state (Mesh-1880). ``None`` until the artifact
     #: is published; carries the stable Artifactory id/URL, visibility,
     #: shared-with aliases, and version-sync bookkeeping once published.
@@ -318,6 +346,10 @@ class Artifact:
     #: between the last snapshot and now (Mesh-1654 round 6, requested
     #: by nrb). Not persisted; set by ``get()``.
     live_dirty: bool = False
+    #: Structured metadata for ``kind="webapp"`` artifacts — a deployed application
+    #: (deploy target, architecture, lifecycle/TTL, cost estimate, teardown handle).
+    #: ``None`` for every other kind. Tolerant-loaded from meta.json.
+    webapp_metadata: "WebAppMetadata | None" = None
 
     def to_dict(self, *, include_content: bool = False, persist: bool = False) -> dict[str, Any]:
         """Render as a JSON-friendly dict, optionally including the content blob.
@@ -410,6 +442,20 @@ _HTML_SNIFF_MARKERS = (
 
 #: A leading markdown ATX heading (``#`` .. ``######`` followed by whitespace).
 _MD_HEADING_RE = re.compile(r"^#{1,6}\s")
+
+
+#: Text document extensions used by the "session docs" feature (virtual All
+#: list + materialize-on-save). Deliberately text-only: binary docs (.pdf,
+#: .docx) don't fit the content-backed artifact model without extraction, so
+#: they're excluded here for now.
+DOC_EXTENSIONS = frozenset({".md", ".markdown", ".mdx", ".txt", ".rst"})
+
+
+def is_document_path(path: str) -> bool:
+    """True when ``path`` looks like a (text) document, not code/config/binary."""
+    if not path:
+        return False
+    return os.path.splitext(path)[1].lower() in DOC_EXTENSIONS
 
 
 def _infer_kind(content: str, source_path: str = "", explicit: str | None = None) -> str:
@@ -595,6 +641,8 @@ class ArtifactStore:
         tags: list[str] | None = None,
         source_path: str = "",
         folder_id: str = "",
+        session_key: str = "",
+        webapp_metadata: "WebAppMetadata | None" = None,
     ) -> Artifact:
         """Persist a new artifact and return it.
 
@@ -640,7 +688,9 @@ class ArtifactStore:
                 content=content,
                 source_path=source_path[:512] if source_path else "",
                 folder_id=folder_id or "",
+                session_key=session_key[:256] if session_key else "",
                 version_kinds={"1": kind},
+                webapp_metadata=webapp_metadata,
             )
             # Lifecycle: emit `created` event. New artifacts are tagged
             # `events_backfilled=True` because their history starts here —
@@ -852,6 +902,7 @@ class ArtifactStore:
         tags: list[str] | None = None,
         name: str | None = None,
         kind: str | None = None,
+        webapp_metadata: "WebAppMetadata | None" = None,
         actor: str = "user",
         session_id: str | None = None,
         event_type: str | None = None,
@@ -900,6 +951,8 @@ class ArtifactStore:
                 # alone does not bump the version; the per-version kind is
                 # recorded in the snapshot branch below when content changes.
                 art.kind = _validate_kind(kind)
+            if webapp_metadata is not None:
+                art.webapp_metadata = webapp_metadata
             art.updated_at = _now_iso()
 
             # Snapshot of current live state (no new content provided).
@@ -1003,6 +1056,64 @@ class ArtifactStore:
             self._fire_change("upsert", slug)
         elif fire_rename:
             self._fire_change("rename", slug)
+        return art
+
+    def set_pinned(self, slug: str, pinned: bool) -> Artifact:
+        """Set an artifact's pin/favorite mark — metadata-only.
+
+        Like :meth:`set_folder`, toggling ``pinned`` is a pure metadata
+        mutation: it does NOT bump the version, write a snapshot, or emit a
+        lifecycle event.
+        """
+        slug = _validate_slug(slug)
+        with self._lock:
+            art = self._load_meta(slug)
+            art.pinned = bool(pinned)
+            self._write_meta(art)
+            logger.info("artifact pin set: slug=%s pinned=%s", slug, art.pinned)
+            return art
+
+    def mark_webapp_expired(self, slug: str) -> Artifact:
+        """Tombstone a kind="webapp" artifact: set lifecycle.status to "expired".
+
+        Used by the human-triggered teardown path. FU-6: also clears
+        ``lifecycle.expires_at`` and ``deploy_target.public_url`` so the card
+        cannot render a live-looking countdown or a dead public link next to
+        the Expired badge. Deploy history stays in the artifact's event feed.
+        """
+        slug = _validate_slug(slug)
+        with self._lock:
+            art = self._load_meta(slug)
+            if art.kind != "webapp" or art.webapp_metadata is None:
+                raise ArtifactValidationError(
+                    f"artifact {slug!r} is not a webapp artifact; teardown does not apply"
+                )
+            art.webapp_metadata.lifecycle.status = "expired"
+            art.webapp_metadata.lifecycle.expires_at = None
+            if art.webapp_metadata.deploy_target is not None:
+                art.webapp_metadata.deploy_target.public_url = ""
+            art.updated_at = _now_iso()
+            self._write_meta(art)
+        self._fire_change("upsert", slug)
+        return art
+
+    def unmark_webapp_expired(self, slug: str) -> Artifact:
+        """Reverse a tombstone: restore lifecycle.status from "expired" to "live".
+
+        Used when teardown manifest-expiry fails for persistent deployments and
+        we need to keep the card's Tear down button available for retry.
+        """
+        slug = _validate_slug(slug)
+        with self._lock:
+            art = self._load_meta(slug)
+            if art.kind != "webapp" or art.webapp_metadata is None:
+                raise ArtifactValidationError(
+                    f"artifact {slug!r} is not a webapp artifact"
+                )
+            art.webapp_metadata.lifecycle.status = "live"
+            art.updated_at = _now_iso()
+            self._write_meta(art)
+        self._fire_change("upsert", slug)
         return art
 
     def delete(self, slug: str) -> None:
@@ -1878,9 +1989,12 @@ class ArtifactStore:
             events_backfilled=bool(raw.get("events_backfilled", False)),
             source_path=str(raw.get("source_path", "")),
             folder_id=str(raw.get("folder_id") or ""),
+            pinned=bool(raw.get("pinned", False)),
+            session_key=str(raw.get("session_key", "")),
             publication=publication,
             fork_metadata=fork_metadata,
             version_kinds=version_kinds,
+            webapp_metadata=webapp_metadata_from_dict(raw.get("webapp_metadata")),
         )
 
     @staticmethod

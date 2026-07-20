@@ -40,8 +40,9 @@ The dashboard provides a `/artifacts` library page for browse/search and a
 |---|---|---|
 | `slug` | string | URL-safe handle, derived from `name` if not given |
 | `name` | string | Human-readable display name |
-| `kind` | enum | `widget`, `html`, `markdown`, `svg`, `json`, `text` — inferred on save when the caller omits it (see [Kind inference](#kind-inference)) |
+| `kind` | enum | `widget`, `html`, `markdown`, `svg`, `json`, `text`, `webapp` — inferred on save when the caller omits it (see [Kind inference](#kind-inference)) |
 | `source` | enum | `chat` (default), `cron`, `subagent`, `manual`, `import` |
+| `pinned` | bool | "Starred" — user-curated keep flag (default `false`). Drives the Artifacts page **Starred** view. Metadata-only; toggling does NOT bump `version`. |
 | `description` | string | Optional, ≤ 2,000 chars |
 | `tags` | string[] | ≤ 16 tags, alphanumeric / `_`, `:`, `.`, `-` |
 | `version` | int | Latest version number; bumps on every content change |
@@ -133,6 +134,9 @@ The CLI proxies through the gateway HTTP API (matches `kirocrew learn`).
 | `GET` | `/api/artifacts/{slug}` | Returns full artifact + content |
 | `PATCH` | `/api/artifacts/{slug}` | Partial update; `content` bumps version; optional `folder` key (metadata-only) |
 | `DELETE` | `/api/artifacts/{slug}` | Permanent delete |
+| `PATCH` | `/api/artifacts/{slug}/pin` | Star/unstar — body `{pinned: bool}` (strictly boolean; non-booleans rejected). Metadata-only, no version bump |
+| `GET` | `/api/artifacts/session-docs` | Virtual, read-only list of non-code documents produced across chat sessions (the "All" firehose). `?session=<slot>` scopes to one session. Creates nothing; each entry carries `saved` (pinned) + `slug`. Registered before the `/{slug}` dynamic route |
+| `POST` | `/api/artifacts/materialize` | Turn a recorded chat document into a real, pinned file-backed artifact — body `{path}`. The path MUST be a document recorded in chat `file_changes` (authorization allowlist); the read goes through `hooks.safe_read_file_bytes` (is_sensitive_path + `O_NOFOLLOW` + `MAX_FILE_BYTES` cap). Idempotent by `source_path` |
 | `GET` | `/api/artifacts/{slug}/versions` | `{slug, versions: [int]}` |
 | `GET` | `/api/artifacts/{slug}/versions/{n}` | Specific version content |
 | `GET` | `/api/artifact-folders` | Folder tree with `item_count` + breadcrumb `path` |
@@ -178,6 +182,27 @@ via the `"/api/artifacts"` entry. Guarded by a regression test in
 A small "Save as artifact" button is overlaid on every rendered `<mcwidget>`
 in chat. Clicking prompts for a name and POSTs to `/api/artifacts`.
 
+## Starred & Session Documents
+
+The Artifacts page is a single unified, searchable table with two conceptual
+inputs, distinguished by the leading **star** column:
+
+- **Starred artifacts** — real, saved artifacts with `pinned=true`. The
+  **Starred** view (default) shows only these; the star toggles `pinned` via
+  `PATCH /api/artifacts/{slug}/pin` (metadata-only, no version bump).
+- **Session documents** — a *virtual* firehose of non-code documents the agent
+  produced across chats (from message `file_changes`), surfaced only in the
+  **All** view via `GET /api/artifacts/session-docs`. Nothing is written to disk
+  for these until the user stars one, which **materializes** it into a real,
+  pinned, file-backed artifact via `POST /api/artifacts/materialize`
+  ("Virtual All + materialize-on-save"). Search matches name/source (incl. the
+  originating session title); the file-type filter applies to both inputs.
+
+Materialization is authorization-gated: the requested path must appear in the
+recorded chat `file_changes` (never an arbitrary client path), and the read is
+routed through the `hooks.safe_read_file_bytes` keystone. `source` is recorded
+as `chat` for materialized documents.
+
 ## Validation & Limits
 
 | Field | Limit |
@@ -187,7 +212,7 @@ in chat. Clicking prompts for a name and POSTs to `/api/artifacts`.
 | `description` | ≤ 2,000 chars |
 | `tags` | ≤ 16 tags; each ≤ 64 chars |
 | `content` | ≤ 25 MiB (`MAX_CONTENT_BYTES`) |
-| `kind` | one of `widget` / `html` / `markdown` / `svg` / `json` / `text` |
+| `kind` | one of `widget` / `html` / `markdown` / `svg` / `json` / `text` / `webapp` |
 | `source` | one of `chat` / `cron` / `subagent` / `manual` / `import` |
 | `MAX_VERSIONS` | 50 (oldest pruned beyond cap) |
 
@@ -397,3 +422,93 @@ Out of scope (separate tasks):
   related to [Mesh-1534](https://taskei.amazon.dev/tasks/Mesh-1534).
 - **Cross-user sharing**, **embeddings/full-text search**, **install from
   URL/community widget store** — future expansions.
+
+## WebApp Artifacts (`kind="webapp"`)
+
+A `webapp` artifact represents a *deployed application* rather than renderable
+content. It carries structured `webapp_metadata` (deploy target, architecture,
+lifecycle/TTL, cost estimate, teardown handle) and the dashboard renders it as
+an infrastructure control card instead of a preview iframe.
+
+### WebApp Metadata Schema
+
+| Field | Type | Description |
+|---|---|---|
+| `deploy_target.provider` | string | `"aws"` (default) |
+| `deploy_target.account` | string | AWS account ID |
+| `deploy_target.region` | string | AWS region |
+| `deploy_target.public_url` | string | The live HTTPS URL |
+| `deploy_target.profile` | string | Named AWS CLI profile used |
+| `architecture.tier` | enum | `"static"`, `"api"`, `"stateful"` |
+| `architecture.resources` | list | `[{type, id}]` — infrastructure resources |
+| `lifecycle.created_at` | string | ISO 8601 creation time |
+| `lifecycle.expires_at` | string? | ISO 8601 expiry (null = persistent) |
+| `lifecycle.persistent` | bool | Whether the deploy has no TTL |
+| `lifecycle.ttl_hours` | int | Original TTL in hours |
+| `lifecycle.status` | enum | `"draft"`, `"deploying"`, `"live"`, `"error"`, `"expired"` |
+| `teardown.method` | string | `"reaper-lambda"` |
+| `teardown.handle` | string | Reaper target handle |
+
+### Deploy Routes (`/api/deploy/*`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/deploy/config` | Read deploy config (default profile) |
+| `PUT` | `/api/deploy/config` | Update deploy config |
+| `GET` | `/api/deploy/profiles` | List registered AWS profiles |
+| `POST` | `/api/deploy/profiles` | Add a new profile |
+| `PUT` | `/api/deploy/profiles/{name}` | Update a profile |
+| `DELETE` | `/api/deploy/profiles/{name}` | Delete a profile |
+| `GET` | `/api/deploy/iam-policy` | Get the required IAM policy document |
+| `POST` | `/api/deploy/verify` | Verify credentials for a profile |
+| `POST` | `/api/deploy/deploy` | Deploy a site (confirm-gated) |
+| `POST` | `/api/deploy/recall` | Recall (soft teardown) a site (confirm-gated) |
+| `POST` | `/api/deploy/destroy` | Full teardown of infrastructure (confirm-gated) |
+| `GET` | `/api/deploy/list` | List deployed sites |
+| `POST` | `/api/deploy/teardown/{slug}` | Human-triggered artifact teardown |
+| `GET` | `/api/deploy/pending` | List pending (unconfirmed) deploy previews |
+| `POST` | `/api/deploy/pending/{id}/confirm` | Execute a pending deploy (cookie/token only; internal-secret denied) |
+| `POST` | `/api/deploy/pending/{id}/dismiss` | Dismiss/cancel a pending deploy (cookie/token only; internal-secret denied) |
+
+Mutating routes fall into two categories:
+- **Confirm-gated** (two-step preview+confirm): deploy, recall, destroy.
+- **Auth-gated CRUD** (cookie/token auth, no confirm step): profile and config
+  creation/update/deletion.
+- **Pending-confirmation** (cookie/token only; internal-secret sessions are
+  explicitly denied): `GET /api/deploy/pending`, `POST .../confirm`,
+  `POST .../dismiss`. These routes support the two-step preview→confirm
+  deploy flow — the gateway generates a pending entry at preview time and
+  the dashboard UI confirms or dismisses it.
+
+All mutating routes require an unrestricted (non-restricted) session.
+
+### Teardown Semantics
+
+Teardown of a `webapp` artifact follows a **tombstone + manifest-expiry + reaper**
+model:
+
+1. **Tombstone:** `mark_webapp_expired(slug)` sets `lifecycle.status="expired"`
+   in the artifact metadata. The artifact is kept as deploy history.
+
+2. **Manifest expiry (best-effort):** The teardown handler rewrites the S3
+   deploy manifest (`.kirocrew-deploy.json`) with `expires_at=now`,
+   `persistent=false`. This is a non-destructive S3 PUT using the deployment's
+   recorded profile. If credentials are unavailable or the bucket is unreachable,
+   the tombstone still stands.
+
+3. **Reaper sweep:** The in-account reaper (`scripts/reaper.sh` or the reaper
+   Lambda via EventBridge) scans deploy manifests on a schedule. Manifests with
+   `expires_at` in the past are reaped: backend stack deleted, S3 prefix removed,
+   CloudFront invalidated. The manifest removal commits the reap.
+
+The gateway's `/api/deploy/destroy` endpoint (confirm-gated) calls
+`engine.destroy` under cookie/token auth + confirm + audit to initiate
+infrastructure teardown. This is the **direct teardown path** — it performs
+destructive AWS calls (DeleteStack, bucket deletion, distribution teardown)
+synchronously under the user's own credentials during the request.
+
+Separately, the **reaper path** (the in-account reaper Lambda or
+`scripts/reaper.sh` via EventBridge schedule) sweeps for expired manifests
+and performs the same cleanup on a schedule. The reaper runs with the user's
+own credentials in-account and handles the case where the gateway is unreachable
+or the user did not explicitly destroy before TTL expiry.

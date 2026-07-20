@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo } from 'react'
 import type { Artifact } from '../types'
 
 /** Singleton "view" tabs (opened from the + menu, one instance each). */
-export type ViewKind = 'files' | 'subagents' | 'workflows' | 'logs' | 'side' | 'terminal'
+export type ViewKind = 'files' | 'artifacts' | 'subagents' | 'workflows' | 'logs' | 'side' | 'terminal'
 /** All tab kinds: singleton views + on-demand document tabs. */
 export type TabKind = ViewKind | 'file' | 'diff' | 'artifact'
 
@@ -23,7 +23,7 @@ export interface PanelTab {
 }
 
 const VIEW_TITLES: Record<ViewKind, string> = {
-  files: 'Files', subagents: 'Subagents', workflows: 'Workflows',
+  files: 'Files', artifacts: 'Artifacts', subagents: 'Subagents', workflows: 'Workflows',
   logs: 'Logs', side: 'Side', terminal: 'Terminal',
 }
 

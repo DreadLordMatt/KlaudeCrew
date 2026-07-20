@@ -570,6 +570,158 @@ def safe_read_file_bytes(raw: str) -> bytes | None:
         return None
 
 
+def safe_read_file_bytes_with_identity(
+    raw: str, allowed_identities: set[tuple[int, int]]
+) -> bytes | None:
+    """Read file bytes, authorizing the OPENED descriptor by inode identity.
+
+    Like :func:`safe_read_file_bytes`, but closes the authorize-then-read TOCTOU
+    window for callers that keep a filesystem allowlist. The file is opened ONCE
+    with ``O_NOFOLLOW`` and the ``fstat`` identity ``(st_dev, st_ino)`` of that
+    very descriptor MUST be in ``allowed_identities`` before any bytes are
+    returned. Because authorization and read share one descriptor, a symlink- or
+    directory-swap slipped in between ``realpath`` and ``open`` cannot substitute
+    an unauthorized file — its inode is not in the allowlist. ``validate_file_path``
+    still rejects sensitive resolved targets (``~/.aws`` …) up front (AWS-33), so
+    all filesystem reads stay funnelled through this centralized chokepoint.
+
+    Returns bytes on success. Raises :class:`PermissionError` when the opened
+    inode is not allowlisted or a final-component symlink swap is detected
+    (``O_NOFOLLOW`` → ``ELOOP``), and :class:`FileTooLargeError` when the file
+    exceeds ``MAX_FILE_BYTES``. Returns ``None`` when the path is rejected by
+    :func:`validate_file_path` or is otherwise unreadable.
+    """
+    import errno
+    import os
+
+    path = validate_file_path(raw)
+    if path is None:
+        return None
+
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, getattr(errno, "EMLINK", -1)):
+            raise PermissionError(f"Blocked: refusing to follow symlink at {path}") from exc
+        return None
+    try:
+        st = os.fstat(fd)
+        if (st.st_dev, st.st_ino) not in allowed_identities:
+            raise PermissionError("Blocked: file is not in the authorized set")
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            data = fh.read(MAX_FILE_BYTES + 1)
+        if len(data) > MAX_FILE_BYTES:
+            raise FileTooLargeError(f"File exceeds {MAX_FILE_BYTES // (1024 * 1024)} MB safety cap")
+        return data
+    finally:
+        os.close(fd)
+
+
+def stat_identity(raw: str) -> tuple[int, int] | None:
+    """Return ``(st_dev, st_ino)`` of a file through the sensitive-path gate.
+
+    Metadata-only companion to :func:`safe_read_file_bytes_with_identity` for
+    callers that must build an inode allowlist from LLM-influenced paths without
+    reading content. ``validate_file_path`` canonicalizes via ``realpath`` and
+    rejects sensitive resolved targets, so a path that resolves into ``~/.aws``
+    etc. is refused (returns ``None``) rather than ``stat``'d — keeping all
+    LLM-path filesystem access funnelled through this centralized chokepoint.
+
+    Returns ``(dev, ino)`` or ``None`` if the path is rejected or unstattable.
+    """
+    import os
+
+    path = validate_file_path(raw)
+    if path is None:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _fd_real_path(fd: int) -> str | None:
+    """Real filesystem path of an OPEN descriptor (Linux/macOS), else None."""
+    import os
+
+    try:
+        return os.readlink(f"/proc/self/fd/{fd}")  # Linux
+    except OSError:
+        pass
+    try:
+        import fcntl
+
+        if hasattr(fcntl, "F_GETPATH"):  # macOS
+            buf = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024))
+            return buf.split(b"\x00", 1)[0].decode()
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def safe_read_file_bytes_nolink(raw: str, within_root: str | None = None) -> bytes | None:
+    """Like :func:`safe_read_file_bytes` but also rejects hardlinked inodes.
+
+    R30 F1: staging must pin its hardlink check to the SAME inode it reads.
+    A caller that lstat()s the path and then opens it by name leaves a race
+    window where the file is swapped for a hardlink to a sensitive file
+    (e.g. ``~/.aws/config``) between the check and the open. Here the open
+    happens first (``O_NOFOLLOW``), then ``fstat()`` on the descriptor —
+    the inode that is validated is exactly the inode that is read:
+    ``st_nlink > 1`` or a non-regular file type is rejected.
+
+    R33 F1: when ``within_root`` is given, the OPENED descriptor's real path
+    (via ``/proc/self/fd`` on Linux, ``fcntl.F_GETPATH`` on macOS) must resolve
+    inside that root and must not be sensitive. ``O_NOFOLLOW`` only guards the
+    FINAL path component — a nested directory swapped for a symlink between
+    the tree walk and the open would silently escape the approved tree. The
+    fd-path check is pinned to the inode actually opened, so no check-to-use
+    window remains. If the fd's real path cannot be determined, fail closed.
+
+    Returns file content as bytes, or None if the path is rejected,
+    hardlinked, non-regular, escaping ``within_root``, or unreadable.
+    """
+    import os
+    import stat as _stat
+
+    path = validate_file_path(raw)
+    if path is None:
+        return None
+
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if st.st_nlink > 1 or not _stat.S_ISREG(st.st_mode):
+            return None
+        if within_root is not None:
+            fd_real = _fd_real_path(fd)
+            if fd_real is None:
+                return None  # cannot verify containment -> fail closed
+            root_real = os.path.realpath(within_root)
+            if os.path.commonpath([fd_real, root_real]) != root_real:
+                return None  # opened inode escapes the approved tree
+            if is_sensitive_path(fd_real):
+                return None
+        with os.fdopen(fd, "rb") as fh:
+            data = fh.read(MAX_FILE_BYTES + 1)
+        fd = -1  # consumed by fdopen
+        if len(data) > MAX_FILE_BYTES:
+            raise FileTooLargeError(f"File exceeds {MAX_FILE_BYTES // (1024 * 1024)} MB safety cap")
+        return data
+    except OSError:
+        return None
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def safe_read_prefix(raw: str, n: int) -> bytes | None:
     """Read the first *n* bytes of a file through is_sensitive_path enforcement.
 
