@@ -188,6 +188,7 @@ class SessionConfig:
     timeout_secs: int = 3600       # 60 min idle timeout (DEFAULT_SESSION_TIMEOUT)
     autocompact_pct: float = 90.0  # context usage % at which auto-compaction triggers (5-90)
     pool_size: int = 2             # pre-warmed kiro-cli processes kept ready for instant session start; 0 disables. Load-time clamped to [0, 10]
+    watchdog_rss_max_mb: int = 0   # recycle a session when its process tree RSS exceeds this many MiB; 0 disables (default). Busy sessions (turn in flight) are never recycled.
 
 @dataclass
 class TaskRunnerConfig:

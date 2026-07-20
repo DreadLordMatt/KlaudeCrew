@@ -691,6 +691,15 @@ class SessionConfig:
             nullable=True,
         ),
     )
+    watchdog_rss_max_mb: int = field(
+        default=0,
+        metadata=_meta(
+            "Watchdog RSS Limit (MiB)",
+            "Recycle a session when its process tree resident memory exceeds "
+            "this many MiB. 0 disables (default). Busy sessions (turn in "
+            "flight) are never recycled.",
+        ),
+    )
 
 
 @dataclass
@@ -2768,6 +2777,7 @@ class KiroCrewConfig:
                 pool_agent=str(session_data.get("pool_agent", "")),
                 pool_ttl_secs=int(session_data.get("pool_ttl_secs", 1800)),
                 archive_retention_days=_archive_retention_days(session_data),
+                watchdog_rss_max_mb=int(session_data.get("watchdog_rss_max_mb", 0)),
             ),
             taskrunner=TaskRunnerConfig(
                 max_parallel_steps=taskrunner_data.get(

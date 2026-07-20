@@ -1013,6 +1013,8 @@ async def start_dashboard(
 
     # Visible notice + pct reset when auto-compaction fires on a dashboard session
     state.wire_session_compact_callback()
+    # Visible notice when the watchdog recycles a dashboard session (e.g. RSS)
+    state.wire_session_recycle_callback()
 
     app = web.Application(
         client_max_size=60 * 1024 * 1024
@@ -2080,6 +2082,8 @@ async def start_api_server(
 
     # Visible notice + pct reset when auto-compaction fires on a dashboard session
     state.wire_session_compact_callback()
+    # Visible notice when the watchdog recycles a dashboard session (e.g. RSS)
+    state.wire_session_recycle_callback()
 
     app = web.Application(
         client_max_size=60 * 1024 * 1024

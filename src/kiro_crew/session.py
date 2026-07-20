@@ -96,10 +96,12 @@ from kiro_crew.sel import sel
 from kiro_crew.session_map import _KIRO_SESSIONS_DIR  # noqa: F401
 from kiro_crew.session_map import SessionMap as SessionMap  # noqa: F401
 from kiro_crew.session_pid import (
+    _build_child_map,
     _cleanup_orphaned_mcp_servers,
     _collect_active_pids,
     _kill_confirmed_and_writeback,
     _periodic_pid_sweep,
+    _rss_mb_from_tree,
     _sync_kill_provider,
 )
 from kiro_crew.session_pid import _track_child_pids as _track_child_pids  # noqa: F401
@@ -119,6 +121,7 @@ from kiro_crew.session_pid import (
     kill_orphan_mcps,
 )
 from kiro_crew.stats import Stats
+from kiro_crew.watchdog import CleanupHook, SessionWatchdog
 
 # The standalone ClaudeCodeProvider was removed in the KiroACP-only refactor;
 # the public core ships kiro-cli (ACP) only. The name is kept (always None) so
@@ -270,6 +273,10 @@ _COMPACT_FAILURE_COOLDOWN_SECS = 60.0
 
 class _CompactCallback(Protocol):
     async def __call__(self, key: str, pct: float, *, success: bool) -> None: ...  # noqa: E704
+
+
+class _RecycleCallback(Protocol):
+    async def __call__(self, key: str, *, reason: str) -> None: ...  # noqa: E704
 
 
 # Circuit breaker: force-reset after this many consecutive failures
@@ -478,6 +485,7 @@ class SessionManager:
         self._compact_cooldown_until: dict[str, float] = {}
         self._background_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
         self._on_compacted: _CompactCallback | None = None
+        self._on_recycled: _RecycleCallback | None = None
         self._pool_started = False
         self._session_map = SessionMap()
         self._active_dashboard_slots: set[str] | None = (
@@ -523,6 +531,31 @@ class SessionManager:
         # session_sharing=True. Killed when the parent session ends.
         self._subagent_runtimes: dict[str, "AcpRuntime"] = {}
         self._subagent_runtime_locks: dict[str, asyncio.Lock] = {}
+
+        # ── Session Watchdog ──
+        # RSS recycle threshold (MiB). 0 disables (default). A non-busy session
+        # whose process tree exceeds this is reset on the next cleanup tick.
+        # Tolerate a non-int (absent field, or a MagicMock cfg in unit tests) by
+        # treating it as disabled — never raise from the constructor.
+        _rss_cfg = getattr(cfg.session, "watchdog_rss_max_mb", 0)
+        self._rss_max_mb: int = max(0, _rss_cfg) if isinstance(_rss_cfg, int) else 0
+        # Idle-sweep gate + clamped timeout are computed once when the cleanup
+        # loop starts (it owns the clamp logic) and read by _expire_idle_hook.
+        self._idle_sweep_enabled: bool = False
+        self._idle_timeout: int = 0
+        # The watchdog holds the *execution* half of each cleanup behaviour as a
+        # named CleanupHook. Each hook keeps the exact try/except of the inline
+        # block it was lifted from, so the dispatcher stays dumb. The orphan-PID
+        # sweep is intentionally NOT moved here (it is an inline ~35-line block
+        # in _cleanup_loop); extracting it is a refactor deferred to CR 2.
+        self._watchdog = SessionWatchdog(
+            [
+                CleanupHook("idle_expiry", self._expire_idle_hook),
+                CleanupHook("orphan_mcp", self._orphan_mcp_hook),
+                CleanupHook("denied_commands", self._enforce_denied_commands_hook),
+                CleanupHook("rss_threshold", self._rss_threshold_check),
+            ]
+        )
 
     async def reload_provider_factory(self) -> None:
         """Reload provider factory from current config (after provider switch)."""
@@ -2021,10 +2054,39 @@ class SessionManager:
 
         return result
 
-    async def reset(self, key: str) -> None:
-        """Kill and recreate a session (context overflow recovery)."""
+    async def reset(
+        self,
+        key: str,
+        *,
+        expect_session: _Session | None = None,
+        skip_if_busy: bool = False,
+    ) -> bool:
+        """Kill and recreate a session (context overflow recovery).
+
+        Returns True if a session was actually torn down, False if an optional
+        guard below made it a no-op.
+
+        Optional guards, evaluated atomically under the lock together with the
+        pop (so no turn can start and no session swap can slip into a
+        released-lock window), used by the RSS-recycle watchdog:
+
+          * ``expect_session`` — only reset if this exact session object still
+            occupies ``key``. Guards against recycling a session that was
+            reset+recreated under a reused key between an off-lock RSS
+            measurement and this call (the victim would otherwise be killed on
+            the prior occupant's stale reading).
+          * ``skip_if_busy`` — skip if the current session has a turn in flight
+            (semaphore held), so a live stream is never cut mid-turn. This is
+            enforced here, atomically with the pop, rather than in a caller's
+            separate lock acquisition (which reopens the window).
+        """
         key = self._fold_key(key)
         async with self._lock:
+            current = self._sessions.get(key)
+            if expect_session is not None and current is not expect_session:
+                return False
+            if skip_if_busy and current is not None and current.semaphore.locked():
+                return False
             session = self._sessions.pop(key, None)
             # The new process is a fresh start — drop any stale failure
             # cooldown so it isn't inherited.
@@ -2096,6 +2158,7 @@ class SessionManager:
                 except Exception:
                     logger.debug("Reset %s: subagent runtime cleanup failed", key, exc_info=True)
             logger.debug("Reset session: %s (pid=%s)", key, pid)
+        return session is not None
 
     def check_context_usage(self, key: str, provider: LLMProvider) -> float:
         """Check context usage and fire background compaction at the
@@ -2139,6 +2202,19 @@ class SessionManager:
         if self._on_compacted is not None and cb is not None:
             logger.warning("Compact callback already registered; replacing existing handler")
         self._on_compacted = cb
+
+    def set_recycle_callback(self, cb: _RecycleCallback | None) -> None:
+        """Register a callback fired when the watchdog recycles a session.
+
+        Signature: ``async def cb(key, *, reason)``.  Used by the dashboard to
+        notify the user that their session was reset (e.g. by the RSS-threshold
+        watchdog), since unlike idle/orphan expiry this can happen while the
+        user is still around. Idle and orphan sweeps do NOT fire this — the
+        user has already walked away in those cases.
+        """
+        if self._on_recycled is not None and cb is not None:
+            logger.warning("Recycle callback already registered; replacing existing handler")
+        self._on_recycled = cb
 
     def _trigger_compaction(self, key: str, reason: str, pct: float) -> None:
         """Schedule a background compact task for *key*, gated by two checks.
@@ -2257,6 +2333,15 @@ class SessionManager:
             await self._on_compacted(key, pct, success=success)
         except Exception:
             logger.exception("Compact callback failed for %s", key)
+
+    async def _fire_recycle_callback(self, key: str, *, reason: str) -> None:
+        """Invoke ``_on_recycled`` if registered, swallowing exceptions."""
+        if self._on_recycled is None:
+            return
+        try:
+            await self._on_recycled(key, reason=reason)
+        except Exception:
+            logger.exception("Recycle callback failed for %s", key)
 
     async def remove(self, key: str) -> None:
         """Shut down a session but preserve session_map for future resume.
@@ -2827,6 +2912,132 @@ class SessionManager:
 
     # ── Idle cleanup ──
 
+    # ── Watchdog hooks ──
+    # Each hook is the execution half of a CleanupHook (see watchdog.py). Each
+    # one reproduces the exact try/except of the inline cleanup-loop block it
+    # was lifted from, so SessionWatchdog.tick() can stay a dumb dispatcher and
+    # the move is behaviour-preserving (no severity promotion of swallowed
+    # errors). The orphan-PID sweep is deliberately NOT a hook in CR 1.
+
+    async def _expire_idle_hook(self) -> None:
+        """Idle/orphan session expiry. Gate + timeout are published onto self by
+        _cleanup_loop, which owns the <60 clamp. Preserves the original
+        ``logger.exception`` on failure."""
+        if not self._idle_sweep_enabled:
+            return
+        try:
+            await self._expire_idle(self._idle_timeout)
+        except Exception:
+            logger.exception("Cleanup loop: _expire_idle crashed; continuing")
+
+    async def _orphan_mcp_hook(self) -> None:
+        """Sweep MCP servers orphaned by crashed/expired sessions. Preserves the
+        original silent-swallow behaviour.
+
+        Offloaded to the bounded maintenance pool (not the default executor) so
+        the per-PID os.kill loop + file lock can't block the event loop or
+        starve its DNS resolution (Mesh-1968)."""
+        try:
+            mcp_killed = await asyncio.get_running_loop().run_in_executor(
+                maintenance_executor(), _cleanup_orphaned_mcp_servers
+            )
+            if mcp_killed:
+                logger.info("Periodic sweep: cleaned %d orphaned MCP servers", mcp_killed)
+        except Exception:
+            pass
+
+    async def _enforce_denied_commands_hook(self) -> None:
+        """Re-enforce deniedCommands (catches manual edits). The sync enforcement
+        performs file I/O and is reachable from the event loop (via
+        _cleanup_loop → watchdog.tick()), so it is offloaded to the bounded
+        maintenance pool — mirroring _orphan_mcp_hook — to avoid blocking the
+        loop. Preserves the original silent-swallow behaviour."""
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                maintenance_executor(), _enforce_denied_commands
+            )
+        except Exception:
+            pass
+
+    async def _rss_threshold_check(self) -> None:
+        """Recycle non-busy sessions whose process tree exceeds the configured
+        RSS ceiling. New in CR 1; disabled by default (``watchdog_rss_max_mb=0``).
+
+        Mirrors _expire_idle's kill structure AND its protected-key set: collect
+        candidates under the lock — skipping persistent and channel-prefixed
+        sessions exactly as the idle sweep does — then reset() each victim AFTER
+        releasing the lock (reset() re-acquires it, so holding it across the call
+        would deadlock). A session whose turn is in flight (semaphore held) is
+        skipped to avoid cutting a live stream.
+
+        RSS measurement walks the process tree with synchronous /proc reads, so
+        it is done OUTSIDE the lock on the bounded maintenance executor —
+        mirroring _orphan_mcp_hook — to avoid blocking the event loop. Because the
+        lock is released across that measurement, the victim's session OBJECT is
+        captured at collection time and handed to reset(), which re-verifies
+        identity + not-busy atomically under the lock before killing (see
+        reset()); a session that was swapped or became busy in the measurement
+        window is left untouched and generates no recycle notice.
+        """
+        if not self._rss_max_mb:
+            return
+        candidates: list[tuple[str, int, _Session]] = []
+        async with self._lock:
+            for key, sess in self._sessions.items():
+                if key in _PERSISTENT_KEYS:
+                    continue
+                if key.startswith(_CHANNEL_PREFIX):
+                    # Channel sessions are protected from idle expiry; keep RSS
+                    # recycle aligned so a long-lived channel context isn't
+                    # silently cut (and _on_recycled only notifies dashboard:
+                    # keys, so a recycled channel session would have no notice).
+                    continue
+                if sess.semaphore.locked():  # turn in flight — don't cut it
+                    continue
+                pid = self.get_pid(key)
+                if pid is not None:
+                    candidates.append((key, pid, sess))
+        victims: list[tuple[str, int, _Session]] = []
+        if candidates:
+            # Build the /proc parent->child map ONCE per tick, off-loop. It is
+            # identical for every candidate this sweep, so measuring each tree
+            # via get_session_rss_mb (which builds its own map) would rescan all
+            # of /proc K times; scan once and share the read-only map instead.
+            # Offloaded to the bounded maintenance pool (not the default
+            # executor), matching the sibling hooks, so an unrelated default-
+            # pool backlog can't starve this periodic /proc walk.
+            loop = asyncio.get_running_loop()
+            child_map = await loop.run_in_executor(maintenance_executor(), _build_child_map)
+            for key, pid, sess in candidates:
+                rss = await loop.run_in_executor(
+                    maintenance_executor(), _rss_mb_from_tree, pid, child_map
+                )
+                if rss > self._rss_max_mb:
+                    victims.append((key, rss, sess))
+        for key, rss, sess in victims:
+            # Per-victim guard so one failed reset/notify doesn't skip the rest
+            # of the victims this tick (the watchdog backstop is debug-only).
+            try:
+                # reset() re-verifies UNDER ITS OWN LOCK, atomically with the
+                # pop, that (a) this exact session object still occupies key —
+                # guarding against a reset+recreate under a reused key in the
+                # released-lock measurement window — and (b) it is not mid-turn.
+                # It returns False (a no-op) if either guard fails, so we neither
+                # kill the wrong/busy session nor emit a misleading recycle
+                # notice for a session we did not actually recycle.
+                recycled = await self.reset(key, expect_session=sess, skip_if_busy=True)
+                if not recycled:
+                    continue
+                logger.warning(
+                    "RSS recycle: session %s tree rss=%dMB exceeds %dMB", key, rss, self._rss_max_mb
+                )
+                Stats().inc_session_cleaned()
+                # Unlike idle/orphan expiry, an RSS recycle can hit a session
+                # whose user is still around, so notify them it was reset.
+                await self._fire_recycle_callback(key, reason=f"memory limit ({rss}MB)")
+            except Exception:
+                logger.exception("RSS recycle failed for session %s", key)
+
     async def _cleanup_loop(self) -> None:
         timeout = self._cfg.session.timeout_secs
         # Defensive clamp: the dashboard validator now allows 0 (disable
@@ -2847,6 +3058,10 @@ class SessionManager:
                 "MCP/PID sweeps still run at default cadence",
                 timeout,
             )
+        # Publish the clamped idle config for _expire_idle_hook (the watchdog
+        # hook re-checks idle_sweep_enabled so the gate is preserved verbatim).
+        self._idle_sweep_enabled = idle_sweep_enabled
+        self._idle_timeout = timeout
         # When idle sweep is disabled we still run the maintenance sweeps
         # (orphaned MCP servers, leaked kiro-cli PIDs, deniedCommands) on a
         # fixed cadence so operators who set timeout_secs=0 don't also lose
@@ -2858,24 +3073,14 @@ class SessionManager:
                 return  # shutdown signaled
             except asyncio.TimeoutError:
                 pass  # normal wake-up
-            if idle_sweep_enabled:
-                try:
-                    await self._expire_idle(timeout)
-                except Exception:
-                    logger.exception("Cleanup loop: _expire_idle crashed; continuing")
 
-            # Sweep MCP servers orphaned by crashed/expired sessions.
-            # Offloaded to the bounded maintenance pool (not the default
-            # executor) so the per-PID os.kill loop + file lock can't block the
-            # event loop or starve its DNS resolution (Mesh-1968).
-            try:
-                mcp_killed = await asyncio.get_running_loop().run_in_executor(
-                    maintenance_executor(), _cleanup_orphaned_mcp_servers
-                )
-                if mcp_killed:
-                    logger.info("Periodic sweep: cleaned %d orphaned MCP servers", mcp_killed)
-            except Exception:
-                pass
+            # idle expiry + orphaned-MCP sweep + deniedCommands re-enforcement,
+            # plus the new RSS-threshold recycle, are dispatched by the watchdog.
+            # Each hook carries the exact error handling of the block it was
+            # lifted from (the orphan-MCP hook keeps the Mesh-1968 maintenance-
+            # executor offload). The orphan-PID sweep below is intentionally left
+            # inline (CR 2 extracts it into a hook).
+            await self._watchdog.tick()
 
             # Sweep session root kiro-cli processes left behind by crashed
             # gateway instances (P472042997). Offloaded to a thread to keep
@@ -3001,12 +3206,6 @@ class SessionManager:
                     )
             except Exception:
                 logger.warning("Orphan MCP sweep failed", exc_info=True)
-
-            # Periodically re-enforce deniedCommands (catches manual edits)
-            try:
-                _enforce_denied_commands()
-            except Exception:
-                pass
 
     def set_active_dashboard_slots(self, slot_keys: set[str]) -> None:
         """Update the set of active dashboard slot keys.

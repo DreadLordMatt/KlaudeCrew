@@ -1136,3 +1136,124 @@ def _sel_orphan_kill(pid: int, pgid: int, cmdline: bytes, method: str) -> None:
         )
     except Exception:
         logger.debug("SEL orphan-kill audit failed", exc_info=True)
+
+
+_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+
+
+def _read_rss_pages(pid: int, proc_root: Path | None = None) -> int:
+    """Resident *pages* of a single PID via ``/proc/<pid>/statm`` (Linux only).
+
+    Returns pages, NOT MiB: callers accumulate the whole process tree and
+    convert to MiB once at the end, so per-PID sub-MiB remainders are not
+    truncated away. (A per-PID ``// MiB`` would under-count a tree by up to
+    ~1 MiB per process, i.e. the recycle could fire late or never for a tree
+    sitting just over the ceiling.) Returns 0 if the process is gone or the
+    field can't be read — a missing PID simply contributes nothing to the sum.
+
+    *proc_root* overrides the ``/proc`` mount (test seam only).
+    """
+    root = proc_root if proc_root is not None else Path("/proc")
+    try:
+        # statm fields are in pages; field 2 (index 1) is resident set size.
+        fields = (root / str(pid) / "statm").read_text().split()
+        return int(fields[1])
+    except (FileNotFoundError, ProcessLookupError, ValueError, IndexError, OSError):
+        return 0
+
+
+def _build_child_map(proc_root: Path | None = None) -> dict[int, list[int]]:
+    """Parent-PID -> direct-children map from one pass over ``/proc/<pid>/stat``.
+
+    Reads the ``PPid`` (4th) field of every process's ``stat`` file. This is
+    authoritative and complete for all live processes regardless of kernel
+    config, and deliberately replaces the earlier
+    ``/proc/<pid>/task/*/children`` walk, which requires
+    ``CONFIG_CHECKPOINT_RESTORE``/``CONFIG_PROC_CHILDREN`` and is documented as
+    reliable only for frozen/stopped tasks — for a live task it could return an
+    incomplete child set, silently dropping whole descendant subtrees from the
+    RSS sum (so the memory-protection feature could no-op with no signal).
+
+    A failure to scan ``/proc`` is logged at debug rather than swallowed
+    silently, so a degraded reading is diagnosable.
+
+    *proc_root* overrides the ``/proc`` mount (test seam only).
+    """
+    root = proc_root if proc_root is not None else Path("/proc")
+    child_map: dict[int, list[int]] = {}
+    try:
+        for entry in root.iterdir():
+            name = entry.name
+            if not name.isdigit():
+                continue
+            try:
+                # Format: "pid (comm) state ppid ...". comm can contain spaces
+                # and parentheses, so locate the LAST ')' and read ppid after
+                # it rather than naively splitting on whitespace.
+                stat = (entry / "stat").read_text()
+                rparen = stat.rfind(")")
+                ppid = int(stat[rparen + 2 :].split()[1])
+            except (FileNotFoundError, ProcessLookupError, ValueError, IndexError, OSError):
+                # Process exited mid-scan or stat unreadable — skip this PID.
+                continue
+            child_map.setdefault(ppid, []).append(int(name))
+    except (FileNotFoundError, OSError):
+        logger.debug("RSS watchdog: /proc scan for child map failed", exc_info=True)
+    return child_map
+
+
+def _rss_mb_from_tree(
+    pid: int,
+    child_map: dict[int, list[int]],
+    exclude_pids: set[int] = frozenset(),  # type: ignore[assignment]
+    proc_root: Path | None = None,
+) -> int:
+    """RSS (MiB) of *pid* + its descendant tree using a PREBUILT child map.
+
+    Split out from ``get_session_rss_mb`` so a caller measuring many session
+    trees in one sweep can build the ``/proc`` parent->child map ONCE (via
+    ``_build_child_map``) and reuse it across every tree, rather than re-scanning
+    all of ``/proc`` per tree. The map is read-only here, so it is safe to share
+    across sequential/threaded calls. Any PID in *exclude_pids* is skipped along
+    with its subtree. Resident pages are summed across the tree and converted to
+    MiB once at the end.
+    """
+    total_pages = 0
+    seen: set[int] = set()
+    frontier = [pid]
+    while frontier:
+        current = frontier.pop()
+        if current in seen or current in exclude_pids:
+            continue
+        seen.add(current)
+        total_pages += _read_rss_pages(current, proc_root)
+        frontier.extend(child_map.get(current, ()))
+    return (total_pages * _PAGE_SIZE) // (1024 * 1024)
+
+
+def get_session_rss_mb(
+    pid: int,
+    exclude_pids: set[int] = frozenset(),  # type: ignore[assignment]
+    proc_root: Path | None = None,
+) -> int:
+    """Total RSS (MiB) of *pid* plus its descendant tree, via ``/proc``.
+
+    Single-tree convenience: builds the parent->child map with one
+    ``/proc/*/stat`` scan (see ``_build_child_map``) and delegates to
+    ``_rss_mb_from_tree``. To measure MANY trees in one sweep, build the map
+    once with ``_build_child_map()`` and call ``_rss_mb_from_tree()`` per tree so
+    ``/proc`` is scanned only once, not once per tree.
+
+    Any PID in *exclude_pids* is skipped along with the entire subtree beneath
+    it — a defensive barrier so a caller can exclude a shared sub-tree (e.g. a
+    pooled backend). Resident pages are summed and converted to MiB once at the
+    end, so the reading is not biased downward by per-PID truncation.
+
+    *proc_root* overrides the ``/proc`` mount (test seam only).
+
+    Linux-only (reads ``/proc``); returns 0 on platforms without it.
+    """
+    if sys.platform != "linux":
+        return 0
+    child_map = _build_child_map(proc_root)
+    return _rss_mb_from_tree(pid, child_map, exclude_pids, proc_root)

@@ -207,6 +207,7 @@ Jane Doe (janedoe), John Smith (jsmith)
 | `autonudge.py` | Reactive same-session self-nudge service |
 | `snapshot.py` | Portable snapshot and restore for KiroCrew state |
 | `vector_memory.py` | Vector-based semantic memory with FAISS |
+| `watchdog.py` | Session cleanup watchdog (CleanupHook dispatcher; RSS-threshold recycle) |
 | `voice_reply.py` | Voice reply synthesis |
 | `atomic_write.py` | Atomic file write utilities |
 | `constants.py` | Shared constants |

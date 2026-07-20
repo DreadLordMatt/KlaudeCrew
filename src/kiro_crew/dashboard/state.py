@@ -285,6 +285,10 @@ _AUTO_COMPACT_FAILED_NOTICE = (
     "⚠ Auto-compact failed at {pct:.0f}% — will retry after cooldown. "
     "You can run `/compact` manually."
 )
+_SESSION_RECYCLED_NOTICE = (
+    "♻️ This session was recycled by the watchdog ({reason}). "
+    "Conversation history is preserved — your next message starts a fresh process."
+)
 _MAX_SLOT_MESSAGES = 10000  # Keep all messages — virtual scrolling handles performance
 # FIFO ceiling on a slot's pending-context queue (app-kit context inject +
 # Slack thread backfill). Shared so the two eviction sites cannot drift.
@@ -1341,6 +1345,35 @@ class DashboardState:
                     )
 
         self.sessions.set_compact_callback(_on_compacted)
+
+    def wire_session_recycle_callback(self) -> None:
+        """Register the dashboard's recycle-notification callback.
+
+        Fired when the watchdog recycles a session (e.g. RSS threshold). Posts a
+        notice into the slot so the user understands why their session reset.
+        """
+
+        async def _on_recycled(key: str, *, reason: str) -> None:
+            if not key.startswith("dashboard:"):
+                return
+            slot_key = key[len("dashboard:"):]
+            slot = self.get_slot(slot_key)
+            if slot is None:
+                return
+            message = _SESSION_RECYCLED_NOTICE.format(reason=reason)
+            try:
+                # Tag kind="compaction" so the dashboard's follow-up [OPTIONS:]
+                # backward scan skips this proactive system notice, matching the
+                # auto-compact notice invariant.
+                slot.append(
+                    "assistant", message, "msg msg-a", meta={"kind": "compaction"}
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Failed to append recycle notice to slot %s", slot_key
+                )
+
+        self.sessions.set_recycle_callback(_on_recycled)
 
     def _count_lessons(self) -> int:
         """Count lessons from JSONL store + vector store (if enabled)."""

@@ -87,6 +87,38 @@ check (`dashboard/handlers/cron.py`).
 - **Idle cleanup**: expires sessions after `session.timeout_secs` (default
   60min). Never expires `BACKGROUND_KEY`. Dashboard per-tab sessions
   (`dashboard:{slot_key}`) idle-expire like any other session.
+- **Session Watchdog** (`watchdog.py`): the cleanup loop delegates its periodic
+  behaviours to a `SessionWatchdog` — a stateless sequential dispatcher over
+  named `CleanupHook(name, run)` entries (Command pattern; `tick()` isolates a
+  hook failure with a debug-level backstop only, never promoting the severity
+  of errors the lifted inline blocks swallowed). Hooks registered in
+  `SessionManager.__init__`: `idle_expiry` (gate + clamped timeout published
+  onto `self._idle_sweep_enabled`/`self._idle_timeout` by `_cleanup_loop`),
+  `orphan_mcp` (maintenance-executor offload, Mesh-1968), `denied_commands`
+  (re-enforcement offloaded to the maintenance executor — deliberate
+  sync→thread change from the old inline block), and `rss_threshold`. The
+  orphan-PID / session-root / sandbox-profile sweeps remain inline in
+  `_cleanup_loop` (CR 2 extracts them).
+- **RSS-threshold recycle** (`_rss_threshold_check`, config
+  `session.watchdog_rss_max_mb`, default 0 = disabled): recycles non-busy
+  sessions whose `/proc` process-tree RSS (MiB) exceeds the ceiling. Skips
+  persistent (`_PERSISTENT_KEYS`) and `channel:`-prefixed keys — the same
+  protected set as the idle sweep — and any session whose turn is in flight.
+  The `/proc` parent→child map is built ONCE per tick off-loop
+  (`_build_child_map` on the maintenance executor) and shared across
+  candidate trees (`_rss_mb_from_tree`); resident pages are summed across the
+  tree and converted to MiB once at the end. Measurement happens off-lock, so
+  the victim's session object is captured at collection time and handed to
+  `reset(expect_session=..., skip_if_busy=True)`, which re-verifies identity +
+  not-busy atomically under the lock; a recycle that actually happened logs a
+  warning, bumps `Stats().inc_session_cleaned()`, and fires the recycle
+  callback (`set_recycle_callback` — mirrors the compact callback; wired by
+  `dashboard/state.wire_session_recycle_callback()` from both `server.py`
+  start paths to post a user-visible "session recycled" notice into
+  `dashboard:` slots, tagged `meta={"kind": "compaction"}` so the [OPTIONS:]
+  backward scan skips it). Idle/orphan sweeps do NOT fire the recycle
+  callback. Linux-only measurement (`get_session_rss_mb` returns 0 elsewhere),
+  so the feature is inert off-Linux.
 
 ## APIs
 
@@ -99,7 +131,7 @@ check (`dashboard/handlers/cron.py`).
 | `release(key)` | Release per-session semaphore (must call in `finally`). |
 | `cancel_current(key, *, wait_ack_timeout=0.0)` | Cancel in-flight operation without destroying session. Returns `CancelOutcome`. Default `wait_ack_timeout=0.0` preserves fire-and-forget behavior for internal callers (taskrunner, subagent, llm_helpers). |
 | `stop_turn(key, *, force=False, on_soft=None, on_hard=None)` | Cooperative stop with kill fallback. Returns `StopOutcome` (`"soft"`, `"hard"`, or `"idle"`). Clears queue unconditionally, then sends `session/cancel` and waits up to `agent.soft_stop_budget_secs`; falls back to `reset()` + eager respawn on timeout or error. `force=True` skips cancel and goes straight to hard kill. `on_soft`/`on_hard` callbacks fire before return. |
-| `reset(key)` | Kill session. Does NOT delete session map entry (kiro-cli file persists for future resume). |
+| `reset(key, *, expect_session=None, skip_if_busy=False)` | Kill session; returns `bool` (True iff a session was actually torn down). Does NOT delete session map entry (kiro-cli file persists for future resume). Optional guards evaluated atomically under the lock with the pop, used by the RSS-recycle watchdog: `expect_session` only resets if that exact session object still occupies the key (guards against recycling a reset+recreated session on a stale off-lock RSS reading); `skip_if_busy` skips when the current session's semaphore is held so a live stream is never cut mid-turn. |
 | `remove(key)` | Kill session AND delete session map entry (explicit tab delete — no resume expected). |
 | `close_all()` | Save all active session mappings, then shut down every session and drain warm pool. |
 | `warm_pool_size` | Property: number of warm sessions available. |
