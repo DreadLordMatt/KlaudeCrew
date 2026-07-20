@@ -1130,7 +1130,10 @@ describe('slotHistory — session navigation stack', () => {
     let state = { ...initial, activeSlot: 'A' }
     state = reducer(state, {
       type: 'chat/createSlot/fulfilled',
-      meta: { arg: undefined, requestId: 'r1', requestStatus: 'fulfilled' as const },
+      // originActiveSlot === activeSlot ('A'): the create resolved while the
+      // user was still on A (fast create / didn't switch away), so the new slot
+      // activates normally. Mesh-2908 only guards the switched-away case.
+      meta: { arg: undefined, requestId: 'r1', requestStatus: 'fulfilled' as const, originActiveSlot: 'A' },
       payload: { key: 'new-slot' },
     })
     expect(state.slotHistory).toEqual(['A'])
@@ -1763,5 +1766,66 @@ describe('selectComposerBusy', () => {
   it('falls back to the global running flag when slot is null', () => {
     expect(selectComposerBusy(wrap({ ...withSlot, slotRunning: true }), null)).toBe(true)
     expect(selectComposerBusy(wrap(withSlot), null)).toBe(false)
+  })
+})
+
+// Mesh-2908: a slow createSlot (backend round-trip under memory pressure) must
+// not hijack the view if the user switched to another session while it was
+// pending. Mirrors the switched-away guard every other async thunk already has
+// (switchSlot/refreshSlot/warmSlotCache). Without the guard, createSlot.fulfilled
+// unconditionally reassigns activeSlot + clears messages, stealing the tab the
+// user is now typing in ("New Chat copies my text into the new chat").
+describe('createSlot.fulfilled switched-away guard (Mesh-2908)', () => {
+  const initial = reducer(undefined, { type: '@@INIT' })
+
+  // origin is the activeSlot captured when the create was dispatched; the
+  // reducer carries it in action.meta (fulfillWithValue), not the payload.
+  const fulfilled = (key: string, origin: string | null) => ({
+    type: 'chat/createSlot/fulfilled',
+    meta: { arg: undefined, requestId: 'r1', requestStatus: 'fulfilled' as const, originActiveSlot: origin },
+    payload: { key, title: key, messages: 0, running: false },
+  })
+
+  it('activates the new slot when the user has NOT switched away (normal case)', () => {
+    // No slot is active yet (empty New Chat from the welcome screen): origin is
+    // null and still matches activeSlot, so the fresh slot becomes active.
+    const state = reducer(initial, fulfilled('new-slot', null))
+    expect(state.activeSlot).toBe('new-slot')
+    expect(state.messages).toEqual([])
+  })
+
+  it('does NOT steal activeSlot if the user switched to another slot while the create was pending', () => {
+    // User is looking at (and typing into) slot-b when a slow New Chat resolves.
+    // The create was dispatched from the welcome screen (origin null), so it no
+    // longer matches the now-active slot-b.
+    const busy = {
+      ...initial,
+      activeSlot: 'slot-b',
+      messages: [{ role: 'user' as const, content: 'text I typed into slot-b', cls: '' }],
+    }
+    const state = reducer(busy, fulfilled('new-slot', null))
+    // The view stays on slot-b; the just-created slot must not hijack it.
+    expect(state.activeSlot).toBe('slot-b')
+    expect(state.messages).toHaveLength(1)
+    expect(state.messages[0].content).toBe('text I typed into slot-b')
+  })
+
+  it('does not clobber the active slot activity when a late create resolves', () => {
+    const busy = {
+      ...initial,
+      activeSlot: 'slot-b',
+      toolLog: [{ type: 'tool' as const, text: 'read', ts: 1 }],
+    }
+    const state = reducer(busy, fulfilled('new-slot', null))
+    expect(state.activeSlot).toBe('slot-b')
+    expect(state.toolLog).toHaveLength(1)
+  })
+
+  it('clears the creatingSlot pending flag even when it does not activate (switched away)', () => {
+    // The "Creating…" spinner must not stay stuck on after a switched-away create.
+    const busy = { ...initial, activeSlot: 'slot-b', creatingSlot: true }
+    const state = reducer(busy, fulfilled('new-slot', null))
+    expect(state.activeSlot).toBe('slot-b')
+    expect(state.creatingSlot).toBe(false)
   })
 })

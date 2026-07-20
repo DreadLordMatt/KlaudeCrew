@@ -477,6 +477,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     if (saveDraftsTimer.current) { clearTimeout(saveDraftsTimer.current); saveDraftsTimer.current = null }
     saveDrafts()
   }, [saveDrafts])
+  // Outgoing-slot flush key, advanced inside the slot-change effect after it
+  // flushes that slot's draft. Distinct from composerSlotRef (the live persist
+  // key); both must trail their writes or the draft smear returns. Mesh-2908.
   const prevSlot = useRef<string | null>(null)
   // Latest-value ref for `activeSlot`, updated every render. Used by async
   // upload callbacks (takeScreenshot, uploadFiles) to detect when the user
@@ -484,6 +487,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   // so the uploaded file lands in the original slot's draft instead of
   // silently appearing in whatever slot is now active.
   const activeSlotRef = useRef(activeSlot); activeSlotRef.current = activeSlot
+  // The slot the live composer state belongs to; the per-composer persist
+  // effects key off this, not `activeSlot`. Advanced by a dedicated effect
+  // declared AFTER those effects so a batched keystroke+switch can't smear one
+  // slot's draft onto another. See that advance effect for the full rationale. Mesh-2908.
+  const composerSlotRef = useRef(activeSlot)
   const [input, setInput] = useState(() => activeSlot ? drafts.current[activeSlot] ?? '' : '')
 
   // History suggestions ("Continue a previous chat?") shown above the input on the welcome screen.
@@ -847,7 +855,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     })()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { inputRef.current = input; if (activeSlot) { setDraft(drafts.current, activeSlot, input); saveDraftsDebounced() } }, [input, saveDraftsDebounced]) // eslint-disable-line react-hooks/exhaustive-deps -- activeSlot intentionally omitted; slot-change effect handles that transition
+  // Persist the composer text against the slot it BELONGS to (composerSlotRef),
+  // not the live activeSlot (see the composerSlotRef note above). Mesh-2908.
+  useEffect(() => { inputRef.current = input; const s = composerSlotRef.current; if (s) { setDraft(drafts.current, s, input); saveDraftsDebounced() } }, [input, saveDraftsDebounced]) // eslint-disable-line react-hooks/exhaustive-deps -- draft key is composerSlotRef; slot-change effect handles the transition
   // Per-slot draft: save current → restore target (persisted to localStorage)
   useEffect(() => {
     // Re-hydrate from localStorage — only pull in keys we don't already have
@@ -934,14 +944,14 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   const pendingFilesRef = useRef(pendingFiles)
   useEffect(() => {
     pendingFilesRef.current = pendingFiles
-    if (activeSlot) {
-      setFileDraft(fileDrafts.current, activeSlot, pendingFiles)
+    // Key off composerSlotRef, not activeSlot (see the composerSlotRef note). Mesh-2908.
+    const s = composerSlotRef.current
+    if (s) {
+      setFileDraft(fileDrafts.current, s, pendingFiles)
       saveDraftsDebounced()
     }
-    // `activeSlot` is intentionally omitted; the slot-change effect handles the
-    // draft transition when the slot changes, so re-running here on activeSlot
-    // would double-write / clobber the freshly loaded draft.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- draft key is
+    // composerSlotRef; slot-change effect handles that transition
   }, [pendingFiles, saveDraftsDebounced])
   // Collapsed paste blocks backing the `[ Paste #N · M lines ]` tokens in
   // `input`. Persisted per-slot via chatPasteDrafts (localStorage, 30-day TTL)
@@ -950,15 +960,24 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   const pasteBlocksRef = useRef(pasteBlocks)
   useEffect(() => {
     pasteBlocksRef.current = pasteBlocks
-    // Live-persist the active slot's blocks so a slot switch / refresh restores
+    // Live-persist the composer's blocks so a slot switch / refresh restores
     // them alongside the text draft (mirrors the pendingFiles effect above).
-    if (activeSlot) {
-      setPasteDraft(pasteDrafts.current, activeSlot, pasteBlocks)
+    // Key off composerSlotRef, not activeSlot (see the composerSlotRef note). Mesh-2908.
+    const s = composerSlotRef.current
+    if (s) {
+      setPasteDraft(pasteDrafts.current, s, pasteBlocks)
       saveDraftsDebounced()
     }
-    // activeSlot intentionally omitted; slot-change effect handles that transition.
+    // draft key is composerSlotRef; slot-change effect handles that transition.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pasteBlocks, saveDraftsDebounced])
+  // Advance the composer draft key AFTER the three persist effects above. React
+  // runs effects in declaration order, so on a slot switch each persist effect
+  // has already written its changed value against the OUTGOING slot before this
+  // repoints the key at the incoming one. Declared last on purpose. Moving it
+  // earlier (or back into the slot-change effect) would let a file/paste change
+  // batched with the switch smear onto the new slot. Mesh-2908.
+  useEffect(() => { composerSlotRef.current = activeSlot }, [activeSlot])
   const [uploadError, setUploadError] = useState('')
   const [uploadNotice, setUploadNotice] = useState('')
   const isMac = useAppSelector(s => s.dashboard.status?.platform) === 'darwin'
@@ -1752,9 +1771,17 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     widgetPrefillRef.current = null
     if (!raw && !pendingFilesRef.current.length) return
 
+    // The session actually on screen at send time. Read from the ref (fresh
+    // every render), not the closure `activeSlot` (stale until send() is
+    // re-memoized). Under lag a reducer-driven activeSlot change can move the
+    // active slot before ChatPage re-renders, so the closure would route into
+    // the slot the user just left. Used for slash routing, the composer draft
+    // clear, and (below) the send target. Mesh-2908.
+    const uiSlot = activeSlotRef.current
+
     // Slash command interception (e.g. /side): runs before knowledge so a
     // bare prefix like /side returns immediately without touching input parse.
-    const slashResult = await interceptSlashCommand(raw, activeSlot, dispatch)
+    const slashResult = await interceptSlashCommand(raw, uiSlot, dispatch)
     if (slashResult.intercepted) {
       if (!optionText) { setInput(''); setPasteBlocks([]) }
       return
@@ -1786,14 +1813,16 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
 
     setPrefillHint(false)
     if (!optionText) {
-      setInput(''); setPendingFiles([]); setPasteBlocks([]); if (activeSlot) { delete drafts.current[activeSlot]; delete fileDrafts.current[activeSlot]; delete pasteDrafts.current[activeSlot]; saveDrafts() }
+      setInput(''); setPendingFiles([]); setPasteBlocks([]); if (uiSlot) { delete drafts.current[uiSlot]; delete fileDrafts.current[uiSlot]; delete pasteDrafts.current[uiSlot]; saveDrafts() }
       // The challenge-handoff prompt is seeded into PREFILL_STORAGE_KEY and the
       // slot-restore effect re-applies it on slot changes. Once that prompt is
       // sent, clear the seed so a later slot-restore can't re-fill the (now
       // empty) composer with the already-sent text.
       try { sessionStorage.removeItem(PREFILL_STORAGE_KEY) } catch { /* sessionStorage unavailable */ }
     }
-    let slot = targetSlot ?? activeSlot
+    // Target the slot the user is actually looking at (uiSlot, from the ref),
+    // not the stale closure `activeSlot`. See the uiSlot note above. Mesh-2908.
+    let slot = targetSlot ?? uiSlot
     // Only a normal (non-targeted) send consumes the one-shot "new session"
     // intent. A targeted send — e.g. submitting document comments to the
     // document's origin slot — must leave it intact for the user's next send.
@@ -1877,6 +1906,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     // are stable, and defaultAgent is only a creation-time fallback — pulling
     // them into the dep array would defeat that stability without changing
     // outcomes.
+    // send() no longer reads the closure `activeSlot` for its target. It reads
+    // uiSlot = activeSlotRef.current, so it routes to the on-screen slot even
+    // between the reducer flip and this callback's re-memoization (Mesh-2908).
+    // activeSlot is left in deps as a harmless no-op: dropping it churns the
+    // array for no behavior change (the ref is always current regardless).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSlot, dispatch, connected])
 

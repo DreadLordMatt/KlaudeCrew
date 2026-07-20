@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { ReactNode } from 'react'
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
@@ -7,7 +10,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { configureStore } from '@reduxjs/toolkit'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ThemeProvider } from '../hooks/useTheme'
-import chatReducer, { setActiveSlot } from '../store/chatSlice'
+import chatReducer, { setActiveSlot, switchSlot, createSlot } from '../store/chatSlice'
 import dashboardReducer from '../store/dashboardSlice'
 import notificationsReducer from '../store/notificationsSlice'
 
@@ -30,6 +33,10 @@ vi.mock('../api/client', () => ({
     spawnList: vi.fn().mockResolvedValue({ agents: [] }),
     uploadFiles: vi.fn().mockResolvedValue({ paths: [] }),
     screenshot: vi.fn().mockResolvedValue({ path: null }),
+    createChatSlot: vi.fn().mockResolvedValue({ key: 'new-slot', title: 'new-slot', messages: 0, running: false }),
+    setSlotColor: vi.fn().mockResolvedValue({ ok: true }),
+    setSlotFolder: vi.fn().mockResolvedValue({ ok: true }),
+    chatSlotProject: vi.fn().mockResolvedValue({ ok: true }),
   },
   SEARCH_MIN_CHARS: 2,
 }))
@@ -107,6 +114,56 @@ async function renderAndWaitForInput(store: ReturnType<typeof makeStore>, mode?:
 beforeEach(() => {
   sessionStorage.clear()
   localStorage.clear()
+})
+
+// Mesh-2908: the per-slot draft fix relies on a load-bearing effect ORDER --
+// ALL THREE per-composer persist effects (text, files, pastes) must be declared
+// before the effect that advances composerSlotRef.current. React runs effects
+// in declaration order, so if the advance ran first a persist effect batched
+// with a slot switch would see the already-advanced ref and smear the outgoing
+// slot's value onto the incoming one. A behavioral test can't reach this (RTL
+// flushes effects between a keystroke and a dispatch, so the two never share a
+// commit); this static source-order assertion does, and goes red the instant
+// someone reorders the effects or moves the advance up. All three persist
+// writes are asserted (not just text) because the advance now guards all three.
+describe('ChatPage composerSlotRef effect ordering (Mesh-2908)', () => {
+  it('declares all three composer-persist effects before advancing composerSlotRef', () => {
+    // Deliberately brittle: this matches exact code substrings from ChatPage.tsx
+    // to lock a load-bearing effect-declaration order. An innocuous rename/reformat
+    // will trip it. The fix is to UPDATE the substrings below to the new form,
+    // never to delete the guard (the ordering invariant it protects is real).
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
+    const textIdx = src.indexOf('setDraft(drafts.current, s, input)')
+    const fileIdx = src.indexOf('setFileDraft(fileDrafts.current, s, pendingFiles)')
+    const pasteIdx = src.indexOf('setPasteDraft(pasteDrafts.current, s, pasteBlocks)')
+    const advanceIdx = src.indexOf('composerSlotRef.current = activeSlot')
+    expect(textIdx, 'text-persist effect (setDraft off composerSlotRef) not found').toBeGreaterThan(-1)
+    expect(fileIdx, 'file-persist effect (setFileDraft off composerSlotRef) not found').toBeGreaterThan(-1)
+    expect(pasteIdx, 'paste-persist effect (setPasteDraft off composerSlotRef) not found').toBeGreaterThan(-1)
+    expect(advanceIdx, 'composerSlotRef advance not found').toBeGreaterThan(-1)
+    const order = 'persist effect must be declared BEFORE the composerSlotRef advance (Mesh-2908 draft-smear guard). If effects moved, UPDATE the substrings; do not delete this guard.'
+    expect(textIdx, order).toBeLessThan(advanceIdx)
+    expect(fileIdx, order).toBeLessThan(advanceIdx)
+    expect(pasteIdx, order).toBeLessThan(advanceIdx)
+  })
+
+  // Symptom B (send routing to the slot the user already left) can't be covered
+  // behaviorally: the ref-vs-closure divergence it fixes is a same-tick race
+  // between the reducer's activeSlot flip and send()'s re-memoization, and RTL
+  // flushes a render between any dispatch and the Enter event, so the closure
+  // and activeSlotRef never disagree in a test. Guard the fix statically
+  // instead: send() must resolve its target from uiSlot (= activeSlotRef.current),
+  // never the bare closure activeSlot. Goes red if someone reverts `?? uiSlot`.
+  it('sends to uiSlot (activeSlotRef), not the stale closure activeSlot (Mesh-2908 Symptom B)', () => {
+    // Same brittle-by-design string match: if the send-target lines are renamed,
+    // UPDATE the substrings to the new form; do not delete this guard.
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
+    expect(src, 'uiSlot must be read from the activeSlot ref').toContain('const uiSlot = activeSlotRef.current')
+    expect(src, 'send target must resolve from uiSlot').toContain('let slot = targetSlot ?? uiSlot')
+    expect(src, 'send target must NOT fall back to the stale closure activeSlot').not.toContain('let slot = targetSlot ?? activeSlot')
+  })
 })
 
 describe('ChatPage draft persistence', { timeout: 15_000 }, () => {
@@ -364,6 +421,47 @@ describe('ChatPage draft persistence', { timeout: 15_000 }, () => {
       expect(pasteDrafts['slot-a']).toBeTruthy()
       expect(pasteDrafts['slot-a'][0].content).toBe(pasted)
     })
+  })
+
+  it('slow New Chat that resolves after a slot switch does not steal the typed text (Mesh-2908)', async () => {
+    // Symptom A: memory is high, user clicks New Chat, the create backend call
+    // hangs. User switches to slot-b and types. When the slow create finally
+    // resolves it must NOT hijack the view and drag slot-b's text into the new
+    // chat. The text stays in slot-b, and the new chat opens empty.
+    const { api } = await import('../api/client')
+    let resolveCreate!: (v: { key: string; title: string; messages: number; running: boolean }) => void
+    const deferred = new Promise<{ key: string; title: string; messages: number; running: boolean }>(r => { resolveCreate = r })
+    vi.mocked(api.createChatSlot).mockReturnValueOnce(deferred as any)
+
+    const store = makeStore('slot-a', [{ key: 'slot-a' }, { key: 'slot-b' }])
+    await renderAndWaitForInput(store)
+
+    // Kick off a slow New Chat (stays pending).
+    let createPromise: Promise<unknown>
+    act(() => { createPromise = store.dispatch(createSlot(undefined)) })
+
+    // User gives up waiting, switches to slot-b, and types there.
+    await act(async () => { await store.dispatch(switchSlot('slot-b')) })
+    fireEvent.change(screen.getByLabelText('Message input'), { target: { value: 'text meant for slot-b' } })
+
+    // The slow create finally resolves.
+    await act(async () => {
+      resolveCreate({ key: 'new-slot', title: 'new-slot', messages: 0, running: false })
+      await createPromise
+    })
+
+    // The view must still be on slot-b with the typed text intact...
+    expect(store.getState().chat.activeSlot).toBe('slot-b')
+    expect((screen.getByLabelText('Message input') as HTMLTextAreaElement).value).toBe('text meant for slot-b')
+
+    // ...and once the debounced draft save flushes, the text must be keyed to
+    // slot-b, never leaked into the new chat's draft.
+    const saved = await waitFor(() => {
+      const s = JSON.parse(localStorage.getItem('mc-chat-drafts') || '{}')
+      expect(s['slot-b']).toBe('text meant for slot-b')
+      return s
+    })
+    expect(saved['new-slot']).toBeUndefined()
   })
 
   it('restores draft to localStorage on connection error (Mesh-1468)', async () => {
