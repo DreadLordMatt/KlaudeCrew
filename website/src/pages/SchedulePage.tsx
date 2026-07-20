@@ -546,7 +546,7 @@ function JobDetailPanel({ job, agents, defaultAgent, onClose, onSaved }: {
           </div>
         )}
         {detailTab === 'logs' && job ? (
-          <JobLogsView jobId={job.id} isRunning={job.is_running} runningSince={job.running_since} onCancel={async () => { try { await api.cancelCron(job.id); onSaved() } catch (e: unknown) { setPanelError(e instanceof Error ? e.message : 'Failed') } }} />
+          <JobLogsView jobId={job.id} isRunning={job.is_running} runningSince={job.running_since} cancelError={panelError} onCancel={async () => { setPanelError(null); try { await api.cancelCron(job.id); onSaved() } catch (e: unknown) { setPanelError(e instanceof Error ? e.message : 'Failed') } }} />
         ) : (
           <>
             <JobForm job={job} agents={agents} defaultAgent={defaultAgent} onSaved={onSaved} layout="vertical" externalSubmit submitRef={submitRef} onSavingChange={setSaving} />

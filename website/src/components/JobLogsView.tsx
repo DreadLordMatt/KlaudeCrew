@@ -6,7 +6,7 @@ import LogEntry, { type LogEntryData } from './LogEntry'
 
 const PAGE_SIZE = 10
 
-export default function JobLogsView({ jobId, isRunning, runningSince, onCancel }: { jobId: string; isRunning?: boolean; runningSince?: number | null; onCancel?: () => void }) {
+export default function JobLogsView({ jobId, isRunning, runningSince, onCancel, cancelError }: { jobId: string; isRunning?: boolean; runningSince?: number | null; onCancel?: () => void; cancelError?: string | null }) {
   const [page, setPage] = useState(0)
   const [elapsed, setElapsed] = useState(0)
 
@@ -44,6 +44,10 @@ export default function JobLogsView({ jobId, isRunning, runningSince, onCancel }
           </span>
         </div>
       )}
+      {/* A cancel failure sets panelError in the parent; on the Logs tab that
+          error had no DOM anchor (it only rendered in the Details branch), so a
+          failed Cancel showed no feedback. Render it here too. */}
+      {cancelError && <div className="text-danger text-[13px] px-3">{cancelError}</div>}
       {error ? (
         <div className="text-danger text-sm px-3">{error instanceof Error ? error.message : 'Failed to load history'}</div>
       ) : isLoading ? (
