@@ -137,7 +137,15 @@ async def api_skills_discover(request: web.Request) -> web.Response:
             "repo_url": _redact_external(r.repo_url),
             "author": _redact_external(r.author),
             "installed": installed,
-            "tags": [_redact_external(t) for t in r.tags],
+            # Defense-in-depth: providers should hand back a list[str] (see
+            # SkillsShProvider.search), but a non-list/None or non-string tag
+            # from any provider must not TypeError here and 500 the whole
+            # search response for every provider.
+            "tags": [
+                _redact_external(t)
+                for t in (r.tags or [])
+                if isinstance(t, str)
+            ],
             "installs": r.installs,
         })
 

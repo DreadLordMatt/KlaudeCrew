@@ -260,3 +260,42 @@ class TestRedirectHostAllowlist:
         # Suffix tricks must not pass (exact-host match, not endswith).
         assert not _is_allowed_host("https://skills.sh.evil.example/api")
         assert not _is_allowed_host("https://evilskills.sh/api")
+
+
+class TestSkillsShTagsCoercion:
+    """skills.sh is an unauthenticated, publisher-controlled registry, so a
+    skill's `tags` field is untrusted. dict.get("tags", []) only defaults when
+    the key is ABSENT — a present "tags": null (or any non-list, or a list of
+    non-strings) flowed through unchecked and later crashed the discover
+    handler's `[_redact_external(t) for t in r.tags]` (TypeError: NoneType not
+    iterable, or re.sub 'expected string'), 500-ing the ENTIRE search response
+    for every provider. search() now coerces tags to a list[str]."""
+
+    @pytest.mark.asyncio
+    async def test_null_tags_coerced_to_empty_list(self):
+        payload = {"skills": [{"id": "o/r/x", "name": "x", "source": "o/r", "tags": None}]}
+        with patch("kiro_crew.skill_providers.skillsh._sync_fetch_json", return_value=payload):
+            results = await SkillsShProvider().search("x")
+        assert results[0].tags == []
+
+    @pytest.mark.asyncio
+    async def test_non_string_tag_items_are_dropped(self):
+        payload = {"skills": [{"id": "o/r/y", "name": "y", "source": "o/r", "tags": [5, {}, "ok"]}]}
+        with patch("kiro_crew.skill_providers.skillsh._sync_fetch_json", return_value=payload):
+            results = await SkillsShProvider().search("y")
+        assert results[0].tags == ["ok"]
+
+    @pytest.mark.asyncio
+    async def test_bare_string_tags_not_iterated_per_character(self):
+        # Pre-fix a bare string iterated per-char -> garbage single-char tags.
+        payload = {"skills": [{"id": "o/r/z", "name": "z", "source": "o/r", "tags": "python,web"}]}
+        with patch("kiro_crew.skill_providers.skillsh._sync_fetch_json", return_value=payload):
+            results = await SkillsShProvider().search("z")
+        assert results[0].tags == []
+
+    @pytest.mark.asyncio
+    async def test_well_formed_tags_preserved(self):
+        payload = {"skills": [{"id": "o/r/g", "name": "g", "source": "o/r", "tags": ["docker", "ci"]}]}
+        with patch("kiro_crew.skill_providers.skillsh._sync_fetch_json", return_value=payload):
+            results = await SkillsShProvider().search("g")
+        assert results[0].tags == ["docker", "ci"]
