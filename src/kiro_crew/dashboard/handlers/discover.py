@@ -143,7 +143,7 @@ async def api_skills_discover(request: web.Request) -> web.Response:
             # search response for every provider.
             "tags": [
                 _redact_external(t)
-                for t in (r.tags or [])
+                for t in (r.tags if isinstance(r.tags, list) else [])
                 if isinstance(t, str)
             ],
             "installs": r.installs,
