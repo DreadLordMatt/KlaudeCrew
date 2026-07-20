@@ -3104,19 +3104,37 @@ async def handle_message(
 
             elif event.kind == EVENT_TOOL_CALL:
                 _tool_gap = True
-                # Check tool hooks
+                # Check tool hooks. NOTE: EVENT_TOOL_CALL is informational —
+                # the tool has already been auto-approved by the provider and
+                # is executing; this branch cannot reject_tool(). The real
+                # enforceable gate is EVENT_PERMISSION_REQUEST below. So we do
+                # NOT arm deny-by-default here (is_shell omitted): a shell tool
+                # with an unrecoverable command would otherwise render a
+                # misleading "blocked" message while the tool actually runs.
+                # A genuine deny-list / sensitive-path match still surfaces a
+                # (best-effort, non-enforcing) warning + audit.
                 if context_builder:
                     tool_result = context_builder.hooks.on_tool_call(
-                        event.title, session_key=session_key, agent=_agent or ""
+                        event.title,
+                        session_key=session_key,
+                        agent=_agent or "",
+                        command=event.shell_command,
                     )
                     if tool_result.action == TOOL_DENY:
-                        accumulated += f"\n🚫 _Tool `{event.title}` blocked by hooks._"
+                        # event.title is LLM-authored (select_tool_title prefers
+                        # the model's description) — never post it to Slack raw.
+                        _flagged_title, _ = redact_exfiltration_urls(event.title)
+                        _flagged_title, _ = redact_credentials(_flagged_title)
+                        accumulated += (
+                            f"\n⚠️ _Tool `{_flagged_title}` flagged by security "
+                            f"hooks (already executing; cannot be stopped here)._"
+                        )
                         sel().log_tool_invocation(
                             session_key=session_key,
                             source="slack",
                             tool_name=event.title,
                             tool_kind=event.tool_kind,
-                            outcome="denied",
+                            outcome="flagged_unenforceable",
                             error="hook_deny",
                         )
                         continue
@@ -3198,6 +3216,8 @@ async def handle_message(
                         agent=_agent or "",
                         tool_kind=event.tool_kind,
                         raw_params=event.raw_tool_params,
+                        command=event.shell_command,
+                        is_shell=event.is_shell,
                     )
                     if tool_result.action == TOOL_AUTO_APPROVE:
                         await client.approve_tool(event.request_id)
@@ -3215,7 +3235,10 @@ async def handle_message(
                     if tool_result.action == TOOL_DENY:
                         await client.reject_tool(event.request_id)
                         Stats().inc_tool_denial()
-                        accumulated += f"\n🚫 _Tool `{event.title}` blocked by hooks._"
+                        # event.title is LLM-authored — redact before posting.
+                        _blocked_title, _ = redact_exfiltration_urls(event.title)
+                        _blocked_title, _ = redact_credentials(_blocked_title)
+                        accumulated += f"\n🚫 _Tool `{_blocked_title}` blocked by hooks._"
                         sel().log_tool_invocation(
                             session_key=session_key,
                             source="slack",

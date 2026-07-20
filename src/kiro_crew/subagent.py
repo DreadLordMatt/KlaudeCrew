@@ -2218,6 +2218,8 @@ class SubagentManager:
                     agent=info.agent or "",
                     tool_kind=event.tool_kind,
                     raw_params=event.raw_tool_params,
+                    command=event.shell_command,
+                    is_shell=event.is_shell,
                 )
                 if tool_result.action == TOOL_DENY:
                     await self._reject_and_log(

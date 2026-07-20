@@ -2706,12 +2706,18 @@ async def _run_chat(
                     assistant_text = ""
                 _pre_tool_hooks_fired = False
                 if state.context_builder:
+                    # Pass the raw shell command (not just the display title)
+                    # so the security gate evaluates what actually executes.
+                    # event.title may be an LLM-authored description that hides
+                    # a dangerous command (see HookManager.on_tool_call).
                     tool_result = state.context_builder.hooks.on_tool_call(
                         event.title,
                         session_key=session_key,
                         agent=slot.agent or "",
                         tool_kind=event.tool_kind,
                         raw_params=event.raw_tool_params,
+                        command=event.shell_command,
+                        is_shell=event.is_shell,
                     )
                     if tool_result.action == TOOL_DENY:
                         await client.reject_tool(event.request_id)

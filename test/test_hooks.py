@@ -277,6 +277,140 @@ class TestToolHooks:
         assert mgr.on_tool_call("Running: rm foo").action == TOOL_DENY
 
 
+class TestToolCallEvaluatesRawCommand:
+    """Regression: the security gate must evaluate the ACTUAL shell command,
+    not the LLM-authored pill title/description.
+
+    ``select_tool_title`` (acp/_dispatch.py) prefers a Bash tool's
+    ``description`` field over the literal ``command`` for the pill label,
+    and that label is what reaches ``on_tool_call`` as ``tool_name``. A
+    prompt-injection-influenceable description could therefore carry a
+    benign string while the executed command is dangerous, bypassing both
+    ``auto_deny_tools`` and the built-in sensitive-path / credential-read
+    protections. The security decision MUST run against the raw command
+    (passed as ``command=``), treating the title as untrusted display text.
+
+    ARCC guidance: "AI Command Injection" (cnt_oikES5IaGqdpqw) — no
+    LLM-authored output may drive a shell/tool decision without validation;
+    "Authorization Policy Evaluation Logic" (cnt_2K0RvSVQ1kgIiT) —
+    deny-by-default.
+    """
+
+    def test_auto_deny_pattern_matches_command_not_benign_title(self):
+        cfg = HooksConfig(auto_deny_tools=["*cr --all*"])
+        mgr = HookManager(cfg)
+        # Title/description is benign; the real command is the denied one.
+        result = mgr.on_tool_call("clean up workspace", command="cr --all --yes")
+        assert result.action == TOOL_DENY
+        assert "blocked" in result.reason.lower()
+
+    def test_credential_read_denied_via_command_not_benign_title(self):
+        mgr = HookManager()
+        result = mgr.on_tool_call("check my config", command="cat ~/.aws/credentials")
+        assert result.action == TOOL_DENY
+        assert "sensitive" in result.reason.lower()
+
+    def test_benign_command_with_benign_title_allowed(self):
+        cfg = HooksConfig(auto_deny_tools=["*cr --all*"])
+        mgr = HookManager(cfg)
+        result = mgr.on_tool_call("list files", command="ls -la /workplace")
+        assert result.action == TOOL_ALLOW
+
+    def test_title_still_gates_when_no_command(self):
+        """Non-shell tools (no command) must still be gated by their title."""
+        cfg = HooksConfig(auto_deny_tools=["DangerousTool"])
+        mgr = HookManager(cfg)
+        assert mgr.on_tool_call("DangerousTool").action == TOOL_DENY
+
+    def test_benign_command_does_not_suppress_dangerous_title(self):
+        """Defense in depth: a benign command must not let a dangerous title
+        through — both the title and the command are evaluated."""
+        cfg = HooksConfig(auto_deny_tools=["*cr --all*"])
+        mgr = HookManager(cfg)
+        result = mgr.on_tool_call("cr --all", command="echo hi")
+        assert result.action == TOOL_DENY
+
+    def test_shell_tool_without_recoverable_command_is_denied(self):
+        """Deny-by-default (AutoSDE security-controls): a shell tool whose raw
+        command could not be extracted must NOT be gated on the untrusted
+        title alone — it is denied. Otherwise the title-only fallback IS the
+        bypass this fix closes."""
+        cfg = HooksConfig(auto_deny_tools=["*cr --all*"])
+        mgr = HookManager(cfg)
+        # Benign-looking title, is_shell=True, but no command recovered.
+        result = mgr.on_tool_call("clean up workspace", command=None, is_shell=True)
+        assert result.action == TOOL_DENY
+        assert "verified" in result.reason.lower() or "deny" in result.reason.lower()
+
+    def test_shell_tool_with_command_still_evaluated_normally(self):
+        """A shell tool WITH a recoverable command is gated on the command,
+        not blanket-denied by the deny-by-default guard."""
+        cfg = HooksConfig(auto_deny_tools=["*cr --all*"])
+        mgr = HookManager(cfg)
+        assert (
+            mgr.on_tool_call("list", command="ls -la", is_shell=True).action
+            == TOOL_ALLOW
+        )
+        assert (
+            mgr.on_tool_call("clean up", command="cr --all", is_shell=True).action
+            == TOOL_DENY
+        )
+
+    def test_non_shell_tool_without_command_not_denied_by_default(self):
+        """Non-shell tools (is_shell=False) with no command are the MCP-tool
+        case — they must still be gated by title, not blanket-denied."""
+        mgr = HookManager()
+        assert mgr.on_tool_call("TaskeiGetTask", is_shell=False).action == TOOL_ALLOW
+
+
+class TestShellCommandProperty:
+    """The AcpEvent.shell_command property is the single source that feeds the
+    raw command into the security gate. It must recover the command from BOTH
+    event shapes, or the gate silently degrades to title-only (a no-op fix).
+    """
+
+    def test_from_raw_tool_params(self):
+        from kiro_crew.acp.types import AcpEvent
+
+        ev = AcpEvent(kind="tool_call", is_shell=True, raw_tool_params={"command": "ls -la"})
+        assert ev.shell_command == "ls -la"
+
+    def test_from_tool_input_json_permission_event(self):
+        """permission_request events set tool_input (JSON), NOT raw_tool_params
+        — this is the dashboard's primary gate path, so the fallback is
+        load-bearing. Regression for the AutoSDE finding that the first cut
+        only read raw_tool_params and was a no-op on permission events."""
+        from kiro_crew.acp.types import AcpEvent
+
+        ev = AcpEvent(
+            kind="permission_request",
+            is_shell=True,
+            tool_input='{"command": "cr --all --yes"}',
+        )
+        assert ev.shell_command == "cr --all --yes"
+
+    def test_non_shell_returns_none(self):
+        from kiro_crew.acp.types import AcpEvent
+
+        ev = AcpEvent(kind="tool_call", is_shell=False, raw_tool_params={"command": "ls"})
+        assert ev.shell_command is None
+
+    def test_missing_or_empty_command_returns_none(self):
+        from kiro_crew.acp.types import AcpEvent
+
+        assert AcpEvent(kind="tool_call", is_shell=True, raw_tool_params={}).shell_command is None
+        assert (
+            AcpEvent(kind="tool_call", is_shell=True, raw_tool_params={"command": ""}).shell_command
+            is None
+        )
+
+    def test_malformed_tool_input_returns_none(self):
+        from kiro_crew.acp.types import AcpEvent
+
+        ev = AcpEvent(kind="permission_request", is_shell=True, tool_input="not json{")
+        assert ev.shell_command is None
+
+
 class TestHooksConfigFromDict:
     def test_empty(self):
         cfg = HooksConfig.from_dict({})

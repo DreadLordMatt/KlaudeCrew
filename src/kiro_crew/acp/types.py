@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -229,6 +230,44 @@ class AcpEvent:
     # provider-specific tool_kind literals (which silently re-break on every
     # engine migration / tool rename).
     is_shell: bool = False
+
+    @property
+    def shell_command(self) -> str | None:
+        """The raw shell command for a shell tool call, else None.
+
+        ``title`` for a shell tool may be an LLM-authored ``description``
+        rather than the literal command (``select_tool_title`` prefers
+        ``description``), so security gates must evaluate THIS instead of the
+        title. Returns None for non-shell tools or when no command can be
+        recovered — in the latter case the caller must fall back to
+        deny-by-default (``is_shell`` with an unrecoverable command must NOT be
+        gated on the untrusted title alone; see ``HookManager.on_tool_call``).
+
+        The command is recovered from two shapes because different event kinds
+        populate different fields:
+        - ``raw_tool_params`` dict (tool_call / tool_call_update events), or
+        - ``tool_input`` JSON string (permission_request events, where the ACP
+          ``toolCall`` params are resolved into ``tool_input`` and
+          ``raw_tool_params`` is NOT set — this is the dashboard's primary
+          gate path, so the fallback is load-bearing, not a nicety).
+        """
+        if not self.is_shell:
+            return None
+        if isinstance(self.raw_tool_params, dict):
+            cmd = self.raw_tool_params.get("command")
+            if isinstance(cmd, str) and cmd:
+                return cmd
+        # Fallback: recover the command from the tool_input JSON payload.
+        if self.tool_input:
+            try:
+                parsed = json.loads(self.tool_input)
+            except (ValueError, TypeError):
+                return None
+            if isinstance(parsed, dict):
+                cmd = parsed.get("command")
+                if isinstance(cmd, str) and cmd:
+                    return cmd
+        return None
 
 
 @dataclass

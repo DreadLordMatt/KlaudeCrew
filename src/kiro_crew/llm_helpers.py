@@ -446,6 +446,8 @@ async def _resolve_permission(
             agent=agent,
             tool_kind=event.tool_kind,
             raw_params=event.raw_tool_params,
+            command=event.shell_command,
+            is_shell=event.is_shell,
         )
         if tool_result.action == TOOL_DENY:
             await provider.reject_tool(event.request_id)

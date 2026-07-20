@@ -305,6 +305,8 @@ class TelegramDispatcher:
                     agent=agent,
                     tool_kind=getattr(event, "tool_kind", "") or "",
                     raw_params=getattr(event, "raw_tool_params", None),
+                    command=getattr(event, "shell_command", None),
+                    is_shell=bool(getattr(event, "is_shell", False)),
                 )
                 if result.action == TOOL_DENY:
                     return "deny"
