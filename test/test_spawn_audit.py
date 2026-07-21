@@ -104,8 +104,25 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "apps/backend.py::_proc_start_time",
         "apps/backend.py::_resolve_nvm_path",
         "apps/backend.py::stop_app_backend",
-        "apps/builtins/code_review_sage/tests/test_review_pool.py::test_worker_exposes_live_pid_for_shielding",
+        # gh-CLI open-PR enumeration: fixed `gh api` list-argv (no shell=True);
+        # owner/repo are validated to ^[A-Za-z0-9._-]+$ by adapters.parse_repo_url
+        # and only fill the API path (bounded to api.github.com). NOT sandboxed
+        # because gh needs the host's own authenticated credentials.
+        "apps/builtins/code_review_sage/sage_lib/pipeline.py::list_open_prs",
         "apps/builtins/workflows/server.py::handle_run",
+        # _start_run's worker spawns argv that is ALWAYS pre-wrapped by its
+        # callers through sandboxed_spawn_argv (sync wraps each step with
+        # per-step modes; provision wraps the pod CLI argv) and the spawn
+        # carries resource_limit_preexec() — routing again here would nest
+        # sandboxes. The chokepoint is applied at the call sites.
+        "apps/builtins/dev_fleet/server.py::worker",
+
+        # Dev Fleet builtin backend: async version routes all git/gh through
+        # _run_cmd which calls sandboxed_spawn_argv (the chokepoint). Only
+        # _resolve_primary_checkout uses subprocess.run directly (one-shot
+        # git rev-parse at startup, no agent input, no sandbox needed).
+        "apps/builtins/dev_fleet/server.py::_resolve_primary_checkout",
+        "apps/builtins/dev_fleet/server.py::worker",
         "apps/dependencies.py::_run_aim",
         "cli.py::_consolidate_cmd",
         "cli.py::_ensure_node",

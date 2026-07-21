@@ -142,6 +142,7 @@ from kiro_crew.safety_override import safety_override
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
 from kiro_crew.suggestions import api_suggestions
+from kiro_crew.tips import api_tips_feedback, api_tips_next, api_tips_status
 from kiro_crew.tunnel.setup import setup_tunnel
 
 if TYPE_CHECKING:
@@ -255,7 +256,7 @@ _BASE_CSP = (
     # additionally gates on that exact host shape (framablePreviewUrl) so a
     # crafted webapp_metadata URL on any other host is never framed.
     "frame-src 'self' blob: https://*.cloudfront.net{frame_src_extra}; "
-    "object-src 'none'; base-uri 'self'"
+    "object-src 'none'; base-uri 'self'; frame-ancestors 'self'"
 )
 
 _INSTANCES_FRAME_SRC_EXTRA = " http://127.0.0.1:* http://localhost:* http://*.localhost:*"
@@ -330,6 +331,19 @@ def _apply_security_headers(resp: web.StreamResponse, app: web.Application, path
         _BASE_CSP.format(frame_src_extra=frame_src_extra),
     )
     resp.headers.setdefault("Permissions-Policy", _PERMISSIONS_POLICY)
+    # Defense-in-depth browser headers (CWE-1021/693/200/319). All via
+    # setdefault so a handler can override. frame-ancestors 'self' (in the
+    # CSP above) is the modern clickjacking control; X-Frame-Options SAMEORIGIN
+    # is kept for older browsers. nosniff blocks MIME-confusion; Referrer-Policy
+    # avoids leaking the (token-bearing) dashboard URL cross-origin. HSTS is
+    # inert over the default loopback HTTP bind but protects HTTPS tunnel/desktop
+    # access, so it is set unconditionally (browsers ignore it on plain HTTP).
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    resp.headers.setdefault(
+        "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+    )
 
 
 def _register_dist_static_routes(app: web.Application, dist_dir: Path) -> None:
@@ -1091,6 +1105,11 @@ async def start_dashboard(
     # Suggestions (pre-computed contextual prompts)
     app.router.add_get("/api/suggestions", api_suggestions)
 
+    # Tips (feature discovery)
+    app.router.add_get("/api/tips/next", api_tips_next)
+    app.router.add_get("/api/tips/status", api_tips_status)
+    app.router.add_post("/api/tips/feedback", api_tips_feedback)
+
     # Memory
     app.router.add_get("/api/memory/preferences", handlers.api_memory_preferences)
     app.router.add_put("/api/memory/preferences", handlers.api_memory_preferences)
@@ -1538,8 +1557,12 @@ async def start_dashboard(
     # App token exchange (App Kit §5.1 — must be before auth middleware bypass)
     app.router.add_post("/api/apps/{name}/token", handlers.api_app_token)
 
-    # Register built-in apps (idempotent — surfaces baked-in features in App Store)
-    register_builtin_apps()
+    # Register built-in apps (idempotent — surfaces baked-in features in App Store).
+    # Runs on the executor: escalation cleanup can traverse/delete legacy app
+    # dirs, which must not block the event loop during startup.
+    await asyncio.get_running_loop().run_in_executor(
+        subprocess_executor(), register_builtin_apps
+    )
 
     # One-time migration: disable stale deploy_web builtin installs (now core module).
     # Idempotent — logs once and silently succeeds if already gone.
