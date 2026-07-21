@@ -10,6 +10,8 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -223,6 +225,196 @@ def _slugify_theme_name(name: str) -> str:
     return slug[:_THEME_SLUG_MAX_LEN] or "custom"
 
 
+def _safe_theme_slug(slug: str) -> str | None:
+    """Return the slug if it is filesystem-safe (no traversal), else None.
+
+    Mirrors the inline guard in ``api_theme_detail`` so install/remove share
+    one path-traversal check.
+    """
+    if not isinstance(slug, str) or not slug:
+        return None
+    cleaned = re.sub(r"[^a-z0-9\-]", "", slug)
+    if not cleaned or cleaned != slug:
+        return None
+    return cleaned
+
+
+# ── Installed theme directories (Level 0) ──
+#
+# Editor-created custom themes are flat ``<slug>.json`` files under
+# ``_themes_dir()``.  *Installed* themes (from a local folder or GitHub) are
+# directories ``_themes_dir()/<slug>/`` holding a ``theme.json`` manifest plus
+# a ``variables.json`` (top-level or under ``styles/``).  A file ``<slug>.json``
+# and a directory ``<slug>/`` never collide, so the two stores sit side by side.
+#
+# Level 0 (Color) only: the installer accepts colour variables and rejects any
+# Level 1/2 payload (branding, fonts, overrides.css, overlays, topbar, audio,
+# persona) — the declared ``level`` must be 0 AND no higher-tier asset may be
+# present.  Validation is defensive by construction: bounded entry count, a
+# per-file and total size cap, a filename allowlist, symlink rejection, and a
+# containment check so nothing resolves outside the theme directory.
+
+_THEME_MANIFEST_NAME = "theme.json"
+# variables.json may live at the top level or under styles/ (relative POSIX).
+_THEME_VARIABLES_REL = ("variables.json", "styles/variables.json")
+# Files/dirs (lowercased relative POSIX paths) allowed in a Level-0 theme dir.
+_THEME_L0_ALLOWED = frozenset(
+    {"theme.json", "variables.json", "styles", "styles/variables.json", "readme.md"}
+)
+# Higher-tier (L1/L2) top-level assets whose presence disqualifies a L0 install.
+_THEME_HIGHER_TIER = frozenset(
+    {"overlays", "topbar", "audio", "persona.md", "branding", "fonts", "overrides.css"}
+)
+# VCS/meta files tolerated (not counted, not rejected, not copied into the store)
+# so a cloned repo or a folder carrying LICENSE validates cleanly.
+_THEME_META_IGNORE = frozenset(
+    {".git", ".github", ".gitignore", ".ds_store", "license", "license.md", "license.txt"}
+)
+_THEME_MAX_ENTRIES = 32
+_THEME_MAX_FILE_BYTES = 64 * 1024
+_THEME_MAX_TOTAL_BYTES = 256 * 1024
+# GitHub install: https-only, host allowlist, argv (no shell), bounded time.
+_THEME_GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
+_THEME_CLONE_TIMEOUT_SEC = 30
+
+
+def _installed_theme_dir(slug: str) -> Path:
+    """Directory for an *installed* theme: ``_themes_dir()/<slug>/``."""
+    return _themes_dir() / slug
+
+
+def _read_json_file(path: Path, max_bytes: int) -> tuple[Any, str | None]:
+    """Read + parse a JSON file with a byte cap. Returns ``(data, error)``."""
+    try:
+        raw = path.read_bytes()
+    except OSError as e:
+        return None, f"cannot read {path.name}: {e}"
+    if len(raw) > max_bytes:
+        return None, f"{path.name} too large (max {max_bytes} bytes)"
+    try:
+        return json.loads(raw.decode("utf-8")), None
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        return None, f"{path.name} is not valid JSON: {e}"
+
+
+def _validate_theme_dir(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate an installed **Level-0 theme directory** (structure + data).
+
+    On success returns ``(summary, None)`` where ``summary`` is the record to
+    register (``slug``/``name``/``emoji``/``level``/``source``/``dark``/
+    ``light``); on any failure returns ``(None, error)`` and nothing should be
+    registered. Reuses ``_validate_theme_data`` for the colour values so the
+    43-var allowlist and per-value CSS sanitisation are enforced identically to
+    editor-created themes.
+    """
+    if not path.is_dir() or path.is_symlink():
+        return None, "theme path is not a directory"
+
+    root = path.resolve()
+
+    # Walk the tree: bound entry count, reject symlinks / escaping paths,
+    # enforce the filename allowlist + higher-tier denylist, and sum sizes.
+    total = 0
+    entries = 0
+    for entry in sorted(path.rglob("*")):
+        rel = entry.relative_to(path).as_posix().lower()
+        top = rel.split("/", 1)[0]
+        if top in _THEME_META_IGNORE or rel in _THEME_META_IGNORE:
+            continue
+        entries += 1
+        if entries > _THEME_MAX_ENTRIES:
+            return None, f"too many files in theme (max {_THEME_MAX_ENTRIES})"
+        if entry.is_symlink():
+            return None, f"symlinks are not allowed: {entry.name}"
+        try:
+            entry.resolve().relative_to(root)
+        except (OSError, ValueError):
+            return None, "path escapes theme directory"
+        if top in _THEME_HIGHER_TIER or rel in _THEME_HIGHER_TIER:
+            return None, (
+                f"'{rel}' is a Level 1/2 asset; only Level 0 (color) themes "
+                "can be installed yet"
+            )
+        if entry.is_dir():
+            if rel not in _THEME_L0_ALLOWED:
+                return None, f"unexpected directory in theme: '{rel}'"
+            continue
+        if rel not in _THEME_L0_ALLOWED:
+            return None, f"unexpected file in theme: '{rel}'"
+        try:
+            sz = entry.stat().st_size
+        except OSError:
+            return None, f"cannot stat '{rel}'"
+        if sz > _THEME_MAX_FILE_BYTES:
+            return None, f"'{rel}' too large (max {_THEME_MAX_FILE_BYTES} bytes)"
+        total += sz
+    if total > _THEME_MAX_TOTAL_BYTES:
+        return None, f"theme too large (max {_THEME_MAX_TOTAL_BYTES} bytes total)"
+
+    # Manifest (theme.json): must declare level 0 and a name.
+    manifest_path = path / _THEME_MANIFEST_NAME
+    if not manifest_path.is_file():
+        return None, "missing theme.json manifest"
+    manifest, err = _read_json_file(manifest_path, _THEME_MAX_FILE_BYTES)
+    if err:
+        return None, err
+    if not isinstance(manifest, dict):
+        return None, "theme.json must be a JSON object"
+    level = manifest.get("level", 0)
+    if not isinstance(level, int) or isinstance(level, bool) or level != 0:
+        return None, (
+            "only Level 0 (color) themes are supported; "
+            f"theme.json declares level {level!r}"
+        )
+    name = manifest.get("name", "")
+    if not isinstance(name, str) or not name.strip():
+        return None, "theme.json 'name' is required"
+    emoji = manifest.get("emoji", _THEME_DEFAULT_EMOJI)
+    if not isinstance(emoji, str):
+        return None, "theme.json 'emoji' must be a string"
+
+    # Variables (variables.json | styles/variables.json).
+    var_path: Path | None = None
+    for rel in _THEME_VARIABLES_REL:
+        cand = path / rel
+        if cand.is_file():
+            var_path = cand
+            break
+    if var_path is None:
+        return None, "missing variables.json (top-level or under styles/)"
+    variables, err = _read_json_file(var_path, _THEME_MAX_FILE_BYTES)
+    if err:
+        return None, err
+    if not isinstance(variables, dict):
+        return None, "variables.json must be a JSON object"
+
+    # Reuse the colour-data validator (43-var allowlist + CSS sanitisation).
+    theme_data = {
+        "name": name.strip()[:_THEME_NAME_MAX_LEN],
+        "emoji": emoji,
+        "dark": variables.get("dark", {}),
+        "light": variables.get("light", {}),
+    }
+    data_err = _validate_theme_data(theme_data)
+    if data_err:
+        return None, data_err
+
+    raw_slug = manifest.get("slug")
+    slug = _slugify_theme_name(
+        raw_slug if isinstance(raw_slug, str) and raw_slug.strip() else name
+    )
+    summary = {
+        "slug": slug,
+        "name": theme_data["name"],
+        "emoji": emoji.strip()[:_THEME_EMOJI_MAX_LEN] or _THEME_DEFAULT_EMOJI,
+        "level": 0,
+        "source": "installed",
+        "dark": _strip_to_allowed_vars(variables.get("dark", {})),
+        "light": _strip_to_allowed_vars(variables.get("light", {})),
+    }
+    return summary, None
+
+
 async def api_themes(request: web.Request) -> web.Response:
     """GET /api/themes — list all custom themes, sorted by creation date."""
     themes_path = _themes_dir()
@@ -241,6 +433,27 @@ async def api_themes(request: web.Request) -> web.Response:
                 )
             except (json.JSONDecodeError, OSError):
                 continue
+        # Installed themes are directories (<slug>/) carrying a theme.json.
+        for d in sorted(
+            p for p in themes_path.iterdir() if p.is_dir() and not p.is_symlink()
+        ):
+            mpath = d / "theme.json"
+            if not mpath.is_file():
+                continue
+            try:
+                m = json.loads(mpath.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            result.append(
+                {
+                    "slug": d.name,
+                    "name": m.get("name", d.name),
+                    "emoji": m.get("emoji", _THEME_DEFAULT_EMOJI),
+                    "created_at": m.get("created_at", ""),
+                    "source": "installed",
+                    "level": 0,
+                }
+            )
     # Sort by created_at (oldest first), falling back to name
     result.sort(key=lambda t: t.get("created_at") or "9999")
     return web.json_response({"themes": result})
@@ -282,6 +495,126 @@ async def api_themes_create(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "slug": slug, "theme": theme_data})
 
 
+def _resolve_local_source(path_str: str) -> tuple[Path | None, str | None]:
+    """Resolve a user-supplied local folder path to an existing directory."""
+    if not isinstance(path_str, str) or not path_str.strip():
+        return None, "local 'path' is required"
+    p = Path(path_str).expanduser()
+    if p.is_symlink():
+        return None, "local path must not be a symlink"
+    if not p.is_dir():
+        return None, f"not a directory: {path_str}"
+    return p.resolve(), None
+
+
+def _clone_github(url: str, dest: Path) -> str | None:
+    """Shallow-clone an https github.com repo into ``dest``. Error or None.
+
+    https-only + host allowlist, argv (never shell) so the URL can't inject a
+    command, and a bounded timeout.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return "github 'url' is required"
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() not in _THEME_GITHUB_HOSTS:
+        return "only https github.com URLs are allowed"
+    try:
+        proc = subprocess.run(
+            ["git", "clone", "--depth", "1", "--quiet", "--", url, str(dest)],
+            capture_output=True,
+            text=True,
+            timeout=_THEME_CLONE_TIMEOUT_SEC,
+        )
+    except FileNotFoundError:
+        return "git is not available on the server"
+    except subprocess.TimeoutExpired:
+        return "git clone timed out"
+    if proc.returncode != 0:
+        return f"git clone failed: {proc.stderr.strip()[:200]}"
+    return None
+
+
+def _copy_installed_theme(src: Path, dst: Path) -> None:
+    """Copy only the recognized L0 files from a validated ``src`` into ``dst``.
+
+    Meta/VCS files are intentionally left behind so the installed store holds
+    only ``theme.json`` + the variables file.
+    """
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src / _THEME_MANIFEST_NAME, dst / _THEME_MANIFEST_NAME)
+    top = src / "variables.json"
+    styled = src / "styles" / "variables.json"
+    if top.is_file():
+        shutil.copyfile(top, dst / "variables.json")
+    elif styled.is_file():
+        (dst / "styles").mkdir(exist_ok=True)
+        shutil.copyfile(styled, dst / "styles" / "variables.json")
+
+
+async def api_themes_install(request: web.Request) -> web.Response:
+    """POST /api/themes/install — install a Level-0 theme directory.
+
+    Body: ``{"source": {"type": "local", "path": "..."}}`` or
+    ``{"source": {"type": "github", "url": "https://github.com/..."}}``.
+    Fetch/move -> validate (data + structure) -> register as
+    ``_themes_dir()/<slug>/``.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    source = body.get("source") if isinstance(body, dict) else None
+    if not isinstance(source, dict):
+        return web.json_response({"error": "missing 'source' object"}, status=400)
+    stype = source.get("type")
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="theme-install-"))
+    try:
+        if stype == "local":
+            src, err = _resolve_local_source(source.get("path", ""))
+        elif stype == "github":
+            src = tmp_root / "clone"
+            err = _clone_github(source.get("url", ""), src)
+        else:
+            return web.json_response(
+                {"error": "source.type must be 'local' or 'github'"}, status=400
+            )
+        if err:
+            return web.json_response({"error": err}, status=400)
+
+        summary, err = _validate_theme_dir(src)
+        if err:
+            return web.json_response({"error": err}, status=400)
+
+        slug = summary["slug"]
+        # Collision guard across BOTH stores (installed dir + custom record).
+        if _installed_theme_dir(slug).exists() or (_themes_dir() / f"{slug}.json").exists():
+            return web.json_response(
+                {"error": f"theme '{slug}' already exists"}, status=409
+            )
+
+        staged = tmp_root / "staged"
+        _copy_installed_theme(src, staged)
+        _themes_dir().mkdir(parents=True, exist_ok=True)
+        shutil.move(str(staged), str(_installed_theme_dir(slug)))
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    return web.json_response(
+        {
+            "ok": True,
+            "slug": slug,
+            "theme": {
+                "slug": slug,
+                "name": summary["name"],
+                "emoji": summary["emoji"],
+                "level": 0,
+                "source": stype,
+            },
+        }
+    )
+
+
 async def api_theme_detail(request: web.Request) -> web.Response:
     """GET/PUT/DELETE /api/themes/{slug} — get, update, or delete a custom theme."""
     slug = request.match_info["slug"]
@@ -291,14 +624,23 @@ async def api_theme_detail(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid theme slug"}, status=400)
 
     target = _themes_dir() / f"{safe_slug}.json"
+    dir_target = _installed_theme_dir(safe_slug)
 
     if request.method == "DELETE":
-        if not target.exists():
-            return web.json_response({"error": "not found"}, status=404)
-        target.unlink()
-        return web.json_response({"ok": True})
+        if target.exists():
+            target.unlink()
+            return web.json_response({"ok": True})
+        if dir_target.is_dir():
+            shutil.rmtree(dir_target, ignore_errors=True)
+            return web.json_response({"ok": True})
+        return web.json_response({"error": "not found"}, status=404)
 
     if request.method == "PUT":
+        if dir_target.is_dir() and not target.exists():
+            return web.json_response(
+                {"error": "installed themes are read-only; reinstall to update"},
+                status=400,
+            )
         if not target.exists():
             return web.json_response({"error": "not found"}, status=404)
         try:
@@ -330,13 +672,30 @@ async def api_theme_detail(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "theme": theme_data})
 
     # GET
-    if not target.exists():
-        return web.json_response({"error": "not found"}, status=404)
-    try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return web.json_response({"error": "failed to read theme"}, status=500)
-    return web.json_response(data)
+    if target.exists():
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return web.json_response({"error": "failed to read theme"}, status=500)
+        return web.json_response(data)
+    if dir_target.is_dir():
+        summary, err = _validate_theme_dir(dir_target)
+        if err:
+            return web.json_response(
+                {"error": f"invalid installed theme: {err}"}, status=500
+            )
+        return web.json_response(
+            {
+                "slug": safe_slug,
+                "name": summary["name"],
+                "emoji": summary["emoji"],
+                "level": 0,
+                "source": "installed",
+                "dark": summary["dark"],
+                "light": summary["light"],
+            }
+        )
+    return web.json_response({"error": "not found"}, status=404)
 
 
 # ── Agent Config ──

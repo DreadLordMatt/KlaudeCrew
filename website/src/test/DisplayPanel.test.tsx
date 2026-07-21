@@ -3,6 +3,7 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { DisplayPanel } from '../pages/settings/DisplayPanel'
 import { renderWithProviders } from './helpers'
+import { api } from '../api/client'
 
 // Mock useZoomCtx — DisplayPanel uses it for zoom/font controls
 vi.mock('../hooks/ZoomProvider', () => ({
@@ -154,5 +155,41 @@ describe('DisplayPanel – ThemeEditorPanel overlay', () => {
     // Sidebar Colors section should still be visible and interactive
     expect(screen.getByText('Sidebar Colors')).toBeInTheDocument()
     expect(screen.getByText('Palette')).toBeInTheDocument()
+  })
+})
+
+
+describe('DisplayPanel – theme install', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('renders the renamed "Theme" section with an Install control', () => {
+    renderWithProviders(<DisplayPanel />)
+    expect(screen.getByText('Install Theme')).toBeInTheDocument()
+    expect(screen.getByLabelText('Theme source')).toBeInTheDocument()
+    expect(screen.getByLabelText('Theme source location')).toBeInTheDocument()
+  })
+
+  it('installs a theme from a GitHub URL via api.installTheme', async () => {
+    const user = userEvent.setup()
+    const spy = vi
+      .spyOn(api, 'installTheme')
+      .mockResolvedValue({ ok: true, slug: 'lcars' })
+    renderWithProviders(<DisplayPanel />)
+
+    await user.type(
+      screen.getByLabelText('Theme source location'),
+      'https://github.com/u/lcars'
+    )
+    await user.click(screen.getByText('Install'))
+
+    await waitFor(() => {
+      expect(spy).toHaveBeenCalledWith({
+        type: 'github',
+        url: 'https://github.com/u/lcars',
+      })
+    })
+    spy.mockRestore()
   })
 })

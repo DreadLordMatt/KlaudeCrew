@@ -1163,6 +1163,7 @@ async def start_dashboard(
     # Custom Themes (CRUD)
     app.router.add_get("/api/themes", handlers.api_themes)
     app.router.add_post("/api/themes", handlers.api_themes_create)
+    app.router.add_post("/api/themes/install", handlers.api_themes_install)
     app.router.add_get("/api/themes/{slug}", handlers.api_theme_detail)
     app.router.add_put("/api/themes/{slug}", handlers.api_theme_detail)
     app.router.add_delete("/api/themes/{slug}", handlers.api_theme_detail)

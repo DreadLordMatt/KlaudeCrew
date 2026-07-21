@@ -722,6 +722,8 @@ export const api = {
   dashboardConfig: () => fetch('/api/dashboard/config').then(j),
   updateDashboardConfig: (body: object) => put('/api/dashboard/config', body).then(j),
   createTheme: (body: object) => post('/api/themes', body).then(j),
+  installTheme: (source: { type: 'local'; path: string } | { type: 'github'; url: string }) =>
+    post('/api/themes/install', { source }).then(j),
   updateTheme: (slug: string, body: object) => put('/api/themes/' + encodeURIComponent(slug), body).then(j),
   deleteTheme: (slug: string) => del('/api/themes/' + encodeURIComponent(slug)).then(j),
   themeDetail: (slug: string) => fetch('/api/themes/' + encodeURIComponent(slug)).then(j),

@@ -19,6 +19,8 @@ export interface ThemeEntry {
   value: string
   label: string
   custom?: boolean
+  /** True for themes installed from a folder/GitHub (read-only), vs editor-created customs. */
+  installed?: boolean
 }
 
 export interface CustomThemeData {
@@ -223,11 +225,14 @@ function useThemeState(): ThemeContextValue {
   const loadCustomThemes = useCallback(async () => {
     try {
       const res = await api.themes()
-      const themes: ThemeEntry[] = (res.themes || []).map((t: { slug: string; name: string; emoji: string }) => ({
-        value: `custom-${t.slug}`,
-        label: `${t.emoji} ${t.name}`,
-        custom: true,
-      }))
+      const themes: ThemeEntry[] = (res.themes || []).map(
+        (t: { slug: string; name: string; emoji: string; source?: string }) => ({
+          value: `custom-${t.slug}`,
+          label: `${t.emoji} ${t.name}`,
+          custom: true,
+          installed: t.source === 'installed',
+        })
+      )
       setCustomThemes(themes)
 
       // Fetch all theme details in parallel to avoid serial waterfall

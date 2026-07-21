@@ -98,6 +98,7 @@ from kiro_crew.dashboard.handlers.agents import (  # noqa: E402, F401
     api_theme_detail,
     api_themes,
     api_themes_create,
+    api_themes_install,
 )
 from kiro_crew.dashboard.handlers.cron import (  # noqa: E402, F401
     api_cron_ack,

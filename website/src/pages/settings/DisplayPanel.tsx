@@ -1,4 +1,5 @@
 import { X } from 'lucide-react'
+import { useState } from 'react'
 import { useZoomCtx } from '../../hooks/ZoomProvider'
 import { useTheme } from '../../hooks/useTheme'
 import type { ColorTheme } from '../../hooks/useTheme'
@@ -17,7 +18,7 @@ import { clampTintCount, RECENT_TINT_COUNT } from '../../utils/recencyTint'
 
 export function DisplayPanel() {
   const { zoom, zoomIn, zoomOut, reset, fontScale, fontScaleUp, fontScaleDown, fontScaleReset, family, setFontFamily } = useZoomCtx()
-  const { preference, setTheme, colorTheme, setColorTheme, allThemes } = useTheme()
+  const { preference, setTheme, colorTheme, setColorTheme, allThemes, loadCustomThemes } = useTheme()
   const { uiMode, setUIMode } = useUIMode()
   const editor = useThemeEditor()
 
@@ -49,6 +50,37 @@ export function DisplayPanel() {
   })
   const setTintCount = (n: number) => tintMut.mutate(clampTintCount(n))
 
+  // ── Install theme (Level 0) from a local folder or a GitHub repo ──
+  const [installType, setInstallType] = useState<'github' | 'local'>('github')
+  const [installValue, setInstallValue] = useState('')
+  const [installBusy, setInstallBusy] = useState(false)
+  const [installError, setInstallError] = useState<string | null>(null)
+
+  const handleInstall = async () => {
+    const v = installValue.trim()
+    if (!v || installBusy) return
+    setInstallBusy(true)
+    setInstallError(null)
+    try {
+      const source =
+        installType === 'github'
+          ? ({ type: 'github', url: v } as const)
+          : ({ type: 'local', path: v } as const)
+      const res = await api.installTheme(source)
+      if (!res?.ok) {
+        setInstallError(res?.error || 'Install failed')
+        return
+      }
+      await loadCustomThemes()
+      if (res.slug) setColorTheme(`custom-${res.slug}` as ColorTheme)
+      setInstallValue('')
+    } catch (e) {
+      setInstallError(e instanceof Error ? e.message : 'Install failed')
+    } finally {
+      setInstallBusy(false)
+    }
+  }
+
   return (
     <>
       <SettingsSection title="View">
@@ -72,9 +104,9 @@ export function DisplayPanel() {
         </SettingsCard>
       </SettingsSection>
 
-      <SettingsSection title="Color Theme">
+      <SettingsSection title="Theme">
         <SettingsCard>
-          <SettingsSelect label="Color Theme" description="Select a color palette for the dashboard" value={colorTheme}
+          <SettingsSelect label="Theme" description="Select a theme for the dashboard" value={colorTheme}
             options={allThemes.map(t => t.value)} optionLabels={allThemes.map(t => t.label)}
             onChange={v => setColorTheme(v as ColorTheme)} />
           <SettingsButtonGroup label="Mode" description="Light or dark appearance for the dashboard" value={preference}
@@ -87,12 +119,14 @@ export function DisplayPanel() {
 
           {allThemes.filter(t => t.custom).length > 0 && (
             <div className="flex flex-col gap-1.5 pt-2">
-              <span className="text-[12px] text-muted font-medium uppercase tracking-[.04em]">Custom Themes</span>
+              <span className="text-[12px] text-muted font-medium uppercase tracking-[.04em]">Custom & Installed Themes</span>
               {allThemes.filter(t => t.custom).map(t => (
                 <div key={t.value} className="flex items-center justify-between px-3 py-2 rounded-md bg-bg-elevated border border-border">
                   <span className="text-[13px] text-text font-medium">{t.label}</span>
                   <div className="flex items-center gap-2">
-                    <button className="text-[13px] text-muted hover:text-text cursor-pointer bg-transparent border-none transition-colors" onClick={() => editor.openEditTheme(t.value.replace('custom-', ''))}>Edit</button>
+                    {!t.installed && (
+                      <button className="text-[13px] text-muted hover:text-text cursor-pointer bg-transparent border-none transition-colors" onClick={() => editor.openEditTheme(t.value.replace('custom-', ''))}>Edit</button>
+                    )}
                     <button className="text-[13px] text-muted hover:text-danger cursor-pointer bg-transparent border-none transition-colors" onClick={() => editor.handleDelete(t.value.replace('custom-', ''))}>Delete</button>
                   </div>
                 </div>
@@ -101,6 +135,28 @@ export function DisplayPanel() {
           )}
           <div className="pt-1">
             <button className="px-2.5 py-1 rounded-md text-[13px] font-medium border border-dashed border-border-strong text-muted hover:text-accent hover:border-accent cursor-pointer transition-all bg-transparent" onClick={editor.openNewTheme}>+ New Theme</button>
+          </div>
+
+          <div className="flex flex-col gap-1.5 pt-2">
+            <span className="text-[12px] text-muted font-medium uppercase tracking-[.04em]">Install Theme</span>
+            <div className="flex items-center gap-2">
+              <select aria-label="Theme source" value={installType}
+                onChange={e => setInstallType(e.target.value as 'github' | 'local')}
+                className="text-[13px] px-2 py-1.5 rounded-md bg-bg border border-border text-text cursor-pointer">
+                <option value="github">GitHub</option>
+                <option value="local">Local folder</option>
+              </select>
+              <input aria-label="Theme source location" value={installValue}
+                onChange={e => setInstallValue(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleInstall() }}
+                placeholder={installType === 'github' ? 'https://github.com/user/theme' : '/path/to/theme'}
+                className="flex-1 min-w-0 text-[13px] px-2.5 py-1.5 rounded-md bg-bg border border-border text-text" />
+              <button onClick={handleInstall} disabled={installBusy || !installValue.trim()}
+                className="text-[13px] px-3 py-1.5 rounded-md border border-border-strong text-muted hover:text-accent hover:border-accent cursor-pointer transition-all bg-transparent disabled:opacity-50 disabled:cursor-not-allowed">
+                {installBusy ? 'Installing…' : 'Install'}
+              </button>
+            </div>
+            {installError && <span className="text-[12px] text-danger">{installError}</span>}
           </div>
         </SettingsCard>
       </SettingsSection>
