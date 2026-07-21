@@ -42,8 +42,8 @@ class TestEnforceDeniedScope:
         bundled_dir, agents_dir, mock_cfg = _setup(tmp_path, "all")
 
         with (
-            patch("kiro_crew.agent._BUNDLED_CFG_DIR", bundled_dir),
-            patch("kiro_crew.agent.KIRO_AGENTS_DIR", agents_dir),
+            patch("kiro_crew.agent.paths._BUNDLED_CFG_DIR", bundled_dir),
+            patch("kiro_crew.agent.paths.KIRO_AGENTS_DIR", agents_dir),
             patch("kiro_crew.config.KiroCrewConfig.load", return_value=mock_cfg),
         ):
             _enforce_denied_commands()
@@ -56,8 +56,8 @@ class TestEnforceDeniedScope:
         bundled_dir, agents_dir, mock_cfg = _setup(tmp_path, "kirocrew")
 
         with (
-            patch("kiro_crew.agent._BUNDLED_CFG_DIR", bundled_dir),
-            patch("kiro_crew.agent.KIRO_AGENTS_DIR", agents_dir),
+            patch("kiro_crew.agent.paths._BUNDLED_CFG_DIR", bundled_dir),
+            patch("kiro_crew.agent.paths.KIRO_AGENTS_DIR", agents_dir),
             patch("kiro_crew.config.KiroCrewConfig.load", return_value=mock_cfg),
         ):
             _enforce_denied_commands()
@@ -73,8 +73,8 @@ class TestEnforceDeniedScope:
         bundled_dir, agents_dir, mock_cfg = _setup(tmp_path, "all")
 
         with (
-            patch("kiro_crew.agent._BUNDLED_CFG_DIR", bundled_dir),
-            patch("kiro_crew.agent.KIRO_AGENTS_DIR", agents_dir),
+            patch("kiro_crew.agent.paths._BUNDLED_CFG_DIR", bundled_dir),
+            patch("kiro_crew.agent.paths.KIRO_AGENTS_DIR", agents_dir),
             patch("kiro_crew.agent._LITE_AGENT_NAMES", frozenset({"kirocrew-lite.json"})),
             patch("kiro_crew.config.KiroCrewConfig.load", return_value=mock_cfg),
         ):
@@ -87,8 +87,8 @@ class TestEnforceDeniedScope:
         bundled_dir, agents_dir, _ = _setup(tmp_path)
 
         with (
-            patch("kiro_crew.agent._BUNDLED_CFG_DIR", bundled_dir),
-            patch("kiro_crew.agent.KIRO_AGENTS_DIR", agents_dir),
+            patch("kiro_crew.agent.paths._BUNDLED_CFG_DIR", bundled_dir),
+            patch("kiro_crew.agent.paths.KIRO_AGENTS_DIR", agents_dir),
             patch("kiro_crew.config.KiroCrewConfig.load", side_effect=Exception("boom")),
         ):
             _enforce_denied_commands()
@@ -110,8 +110,8 @@ class TestEnforceDeniedScope:
         (agents_dir / "._kirocrew.json").write_bytes(_APPLEDOUBLE_BYTES)
 
         with (
-            patch("kiro_crew.agent._BUNDLED_CFG_DIR", bundled_dir),
-            patch("kiro_crew.agent.KIRO_AGENTS_DIR", agents_dir),
+            patch("kiro_crew.agent.paths._BUNDLED_CFG_DIR", bundled_dir),
+            patch("kiro_crew.agent.paths.KIRO_AGENTS_DIR", agents_dir),
             patch("kiro_crew.config.KiroCrewConfig.load", return_value=mock_cfg),
         ):
             # Must not raise UnicodeDecodeError.
@@ -149,8 +149,8 @@ class TestEnforceDeniedScope:
         (agents_dir / "._scalar_root.json").write_text("42")
 
         with (
-            patch("kiro_crew.agent._BUNDLED_CFG_DIR", bundled_dir),
-            patch("kiro_crew.agent.KIRO_AGENTS_DIR", agents_dir),
+            patch("kiro_crew.agent.paths._BUNDLED_CFG_DIR", bundled_dir),
+            patch("kiro_crew.agent.paths.KIRO_AGENTS_DIR", agents_dir),
             patch("kiro_crew.config.KiroCrewConfig.load", return_value=mock_cfg),
         ):
             # Must not raise AttributeError.

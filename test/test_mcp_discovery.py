@@ -1214,12 +1214,12 @@ class TestInstallAgentRemote:
         }
         (kiro_dir / "kirocrew.json").write_text(json.dumps(existing))
 
-        monkeypatch.setattr("kiro_crew.agent.KIRO_AGENTS_DIR", kiro_dir)
+        monkeypatch.setattr("kiro_crew.agent.paths.KIRO_AGENTS_DIR", kiro_dir)
         monkeypatch.setattr(
-            "kiro_crew.agent._KIRO_MCP_JSON", tmp_path / "nonexistent_kiro_mcp.json"
+            "kiro_crew.agent.paths._KIRO_MCP_JSON", tmp_path / "nonexistent_kiro_mcp.json"
         )
-        monkeypatch.setattr("kiro_crew.agent._CC_MCP_JSON", tmp_path / "nonexistent_cc.json")
-        monkeypatch.setattr("kiro_crew.agent._KIROCREW_BIN", "/usr/bin/kirocrew")
+        monkeypatch.setattr("kiro_crew.agent.paths._CC_MCP_JSON", tmp_path / "nonexistent_cc.json")
+        monkeypatch.setattr("kiro_crew.agent.paths._KIROCREW_BIN", "/usr/bin/kirocrew")
         monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
 
         install_agent()
@@ -1248,10 +1248,10 @@ class TestInstallAgentRemote:
             json.dumps({"mcpServers": {"deepwiki": {"url": "https://mcp.deepwiki.com/mcp"}}})
         )
 
-        monkeypatch.setattr("kiro_crew.agent.KIRO_AGENTS_DIR", kiro_dir)
-        monkeypatch.setattr("kiro_crew.agent._KIRO_MCP_JSON", settings_dir / "mcp.json")
-        monkeypatch.setattr("kiro_crew.agent._CC_MCP_JSON", tmp_path / "nonexistent_cc.json")
-        monkeypatch.setattr("kiro_crew.agent._KIROCREW_BIN", "/usr/bin/kirocrew")
+        monkeypatch.setattr("kiro_crew.agent.paths.KIRO_AGENTS_DIR", kiro_dir)
+        monkeypatch.setattr("kiro_crew.agent.paths._KIRO_MCP_JSON", settings_dir / "mcp.json")
+        monkeypatch.setattr("kiro_crew.agent.paths._CC_MCP_JSON", tmp_path / "nonexistent_cc.json")
+        monkeypatch.setattr("kiro_crew.agent.paths._KIROCREW_BIN", "/usr/bin/kirocrew")
         monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
 
         install_agent()
@@ -1501,10 +1501,10 @@ class TestSharedServerToolsRegistration:
             )
         )
 
-        monkeypatch.setattr("kiro_crew.agent.KIRO_AGENTS_DIR", kiro_dir)
-        monkeypatch.setattr("kiro_crew.agent._KIRO_MCP_JSON", settings_dir / "mcp.json")
-        monkeypatch.setattr("kiro_crew.agent._CC_MCP_JSON", tmp_path / "nonexistent_cc.json")
-        monkeypatch.setattr("kiro_crew.agent._KIROCREW_BIN", "/usr/bin/kirocrew")
+        monkeypatch.setattr("kiro_crew.agent.paths.KIRO_AGENTS_DIR", kiro_dir)
+        monkeypatch.setattr("kiro_crew.agent.paths._KIRO_MCP_JSON", settings_dir / "mcp.json")
+        monkeypatch.setattr("kiro_crew.agent.paths._CC_MCP_JSON", tmp_path / "nonexistent_cc.json")
+        monkeypatch.setattr("kiro_crew.agent.paths._KIROCREW_BIN", "/usr/bin/kirocrew")
         monkeypatch.setattr("shutil.which", lambda cmd, path=None: "/usr/bin/srv")
 
         rebuild_agent_config()
@@ -1548,10 +1548,10 @@ class TestSharedServerToolsRegistration:
             )
         )
 
-        monkeypatch.setattr("kiro_crew.agent.KIRO_AGENTS_DIR", kiro_dir)
-        monkeypatch.setattr("kiro_crew.agent._KIRO_MCP_JSON", settings_dir / "mcp.json")
-        monkeypatch.setattr("kiro_crew.agent._CC_MCP_JSON", tmp_path / "nonexistent_cc.json")
-        monkeypatch.setattr("kiro_crew.agent._KIROCREW_BIN", "/usr/bin/kirocrew")
+        monkeypatch.setattr("kiro_crew.agent.paths.KIRO_AGENTS_DIR", kiro_dir)
+        monkeypatch.setattr("kiro_crew.agent.paths._KIRO_MCP_JSON", settings_dir / "mcp.json")
+        monkeypatch.setattr("kiro_crew.agent.paths._CC_MCP_JSON", tmp_path / "nonexistent_cc.json")
+        monkeypatch.setattr("kiro_crew.agent.paths._KIROCREW_BIN", "/usr/bin/kirocrew")
         monkeypatch.setattr("shutil.which", lambda cmd, path=None: "/usr/bin/srv")
 
         rebuild_agent_config()
@@ -1594,10 +1594,10 @@ class TestSharedServerToolsRegistration:
             )
         )
 
-        monkeypatch.setattr("kiro_crew.agent.KIRO_AGENTS_DIR", kiro_dir)
-        monkeypatch.setattr("kiro_crew.agent._KIRO_MCP_JSON", settings_dir / "mcp.json")
-        monkeypatch.setattr("kiro_crew.agent._CC_MCP_JSON", tmp_path / "nonexistent_cc.json")
-        monkeypatch.setattr("kiro_crew.agent._KIROCREW_BIN", "/usr/bin/kirocrew")
+        monkeypatch.setattr("kiro_crew.agent.paths.KIRO_AGENTS_DIR", kiro_dir)
+        monkeypatch.setattr("kiro_crew.agent.paths._KIRO_MCP_JSON", settings_dir / "mcp.json")
+        monkeypatch.setattr("kiro_crew.agent.paths._CC_MCP_JSON", tmp_path / "nonexistent_cc.json")
+        monkeypatch.setattr("kiro_crew.agent.paths._KIROCREW_BIN", "/usr/bin/kirocrew")
         monkeypatch.setattr("shutil.which", lambda cmd, path=None: "/usr/bin/srv")
 
         rebuild_agent_config()
@@ -1632,10 +1632,10 @@ class TestSharedServerToolsRegistration:
             )
         )
 
-        monkeypatch.setattr("kiro_crew.agent.KIRO_AGENTS_DIR", kiro_dir)
-        monkeypatch.setattr("kiro_crew.agent._KIRO_MCP_JSON", settings_dir / "mcp.json")
-        monkeypatch.setattr("kiro_crew.agent._CC_MCP_JSON", tmp_path / "nonexistent_cc.json")
-        monkeypatch.setattr("kiro_crew.agent._KIROCREW_BIN", "/usr/bin/kirocrew")
+        monkeypatch.setattr("kiro_crew.agent.paths.KIRO_AGENTS_DIR", kiro_dir)
+        monkeypatch.setattr("kiro_crew.agent.paths._KIRO_MCP_JSON", settings_dir / "mcp.json")
+        monkeypatch.setattr("kiro_crew.agent.paths._CC_MCP_JSON", tmp_path / "nonexistent_cc.json")
+        monkeypatch.setattr("kiro_crew.agent.paths._KIROCREW_BIN", "/usr/bin/kirocrew")
         monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
 
         rebuild_agent_config()

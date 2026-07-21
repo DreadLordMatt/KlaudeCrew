@@ -41,7 +41,7 @@ class TestLiteAgentDuplicate:
         aim_file = agents_dir / AIM_LITE_FILENAME
         aim_file.write_text(json.dumps({"name": "kirocrew-lite"}))
 
-        with patch("kiro_crew.agent.KIRO_AGENTS_DIR", agents_dir):
+        with patch("kiro_crew.agent.paths.KIRO_AGENTS_DIR", agents_dir):
             _install_lite_agent_fallback()
 
         bare = agents_dir / _LITE_AGENT_FILENAME
@@ -49,7 +49,7 @@ class TestLiteAgentDuplicate:
 
     def test_fallback_writes_when_aim_version_missing(self, agents_dir: Path) -> None:
         """Fallback should write bare file when AIM version is absent."""
-        with patch("kiro_crew.agent.KIRO_AGENTS_DIR", agents_dir):
+        with patch("kiro_crew.agent.paths.KIRO_AGENTS_DIR", agents_dir):
             _install_lite_agent_fallback()
 
         bare = agents_dir / _LITE_AGENT_FILENAME
@@ -67,7 +67,7 @@ class TestLiteAgentDuplicate:
         aim_file = agents_dir / AIM_LITE_FILENAME
         aim_file.write_text(json.dumps({"name": "kirocrew-lite"}))
 
-        with patch("kiro_crew.agent.KIRO_AGENTS_DIR", agents_dir):
+        with patch("kiro_crew.agent.paths.KIRO_AGENTS_DIR", agents_dir):
             _remove_bare_lite_if_aim_installed()
 
         assert bare.exists(), "bare file should remain (cleanup is a no-op)"
@@ -78,7 +78,7 @@ class TestLiteAgentDuplicate:
         aim_file = agents_dir / AIM_LITE_FILENAME
         aim_file.write_text(json.dumps({"name": "kirocrew-lite"}))
 
-        with patch("kiro_crew.agent.KIRO_AGENTS_DIR", agents_dir):
+        with patch("kiro_crew.agent.paths.KIRO_AGENTS_DIR", agents_dir):
             _remove_bare_lite_if_aim_installed()
 
         assert aim_file.exists()
@@ -88,7 +88,7 @@ class TestLiteAgentDuplicate:
         bare = agents_dir / _LITE_AGENT_FILENAME
         bare.write_text(json.dumps({"name": "kirocrew-lite"}))
 
-        with patch("kiro_crew.agent.KIRO_AGENTS_DIR", agents_dir):
+        with patch("kiro_crew.agent.paths.KIRO_AGENTS_DIR", agents_dir):
             _remove_bare_lite_if_aim_installed()
 
         assert bare.exists(), "bare should remain when AIM version not installed"

@@ -37,6 +37,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import kiro_crew.agent as agent
+import kiro_crew.agent.builder as agent_builder
+import kiro_crew.agent.paths as agent_paths
 import kiro_crew.mcp_cleanup as mcp_cleanup
 
 
@@ -72,12 +74,12 @@ def _simulate_frozen_app(monkeypatch, exe: Path) -> None:
     """Make the running process look like the shipped PyInstaller app:
     a real ``sys.executable``, nothing usable in the source tree, and no
     ``kirocrew`` on PATH."""
-    monkeypatch.setattr(agent, "_KIROCREW_BIN", "", raising=False)
+    monkeypatch.setattr(agent_paths, "_KIROCREW_BIN", "", raising=False)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(exe))
     # No `bin/kirocrew` / `.venv/bin/kirocrew` is usable (force the dev tree
     # candidates to be rejected so the test is independent of where it runs).
-    monkeypatch.setattr(agent, "_bin_is_usable", lambda p: str(p) == str(exe))
+    monkeypatch.setattr(agent_paths, "_bin_is_usable", lambda p: str(p) == str(exe))
     # `kirocrew` is not on PATH; only absolute paths resolve.
     monkeypatch.setattr(
         agent.shutil, "which", lambda c, **kw: c if str(c).startswith("/") else None
@@ -113,20 +115,20 @@ def test_managed_servers_survive_in_frozen_app(tmp_path, monkeypatch):
 
     with ExitStack() as stack:
         stack.enter_context(
-            patch("kiro_crew.agent._shipped_defaults", return_value=cfg_dir / "defaults.json")
+            patch("kiro_crew.agent.paths._shipped_defaults", return_value=cfg_dir / "defaults.json")
         )
         stack.enter_context(
             patch.multiple(
-                "kiro_crew.agent",
+                "kiro_crew.agent.paths",
                 _BUNDLED_CFG_DIR=cfg_dir,
                 _USER_OVERRIDES=tmp_path / "missing_overrides.json",
             )
         )
         stack.enter_context(
-            patch("kiro_crew.agent._prompt_path", return_value=cfg_dir / "prompt.md")
+            patch("kiro_crew.agent.builder._prompt_path", return_value=cfg_dir / "prompt.md")
         )
         stack.enter_context(
-            patch("kiro_crew.agent._mc_config_path", return_value=tmp_path / "missing_mc.json")
+            patch("kiro_crew.agent.builder._mc_config_path", return_value=tmp_path / "missing_mc.json")
         )
         config = agent.build_agent_config()
 
@@ -252,8 +254,8 @@ def _sandbox_first_run(tmp_path, monkeypatch, exe):
     mig = tmp_path / ".migrations"
     marker = mig / "stale_managed_mcp_purged"
     mcp = tmp_path / ".kiro" / "settings" / "mcp.json"
-    monkeypatch.setattr(agent, "_MIGRATIONS_DIR", mig)
-    monkeypatch.setattr(agent, "_STALE_MCP_PURGE_MARKER", marker)
+    monkeypatch.setattr(agent_builder, "_MIGRATIONS_DIR", mig)
+    monkeypatch.setattr(agent_builder, "_STALE_MCP_PURGE_MARKER", marker)
     monkeypatch.setattr(mcp_cleanup, "_KIRO_MCP_JSON", mcp)
     _simulate_frozen_app(monkeypatch, exe)
     return marker, mcp
@@ -309,7 +311,7 @@ def test_first_run_is_best_effort(tmp_path, monkeypatch):
     def _raise_purge():
         raise RuntimeError("purge boom")
 
-    monkeypatch.setattr(agent, "ensure_kirocrew_on_path", _raise)
+    monkeypatch.setattr(agent_paths, "ensure_kirocrew_on_path", _raise)
     monkeypatch.setattr("kiro_crew.mcp_cleanup.clean_stale_managed_mcp", _raise_purge)
 
     # Must not propagate — gateway startup cannot be broken by setup failures.
@@ -326,11 +328,11 @@ def test_resolver_nonfrozen_ignores_sys_executable(tmp_path, monkeypatch):
     interp = tmp_path / "python-interp"  # sys.executable when NOT frozen
     interp.write_text("x")
     interp.chmod(0o755)
-    monkeypatch.setattr(agent, "_KIROCREW_BIN", "", raising=False)
+    monkeypatch.setattr(agent_paths, "_KIROCREW_BIN", "", raising=False)
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     monkeypatch.setattr(sys, "executable", str(interp))
     # venv + bin-walk find nothing usable; only PATH resolves to path_bin.
-    monkeypatch.setattr(agent, "_bin_is_usable", lambda p: str(p) == str(path_bin))
+    monkeypatch.setattr(agent_paths, "_bin_is_usable", lambda p: str(p) == str(path_bin))
     monkeypatch.setattr(
         agent.shutil, "which", lambda c, **kw: str(path_bin) if c == "kirocrew" else None
     )
@@ -344,9 +346,9 @@ def test_resolver_nonfrozen_ignores_sys_executable(tmp_path, monkeypatch):
 # ensure_kirocrew_on_path — edge cases
 # --------------------------------------------------------------------------
 def test_ensure_shim_noop_when_no_binary(tmp_path, monkeypatch):
-    monkeypatch.setattr(agent, "_KIROCREW_BIN", "", raising=False)
+    monkeypatch.setattr(agent_paths, "_KIROCREW_BIN", "", raising=False)
     monkeypatch.setattr(sys, "frozen", False, raising=False)
-    monkeypatch.setattr(agent, "_bin_is_usable", lambda p: False)
+    monkeypatch.setattr(agent_paths, "_bin_is_usable", lambda p: False)
     monkeypatch.setattr(agent.shutil, "which", lambda c, **kw: None)
     bin_dir = tmp_path / "localbin"
     assert agent.ensure_kirocrew_on_path(bin_dir=bin_dir) is None
@@ -370,10 +372,10 @@ def test_ensure_shim_refreshes_stale_symlink(tmp_path, monkeypatch):
 
 def test_ensure_shim_noop_when_already_on_path(tmp_path, monkeypatch):
     exe = _fake_frozen_exe(tmp_path)
-    monkeypatch.setattr(agent, "_KIROCREW_BIN", "", raising=False)
+    monkeypatch.setattr(agent_paths, "_KIROCREW_BIN", "", raising=False)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(exe))
-    monkeypatch.setattr(agent, "_bin_is_usable", lambda p: str(p) == str(exe))
+    monkeypatch.setattr(agent_paths, "_bin_is_usable", lambda p: str(p) == str(exe))
     # `kirocrew` already resolves on PATH to the SAME binary.
     monkeypatch.setattr(
         agent.shutil, "which", lambda c, **kw: str(exe) if c == "kirocrew" else None
