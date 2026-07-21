@@ -749,6 +749,9 @@ class TestContainsInjectionHelper:
         def _boom(*_a, **_k):
             raise RuntimeError("sel down")
 
-        monkeypatch.setattr(security_module, "SecurityEventLog", _boom)
+        # audit_injection_dropped lives in the ``injection`` submodule and
+        # resolves SecurityEventLog in that module's namespace after the
+        # security.py package split; patch it there, not on the shim.
+        monkeypatch.setattr(security_module.injection, "SecurityEventLog", _boom)
         # Should swallow the error, not raise.
         security_module.audit_injection_dropped(surface="slack_thread_meta")

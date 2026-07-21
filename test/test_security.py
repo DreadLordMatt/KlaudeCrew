@@ -1175,7 +1175,10 @@ class TestBuiltinDenyPatterns:
         def fake_emit(tool_name: str, deny_pattern: str, segment: str) -> None:
             captured.append((tool_name, deny_pattern, segment))
 
-        monkeypatch.setattr(security_module, "_emit_deny_event", fake_emit)
+        # ``is_denied`` lives in the ``denylist`` submodule and resolves
+        # ``_emit_deny_event`` in that module's namespace, so patch it there
+        # (the ``kiro_crew.security`` shim only re-exports a copy).
+        monkeypatch.setattr(security_module.denylist, "_emit_deny_event", fake_emit)
         # Git-publish deny (verb-anchored regex, recorded under "git push").
         result = security_module.is_denied("git push origin main --force")
         assert result is not None

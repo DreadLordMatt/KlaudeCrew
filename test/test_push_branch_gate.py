@@ -221,7 +221,12 @@ def captured_sel_events(monkeypatch):
         def log(self, event) -> None:
             events.append(event)
 
-    monkeypatch.setattr(security, "SecurityEventLog", lambda: _Capture())
+    # After the security.py package split, SEL events are emitted from the
+    # ``git_push`` submodule (push_allowed) and the ``denylist`` submodule
+    # (deny_event), each resolving SecurityEventLog in its own namespace. Patch
+    # both so the ambient forensic log stays fully isolated.
+    monkeypatch.setattr(security.git_push, "SecurityEventLog", lambda: _Capture())
+    monkeypatch.setattr(security.denylist, "SecurityEventLog", lambda: _Capture())
     return events
 
 
@@ -237,7 +242,8 @@ class TestGitPushEnforcement:
         a dedicated single-worker executor is installed and drained.
         """
         executor = ThreadPoolExecutor(max_workers=1)
-        monkeypatch.setattr(security, "maintenance_executor", lambda: executor)
+        # _schedule_push_allow_audit lives in the ``git_push`` submodule.
+        monkeypatch.setattr(security.git_push, "maintenance_executor", lambda: executor)
         try:
             assert is_denied(f"{PUSH} origin my-feature") is None
         finally:
@@ -345,7 +351,13 @@ class TestDefaultsJsonPushRegexes:
 
     @staticmethod
     def _push_regexes() -> "list[re.Pattern[str]]":
-        cfg = json.loads((Path(security.__file__).parent / "config" / "defaults.json").read_text())
+        # ``config/defaults.json`` lives at the kiro_crew package root. Derive
+        # it from that package (not ``security.__file__``) so the path is
+        # independent of whether ``security`` is a module or a package.
+        import kiro_crew
+
+        cfg_path = Path(kiro_crew.__file__).parent / "config" / "defaults.json"
+        cfg = json.loads(cfg_path.read_text())
         pats = cfg["toolsSettings"]["execute_bash"]["deniedCommands"]
         return [re.compile(p) for p in pats if "push" in p and p.startswith(".*git")]
 
