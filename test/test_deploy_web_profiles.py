@@ -79,7 +79,7 @@ def test_legacy_config_shim_upserts_registry_default():
 def test_profiles_post_registers_and_defaults(monkeypatch):
     monkeypatch.setattr(profiles_mod, "discover_aws_profiles", lambda: [])
     audits: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(handlers, "_audit",
+    monkeypatch.setattr("kiro_crew.deploy.handlers_profiles._audit",
                         lambda action, sid, outcome, **kw: audits.append((action, sid, outcome)))
     resp = _run(handlers._handle_profiles_post(_FakeReq({"name": "p1", "region": "us-west-2"})))
     assert resp.status == 200
@@ -104,7 +104,7 @@ def test_profiles_post_rejects_bad_name():
 
 def test_profiles_delete_registry_only_and_default_reassign(tmp_path: Path, monkeypatch):
     audits: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(handlers, "_audit",
+    monkeypatch.setattr("kiro_crew.deploy.handlers_profiles._audit",
                         lambda action, sid, outcome, **kw: audits.append((action, sid, outcome)))
     _register("a", default=True)
     _register("b")
@@ -119,7 +119,7 @@ def test_profiles_delete_registry_only_and_default_reassign(tmp_path: Path, monk
 
 def test_profiles_put_sets_default_and_region(monkeypatch):
     audits: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(handlers, "_audit",
+    monkeypatch.setattr("kiro_crew.deploy.handlers_profiles._audit",
                         lambda action, sid, outcome, **kw: audits.append((action, sid, outcome)))
     _register("a", default=True)
     _register("b")
@@ -156,7 +156,7 @@ def test_profiles_put_delete_reject_invalid_name():
 
 def test_verify_backfill_audited(monkeypatch):
     audits: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(handlers, "_audit",
+    monkeypatch.setattr("kiro_crew.deploy.handlers_profiles._audit",
                         lambda action, sid, outcome, **kw: audits.append((action, sid, outcome)))
     _register("p", default=True)
     monkeypatch.setattr(handlers.iam_mod, "reachability_check",
@@ -265,7 +265,7 @@ def test_capacity_check_before_create_side_effect(monkeypatch):
     created = []
     monkeypatch.setattr(profiles_mod, "create_aws_profile",
                         lambda *a, **kw: (created.append(1), "")[1])  # no error, but track call
-    monkeypatch.setattr(handlers, "_audit", lambda *a, **kw: None)
+    monkeypatch.setattr("kiro_crew.deploy.handlers_profiles._audit", lambda *a, **kw: None)
     resp = _run(handlers._handle_profiles_post(
         _FakeReq({"name": "overflow", "region": "us-west-2", "create": True})))
     assert resp.status == 400

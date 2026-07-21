@@ -57,8 +57,8 @@ class TestF2PendingConfirmDigest:
         """Verify the code path sets expected_content_digest param."""
         import inspect
 
-        from kiro_crew.deploy import handlers
-        source = inspect.getsource(handlers)
+        from kiro_crew.deploy import handlers_pending
+        source = inspect.getsource(handlers_pending)
         # The fix adds: params["expected_content_digest"] = stored_digest
         assert 'params["expected_content_digest"]' in source, (
             "_handle_pending_confirm must pass expected_content_digest into params for _do_deploy"
@@ -87,8 +87,8 @@ class TestF3TeardownManifestIdentity:
         """handlers.py contains the identity cross-verification logic."""
         import inspect
 
-        from kiro_crew.deploy import handlers
-        source = inspect.getsource(handlers)
+        from kiro_crew.deploy import teardown
+        source = inspect.getsource(teardown)
         assert "identity_mismatch" in source, (
             "_expire_manifest_best_effort must check distribution_id mismatch"
         )
@@ -157,14 +157,14 @@ class TestF3IdentityWiring:
         # A non-allowlisted event_type raises inside the best-effort
         # try/except and silently skips persistence (dead check).
         from pathlib import Path
-        src = Path(__file__).parent.parent / "src" / "kiro_crew" / "deploy" / "handlers.py"
+        src = Path(__file__).parent.parent / "src" / "kiro_crew" / "deploy" / "core.py"
         text = src.read_text()
         assert 'event_type="edited"' in text
         assert "_persist_dist_id" in text
 
     def test_writeback_flows_result_distribution_id(self):
         from pathlib import Path
-        src = Path(__file__).parent.parent / "src" / "kiro_crew" / "deploy" / "handlers.py"
+        src = Path(__file__).parent.parent / "src" / "kiro_crew" / "deploy" / "core.py"
         text = src.read_text()
         idx = text.index("_persist_dist_id")
         window = text[idx - 500: idx + 900]

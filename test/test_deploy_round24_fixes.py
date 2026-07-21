@@ -38,7 +38,7 @@ def test_f1_mcp_blocked_path_distinguishes_credential():
 
 
 def test_f1_confirm_handler_requires_explicit_human_override():
-    src = (_ROOT / "src/kiro_crew/deploy/handlers.py").read_text()
+    src = (_ROOT / "src/kiro_crew/deploy/handlers_pending.py").read_text()
     seg = src.split('if entry.get("override_scan_required"):', 1)[1][:600]
     # override_scan only set from the request body (human action), and only
     # when it is literally True.

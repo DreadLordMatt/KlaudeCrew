@@ -92,7 +92,7 @@ class TestF1ProfileStaleness:
         async def _changed_profile(params):
             return ("my-profile", "eu-west-1")  # region changed
 
-        monkeypatch.setattr(handlers, "_resolve_profile", _changed_profile)
+        monkeypatch.setattr("kiro_crew.deploy.handlers_pending._resolve_profile", _changed_profile)
 
         resp = _run(handlers._handle_pending_confirm(_FakeReq(match_info={"id": entry_id})))
         assert resp.status == 409
@@ -129,11 +129,16 @@ class TestF1ProfileStaleness:
         async def _same_profile(params):
             return ("my-profile", "us-east-1")
 
-        monkeypatch.setattr(handlers, "_resolve_profile", _same_profile)
+        monkeypatch.setattr("kiro_crew.deploy.handlers_pending._resolve_profile", _same_profile)
         # R9: confirm re-confines local_dir against allowed roots before the
         # digest check — tmp_path must be an allowed root for this test to
         # exercise the content-drift rejection (not the confinement rejection).
-        monkeypatch.setattr(handlers, "_allowed_local_roots", lambda: [tmp_path.resolve()])
+        monkeypatch.setattr("kiro_crew.deploy.handlers_pending._allowed_local_roots", lambda: [tmp_path.resolve()])
+        # _do_deploy (in core) re-resolves the profile and re-confines the
+        # local_dir itself before the staged-content digest comparison — patch
+        # its copies of these helpers too (post-split they are separate globals).
+        monkeypatch.setattr("kiro_crew.deploy.core._resolve_profile", _same_profile)
+        monkeypatch.setattr("kiro_crew.deploy.core._allowed_local_roots", lambda: [tmp_path.resolve()])
 
         resp = _run(handlers._handle_pending_confirm(_FakeReq(match_info={"id": entry_id})))
         assert resp.status == 409
@@ -415,16 +420,16 @@ class TestR10ArtifactStaleness:
         class _Changed(_Art):
             content = "<h1>v2 CHANGED</h1>"
 
-        monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+        monkeypatch.setattr("kiro_crew.deploy.handlers_pending._HAS_ARTIFACTS", True)
         monkeypatch.setattr(
-            handlers, "get_default_store",
+            "kiro_crew.deploy.handlers_pending.get_default_store",
             lambda: types.SimpleNamespace(get=lambda slug: _Changed()),
         )
 
         async def _same_profile(params):
             return ("my-profile", "us-east-1")
 
-        monkeypatch.setattr(handlers, "_resolve_profile", _same_profile)
+        monkeypatch.setattr("kiro_crew.deploy.handlers_pending._resolve_profile", _same_profile)
 
         resp = _run(handlers._handle_pending_confirm(
             _FakeReq(match_info={"id": entry_id})))

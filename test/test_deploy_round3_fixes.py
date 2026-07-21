@@ -127,7 +127,7 @@ async def test_pending_dismiss_200_normal(monkeypatch, tmp_path):
     def _capture_audit(action: str, site_id: str, outcome: str, **kw: Any) -> None:
         audit_calls.append((action, site_id, outcome))
 
-    monkeypatch.setattr(handlers, "_audit", _capture_audit)
+    monkeypatch.setattr("kiro_crew.deploy.handlers_pending._audit", _capture_audit)
 
     req = _FakeReq(match_info={"id": entry_id})
     resp = await handlers._handle_pending_dismiss(req)
@@ -190,9 +190,9 @@ async def test_ttl_hours_string_rejected(monkeypatch):
     async def _fake_resolve(p):
         return ("prof", "us-west-2")
 
-    monkeypatch.setattr("kiro_crew.deploy.handlers._resolve_profile", _fake_resolve)
-    monkeypatch.setattr("kiro_crew.deploy.handlers._HAS_ARTIFACTS", True)
-    monkeypatch.setattr("kiro_crew.deploy.handlers.validate_field", lambda v, spec: v)
+    monkeypatch.setattr("kiro_crew.deploy.core._resolve_profile", _fake_resolve)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.validate_field", lambda v, spec: v)
 
     class FakeArt:
         kind = "html"
@@ -203,8 +203,8 @@ async def test_ttl_hours_string_rejected(monkeypatch):
         def get(self, slug: str):
             return FakeArt()
 
-    monkeypatch.setattr("kiro_crew.deploy.handlers.get_default_store", lambda: FakeStore())
-    monkeypatch.setattr("kiro_crew.deploy.handlers._stage_artifact_html",
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: FakeStore())
+    monkeypatch.setattr("kiro_crew.deploy.core._stage_artifact_html",
                         lambda kind, content, name: ([], "/tmp/x", 42))
 
     status, body = await handlers._do_deploy({
@@ -222,9 +222,9 @@ async def test_ttl_hours_float_rejected(monkeypatch):
     async def _fake_resolve(p):
         return ("prof", "us-west-2")
 
-    monkeypatch.setattr("kiro_crew.deploy.handlers._resolve_profile", _fake_resolve)
-    monkeypatch.setattr("kiro_crew.deploy.handlers._HAS_ARTIFACTS", True)
-    monkeypatch.setattr("kiro_crew.deploy.handlers.validate_field", lambda v, spec: v)
+    monkeypatch.setattr("kiro_crew.deploy.core._resolve_profile", _fake_resolve)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.validate_field", lambda v, spec: v)
 
     class FakeArt:
         kind = "html"
@@ -235,8 +235,8 @@ async def test_ttl_hours_float_rejected(monkeypatch):
         def get(self, slug: str):
             return FakeArt()
 
-    monkeypatch.setattr("kiro_crew.deploy.handlers.get_default_store", lambda: FakeStore())
-    monkeypatch.setattr("kiro_crew.deploy.handlers._stage_artifact_html",
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: FakeStore())
+    monkeypatch.setattr("kiro_crew.deploy.core._stage_artifact_html",
                         lambda kind, content, name: ([], "/tmp/x", 42))
 
     status, body = await handlers._do_deploy({
@@ -254,9 +254,9 @@ async def test_ttl_hours_bool_rejected(monkeypatch):
     async def _fake_resolve(p):
         return ("prof", "us-west-2")
 
-    monkeypatch.setattr("kiro_crew.deploy.handlers._resolve_profile", _fake_resolve)
-    monkeypatch.setattr("kiro_crew.deploy.handlers._HAS_ARTIFACTS", True)
-    monkeypatch.setattr("kiro_crew.deploy.handlers.validate_field", lambda v, spec: v)
+    monkeypatch.setattr("kiro_crew.deploy.core._resolve_profile", _fake_resolve)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.validate_field", lambda v, spec: v)
 
     class FakeArt:
         kind = "html"
@@ -267,8 +267,8 @@ async def test_ttl_hours_bool_rejected(monkeypatch):
         def get(self, slug: str):
             return FakeArt()
 
-    monkeypatch.setattr("kiro_crew.deploy.handlers.get_default_store", lambda: FakeStore())
-    monkeypatch.setattr("kiro_crew.deploy.handlers._stage_artifact_html",
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: FakeStore())
+    monkeypatch.setattr("kiro_crew.deploy.core._stage_artifact_html",
                         lambda kind, content, name: ([], "/tmp/x", 42))
 
     status, body = await handlers._do_deploy({
@@ -286,9 +286,9 @@ async def test_ttl_hours_int_ok(monkeypatch):
     async def _fake_resolve(p):
         return ("prof", "us-west-2")
 
-    monkeypatch.setattr("kiro_crew.deploy.handlers._resolve_profile", _fake_resolve)
-    monkeypatch.setattr("kiro_crew.deploy.handlers._HAS_ARTIFACTS", True)
-    monkeypatch.setattr("kiro_crew.deploy.handlers.validate_field", lambda v, spec: v)
+    monkeypatch.setattr("kiro_crew.deploy.core._resolve_profile", _fake_resolve)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.validate_field", lambda v, spec: v)
 
     class FakeArt:
         kind = "html"
@@ -299,8 +299,8 @@ async def test_ttl_hours_int_ok(monkeypatch):
         def get(self, slug: str):
             return FakeArt()
 
-    monkeypatch.setattr("kiro_crew.deploy.handlers.get_default_store", lambda: FakeStore())
-    monkeypatch.setattr("kiro_crew.deploy.handlers._stage_artifact_html",
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: FakeStore())
+    monkeypatch.setattr("kiro_crew.deploy.core._stage_artifact_html",
                         lambda kind, content, name: ([], "/tmp/x", 42))
 
     status, body = await handlers._do_deploy({
@@ -322,9 +322,9 @@ async def test_webapp_artifact_returns_400(monkeypatch):
     async def _fake_resolve(p):
         return ("prof", "us-west-2")
 
-    monkeypatch.setattr("kiro_crew.deploy.handlers._resolve_profile", _fake_resolve)
-    monkeypatch.setattr("kiro_crew.deploy.handlers._HAS_ARTIFACTS", True)
-    monkeypatch.setattr("kiro_crew.deploy.handlers.validate_field", lambda v, spec: v)
+    monkeypatch.setattr("kiro_crew.deploy.core._resolve_profile", _fake_resolve)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.validate_field", lambda v, spec: v)
 
     class FakeArt:
         kind = "webapp"
@@ -335,7 +335,7 @@ async def test_webapp_artifact_returns_400(monkeypatch):
         def get(self, slug: str):
             return FakeArt()
 
-    monkeypatch.setattr("kiro_crew.deploy.handlers.get_default_store", lambda: FakeStore())
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: FakeStore())
 
     status, body = await handlers._do_deploy({
         "site_id": "s", "artifact_slug": "my-webapp",

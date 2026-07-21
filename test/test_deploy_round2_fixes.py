@@ -31,12 +31,12 @@ async def test_artifact_branch_uses_single_thread_hop(monkeypatch, tmp_path: Pat
     async def _fake_resolve(p):
         return ("prof", "us-west-2")
 
-    monkeypatch.setattr("kiro_crew.deploy.handlers._HAS_ARTIFACTS", True)
-    monkeypatch.setattr("kiro_crew.deploy.handlers.get_default_store", lambda: FakeStore())
-    monkeypatch.setattr("kiro_crew.deploy.handlers._stage_artifact_html",
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: FakeStore())
+    monkeypatch.setattr("kiro_crew.deploy.core._stage_artifact_html",
                         lambda kind, content, name: ([], str(tmp_path), 42))
-    monkeypatch.setattr("kiro_crew.deploy.handlers._resolve_profile", _fake_resolve)
-    monkeypatch.setattr("kiro_crew.deploy.handlers.validate_field", lambda v, spec: v)
+    monkeypatch.setattr("kiro_crew.deploy.core._resolve_profile", _fake_resolve)
+    monkeypatch.setattr("kiro_crew.deploy.core.validate_field", lambda v, spec: v)
 
     # Call _do_deploy with artifact_slug (it will hit the confirm gate and return early)
     status, body = await handlers._do_deploy({
@@ -60,9 +60,9 @@ async def test_both_slug_and_dir_returns_400(monkeypatch):
     async def _fake_resolve(p):
         return ("prof", "us-west-2")
 
-    monkeypatch.setattr("kiro_crew.deploy.handlers._HAS_ARTIFACTS", True)
-    monkeypatch.setattr("kiro_crew.deploy.handlers._resolve_profile", _fake_resolve)
-    monkeypatch.setattr("kiro_crew.deploy.handlers.validate_field", lambda v, spec: v)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core._resolve_profile", _fake_resolve)
+    monkeypatch.setattr("kiro_crew.deploy.core.validate_field", lambda v, spec: v)
 
     status, body = await handlers._do_deploy({
         "site_id": "test-site",
@@ -81,7 +81,7 @@ async def test_neither_slug_nor_dir_returns_400(monkeypatch):
     async def _fake_resolve(p):
         return ("prof", "us-west-2")
 
-    monkeypatch.setattr("kiro_crew.deploy.handlers._resolve_profile", _fake_resolve)
+    monkeypatch.setattr("kiro_crew.deploy.core._resolve_profile", _fake_resolve)
 
     status, body = await handlers._do_deploy({
         "site_id": "test-site",
@@ -260,7 +260,7 @@ def test_engine_deploy_returns_oac_id():
 def test_handlers_manifest_includes_oac_id():
     """F7: The deploy manifest JSON written by handlers includes oac_id."""
     # Just verify the manifest_data construction in source code
-    source = Path(__file__).parent.parent / "src" / "kiro_crew" / "deploy" / "handlers.py"
+    source = Path(__file__).parent.parent / "src" / "kiro_crew" / "deploy" / "core.py"
     content = source.read_text()
     assert '"oac_id": result.get("oac_id", "")' in content
 

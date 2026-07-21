@@ -16,7 +16,7 @@ from kiro_crew.deploy import handlers, pending
 
 def test_staging_root_uses_config_dir(tmp_path: Path, monkeypatch):
     """F1: _staging_root() returns a path under config_dir(), not /tmp."""
-    monkeypatch.setattr("kiro_crew.deploy.handlers.config_dir", lambda: tmp_path)
+    monkeypatch.setattr("kiro_crew.deploy.staging.config_dir", lambda: tmp_path)
     root = handlers._staging_root()
     assert root.parent == tmp_path
     assert root.name == "deploy-staging"
@@ -32,7 +32,7 @@ def test_staging_root_rejects_symlink(tmp_path: Path, monkeypatch):
     target.mkdir()
     symlink = fake_config / "deploy-staging"
     symlink.symlink_to(target)
-    monkeypatch.setattr("kiro_crew.deploy.handlers.config_dir", lambda: fake_config)
+    monkeypatch.setattr("kiro_crew.deploy.staging.config_dir", lambda: fake_config)
     with pytest.raises(RuntimeError, match="symlink"):
         handlers._staging_root()
 
@@ -41,7 +41,7 @@ def test_staging_root_rejects_wrong_owner(tmp_path: Path, monkeypatch):
     """F1: _staging_root() raises when uid mismatch (mocked)."""
     fake_config = tmp_path / "cfg"
     fake_config.mkdir()
-    monkeypatch.setattr("kiro_crew.deploy.handlers.config_dir", lambda: fake_config)
+    monkeypatch.setattr("kiro_crew.deploy.staging.config_dir", lambda: fake_config)
     # First call creates the dir normally
     handlers._staging_root()
     # Patch os.getuid to return a different uid
@@ -60,7 +60,7 @@ def test_stage_tree_runs_in_thread(tmp_path: Path, monkeypatch):
     """
     fake_config = tmp_path / "cfg"
     fake_config.mkdir()
-    monkeypatch.setattr("kiro_crew.deploy.handlers.config_dir", lambda: fake_config)
+    monkeypatch.setattr("kiro_crew.deploy.staging.config_dir", lambda: fake_config)
 
     src = tmp_path / "src"
     src.mkdir()
@@ -85,7 +85,7 @@ def test_symlink_in_source_blocks_deploy(tmp_path: Path, monkeypatch):
     and then detected+rejected in the staged snapshot check."""
     fake_config = tmp_path / "cfg"
     fake_config.mkdir()
-    monkeypatch.setattr("kiro_crew.deploy.handlers.config_dir", lambda: fake_config)
+    monkeypatch.setattr("kiro_crew.deploy.staging.config_dir", lambda: fake_config)
 
     src = tmp_path / "src"
     src.mkdir()
@@ -108,7 +108,7 @@ def test_normal_tree_passes_staging(tmp_path: Path, monkeypatch):
     """F3: A normal tree (no symlinks) passes the staging check."""
     fake_config = tmp_path / "cfg"
     fake_config.mkdir()
-    monkeypatch.setattr("kiro_crew.deploy.handlers.config_dir", lambda: fake_config)
+    monkeypatch.setattr("kiro_crew.deploy.staging.config_dir", lambda: fake_config)
 
     src = tmp_path / "src"
     src.mkdir()

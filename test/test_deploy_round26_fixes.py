@@ -11,7 +11,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_f1_backend_recall_verifies_expected_resource_ids():
-    src = (_ROOT / "src/kiro_crew/deploy/handlers.py").read_text()
+    src = (_ROOT / "src/kiro_crew/deploy/core.py").read_text()
     seg = src.split("async def _do_recall", 1)[1].split("\nasync def ", 1)[0]
     assert "expected_distribution_id" in seg
     assert "resource ids changed since preview" in seg

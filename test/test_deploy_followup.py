@@ -21,7 +21,8 @@ class TestFU1ReaperRemediation:
         assert h._reaper_remediation("", "") == "install-reaper.sh"
 
     def test_both_409_sites_attach_remediation(self):
-        src = Path(h.__file__).read_text()
+        from kiro_crew.deploy import core
+        src = Path(core.__file__).read_text()
         assert src.count('"remediation": _reaper_remediation(profile, region)') == 2
 
 

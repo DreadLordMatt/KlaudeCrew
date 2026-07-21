@@ -101,8 +101,8 @@ def _fake_store(kind="widget", content="<div>hi</div>", name="My Art"):
 
 def test_deploy_confirm_gate_returns_preview(monkeypatch):
     _set_profile(monkeypatch)
-    monkeypatch.setattr(handlers, "get_default_store", lambda: _fake_store(), raising=False)
-    monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: _fake_store(), raising=False)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
     status, payload = _run(handlers._do_deploy({"site_id": "cr-dash", "artifact_slug": "a"}))
     assert status == 200
     assert payload["requires_confirm"] is True
@@ -113,8 +113,8 @@ def test_deploy_confirm_gate_returns_preview(monkeypatch):
 def test_deploy_scan_gate_blocks_secret(monkeypatch):
     _set_profile(monkeypatch)
     leaky = "<p>AKIAABCDEFGHIJKLMNOP</p>"
-    monkeypatch.setattr(handlers, "get_default_store", lambda: _fake_store(content=leaky), raising=False)
-    monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: _fake_store(content=leaky), raising=False)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
     status, payload = _run(handlers._do_deploy({"site_id": "s", "artifact_slug": "a", "confirm": True}))
     assert status == 409
     assert payload["blocked"] is True and payload["reason"] == "scan"
@@ -124,8 +124,8 @@ def test_deploy_credential_finding_cannot_be_overridden(monkeypatch):
     """Credential findings are hard-blocked — override_scan has no effect."""
     _set_profile(monkeypatch)
     leaky = "<p>AKIAABCDEFGHIJKLMNOP</p>"
-    monkeypatch.setattr(handlers, "get_default_store", lambda: _fake_store(content=leaky), raising=False)
-    monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: _fake_store(content=leaky), raising=False)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
 
     status, payload = _run(handlers._do_deploy(
         {"site_id": "s", "artifact_slug": "a", "confirm": True, "override_scan": True}))
@@ -139,8 +139,8 @@ def test_deploy_info_finding_overridable(monkeypatch):
     _set_profile(monkeypatch)
     # An internal host finding is info-class, not credential.
     leaky = "<p>Visit secret.amazon.com for details</p>"
-    monkeypatch.setattr(handlers, "get_default_store", lambda: _fake_store(content=leaky), raising=False)
-    monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: _fake_store(content=leaky), raising=False)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
     captured = {}
 
     def fake_deploy(site_id, src_dir, profile, region):
@@ -170,9 +170,9 @@ def test_deploy_blocks_sensitive_local_dir(monkeypatch, tmp_path):
     src = tmp_path / "site"
     src.mkdir()
     (src / "index.html").write_text("<p>ok</p>", encoding="utf-8")
-    monkeypatch.setattr(handlers, "_allowed_local_roots", lambda: [tmp_path.resolve()])
+    monkeypatch.setattr("kiro_crew.deploy.core._allowed_local_roots", lambda: [tmp_path.resolve()])
     # Simulate the dir resolving to a sensitive credential path.
-    monkeypatch.setattr(handlers, "is_sensitive_path", lambda p: "site" in p)
+    monkeypatch.setattr("kiro_crew.deploy.staging.is_sensitive_path", lambda p: "site" in p)
     status, payload = _run(handlers._do_deploy(
         {"site_id": "s", "local_dir": str(src), "confirm": True}))
     assert status == 400
@@ -195,7 +195,7 @@ def test_deploy_rejects_local_dir_outside_allowed_roots(monkeypatch, tmp_path):
     src = tmp_path / "site"
     src.mkdir()
     (src / "index.html").write_text("<p>ok</p>", encoding="utf-8")
-    monkeypatch.setattr(handlers, "_allowed_local_roots", lambda: [Path("/nonexistent-root")])
+    monkeypatch.setattr("kiro_crew.deploy.core._allowed_local_roots", lambda: [Path("/nonexistent-root")])
     status, payload = _run(handlers._do_deploy(
         {"site_id": "s", "local_dir": str(src), "confirm": True}))
     assert status == 400
@@ -209,8 +209,8 @@ def test_deploy_missing_artifact_404(monkeypatch):
     def boom():
         return SimpleNamespace(get=lambda slug: (_ for _ in ()).throw(ArtifactNotFoundError("x")))
 
-    monkeypatch.setattr(handlers, "get_default_store", boom, raising=False)
-    monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", boom, raising=False)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
     status, payload = _run(handlers._do_deploy({"site_id": "s", "artifact_slug": "missing", "confirm": True}))
     assert status == 404
 
@@ -307,8 +307,8 @@ def test_safe_site_id_normalization():
 ])
 def test_deploy_renders_each_kind(monkeypatch, kind, content, marker):
     _set_profile(monkeypatch)
-    monkeypatch.setattr(handlers, "get_default_store", lambda: _fake_store(kind=kind, content=content), raising=False)
-    monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: _fake_store(kind=kind, content=content), raising=False)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
     captured = {}
 
     def fake_deploy(sid, src, p, r):
@@ -324,7 +324,7 @@ def test_deploy_renders_each_kind(monkeypatch, kind, content, marker):
 
 def test_deploy_local_dir_scan_gate(monkeypatch, tmp_path):
     _set_profile(monkeypatch)
-    monkeypatch.setattr(handlers, "_allowed_local_roots", lambda: [tmp_path.resolve()])
+    monkeypatch.setattr("kiro_crew.deploy.core._allowed_local_roots", lambda: [tmp_path.resolve()])
     site = tmp_path / "site"
     site.mkdir()
     (site / "index.html").write_text("<p>AKIAABCDEFGHIJKLMNOP</p>", encoding="utf-8")
@@ -335,7 +335,7 @@ def test_deploy_local_dir_scan_gate(monkeypatch, tmp_path):
 def test_deploy_local_dir_scans_non_index_files(monkeypatch, tmp_path):
     """The scan gate must cover every uploaded file, not just index.html."""
     _set_profile(monkeypatch)
-    monkeypatch.setattr(handlers, "_allowed_local_roots", lambda: [tmp_path.resolve()])
+    monkeypatch.setattr("kiro_crew.deploy.core._allowed_local_roots", lambda: [tmp_path.resolve()])
     site = tmp_path / "site"
     site.mkdir()
     (site / "index.html").write_text("<p>clean</p>", encoding="utf-8")
@@ -416,9 +416,9 @@ def test_teardown_persistent_manifest_unreachable_returns_502(monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
-    monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.teardown._HAS_ARTIFACTS", True)
     # Reaper is installed — this test is about manifest expiry, not reaper check.
-    monkeypatch.setattr(handlers, "_check_reaper_installed", lambda p, r: True)
+    monkeypatch.setattr("kiro_crew.deploy.teardown._check_reaper_installed", lambda p, r: True)
 
     # Build a fake webapp artifact with persistent=True (no expires_at)
     lifecycle = SimpleNamespace(created_at="2026-01-01T00:00:00Z", expires_at=None,
@@ -433,13 +433,13 @@ def test_teardown_persistent_manifest_unreachable_returns_502(monkeypatch):
         mark_webapp_expired=lambda slug: art,
         unmark_webapp_expired=lambda slug: art,
     )
-    monkeypatch.setattr(handlers, "get_default_store", lambda: store, raising=False)
+    monkeypatch.setattr("kiro_crew.deploy.teardown.get_default_store", lambda: store, raising=False)
 
     # Make _expire_manifest_best_effort return "unreachable"
     async def _fake_expire(a):
         return "unreachable"
 
-    monkeypatch.setattr(handlers, "_expire_manifest_best_effort", _fake_expire)
+    monkeypatch.setattr("kiro_crew.deploy.teardown._expire_manifest_best_effort", _fake_expire)
 
     # Non-restricted request with confirm=True
     class _Req:
@@ -469,7 +469,7 @@ def test_expire_manifest_uses_art_slug_not_meta_slug(monkeypatch):
     """_expire_manifest_best_effort always uses art.slug, ignoring meta.slug."""
     from types import SimpleNamespace
 
-    monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.teardown._HAS_ARTIFACTS", True)
 
     # Register a profile so it passes the registry check.
     handlers._save_config("legit-profile", "us-west-2")
@@ -519,7 +519,7 @@ def test_expire_manifest_unregistered_profile_returns_unreachable(monkeypatch):
     """If the metadata profile is not in the registry, return 'unreachable' (no engine call)."""
     from types import SimpleNamespace
 
-    monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.teardown._HAS_ARTIFACTS", True)
 
     # Do NOT register any profile.
     lifecycle = SimpleNamespace(created_at="2026-01-01T00:00:00Z", expires_at=None,
@@ -643,7 +643,7 @@ def test_teardown_reaper_present_tombstones(monkeypatch):
     from kiro_crew.deploy import handlers
 
     # Mock _check_reaper_installed to return True
-    monkeypatch.setattr(handlers, "_check_reaper_installed", lambda p, r: True)
+    monkeypatch.setattr("kiro_crew.deploy.teardown._check_reaper_installed", lambda p, r: True)
 
     # Create a minimal artifact namespace with webapp metadata
     meta = SimpleNamespace(
@@ -655,12 +655,12 @@ def test_teardown_reaper_present_tombstones(monkeypatch):
         get=lambda slug: art,
         mark_webapp_expired=lambda slug: art,
     )
-    monkeypatch.setattr(handlers, "get_default_store", lambda: store)
+    monkeypatch.setattr("kiro_crew.deploy.teardown.get_default_store", lambda: store)
 
     async def _fake_expire(a):
         return "ok"
 
-    monkeypatch.setattr(handlers, "_expire_manifest_best_effort", _fake_expire)
+    monkeypatch.setattr("kiro_crew.deploy.teardown._expire_manifest_best_effort", _fake_expire)
 
     class _Req(_FakeReq):
         def __init__(self):
@@ -689,7 +689,7 @@ def test_teardown_reaper_absent_returns_409(monkeypatch):
     from kiro_crew.deploy import handlers
 
     # Mock _check_reaper_installed to return False
-    monkeypatch.setattr(handlers, "_check_reaper_installed", lambda p, r: False)
+    monkeypatch.setattr("kiro_crew.deploy.teardown._check_reaper_installed", lambda p, r: False)
 
     # Create a minimal artifact
     meta = SimpleNamespace(
@@ -698,7 +698,7 @@ def test_teardown_reaper_absent_returns_409(monkeypatch):
     )
     art = SimpleNamespace(webapp_metadata=meta, slug="test-slug", kind="webapp")
     store = SimpleNamespace(get=lambda slug: art)
-    monkeypatch.setattr(handlers, "get_default_store", lambda: store)
+    monkeypatch.setattr("kiro_crew.deploy.teardown.get_default_store", lambda: store)
 
     class _Req(_FakeReq):
         def __init__(self):
@@ -734,7 +734,7 @@ def test_do_deploy_local_dir_stages_public_dir(monkeypatch, tmp_path):
     # Monkeypatch config_dir so staging goes under tmp_path
     fake_cfg = tmp_path / "fakecfg"
     fake_cfg.mkdir()
-    monkeypatch.setattr(handlers, "config_dir", lambda: fake_cfg)
+    monkeypatch.setattr("kiro_crew.deploy.staging.config_dir", lambda: fake_cfg)
 
     # Mock engine.deploy to capture what gets passed
     deployed = {}
@@ -746,7 +746,7 @@ def test_do_deploy_local_dir_stages_public_dir(monkeypatch, tmp_path):
 
     monkeypatch.setattr(engine, "deploy", fake_deploy)
     # Mock _allowed_local_roots to include tmp_path
-    monkeypatch.setattr(handlers, "_allowed_local_roots", lambda: [tmp_path])
+    monkeypatch.setattr("kiro_crew.deploy.core._allowed_local_roots", lambda: [tmp_path])
 
     status, body = _run(handlers._do_deploy({
         "site_id": "my-app",
@@ -783,7 +783,7 @@ def test_do_deploy_writes_manifest_with_ttl(tmp_path, monkeypatch):
 
     monkeypatch.setattr(engine, "deploy", fake_deploy)
     monkeypatch.setattr(engine, "run_aws", fake_run_aws)
-    monkeypatch.setattr(handlers, "_allowed_local_roots", lambda: [tmp_path])
+    monkeypatch.setattr("kiro_crew.deploy.core._allowed_local_roots", lambda: [tmp_path])
 
     # Mock profile resolution
     monkeypatch.setattr(profiles_mod, "resolve_profile", lambda p: ("default", "us-west-2"))
@@ -813,8 +813,8 @@ def test_do_deploy_writes_manifest_with_ttl(tmp_path, monkeypatch):
 def test_deploy_invalid_ttl_rejected_before_deploy(monkeypatch):
     """Invalid ttl_hours returns 400 before any AWS call is made."""
     _set_profile(monkeypatch)
-    monkeypatch.setattr(handlers, "get_default_store", lambda: _fake_store(), raising=False)
-    monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: _fake_store(), raising=False)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
     status, payload = _run(handlers._do_deploy(
         {"site_id": "s", "artifact_slug": "a", "confirm": True, "ttl_hours": "banana"}))
     assert status == 400
@@ -824,8 +824,8 @@ def test_deploy_invalid_ttl_rejected_before_deploy(monkeypatch):
 def test_deploy_negative_ttl_rejected(monkeypatch):
     """Negative ttl_hours returns 400."""
     _set_profile(monkeypatch)
-    monkeypatch.setattr(handlers, "get_default_store", lambda: _fake_store(), raising=False)
-    monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: _fake_store(), raising=False)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
     status, payload = _run(handlers._do_deploy(
         {"site_id": "s", "artifact_slug": "a", "confirm": True, "ttl_hours": -5}))
     assert status == 400
@@ -838,8 +838,8 @@ def test_deploy_expires_at_uses_future_time(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
     _set_profile(monkeypatch)
-    monkeypatch.setattr(handlers, "get_default_store", lambda: _fake_store(), raising=False)
-    monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: _fake_store(), raising=False)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
 
     captured_manifest = {}
 
@@ -885,8 +885,8 @@ def test_deploy_expires_at_uses_future_time(monkeypatch):
 def test_deploy_manifest_written_to_base_stack_bucket(monkeypatch):
     """Manifest should go to the shared base-stack bucket, not per-site engine bucket."""
     _set_profile(monkeypatch)
-    monkeypatch.setattr(handlers, "get_default_store", lambda: _fake_store(), raising=False)
-    monkeypatch.setattr(handlers, "_HAS_ARTIFACTS", True)
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: _fake_store(), raising=False)
+    monkeypatch.setattr("kiro_crew.deploy.core._HAS_ARTIFACTS", True)
 
     s3_calls = []
 
@@ -930,7 +930,7 @@ def test_deploy_manifest_includes_engine_arch_fields(monkeypatch, tmp_path):
 
     store = ArtifactStore(tmp_path / "store")
     store.create(name="mywidget", content="<p>Hello</p>", kind="widget")
-    monkeypatch.setattr(handlers, "get_default_store", lambda: store)
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: store)
 
     manifest_data: list = []
 
@@ -1167,7 +1167,7 @@ def test_ttl_hours_overflow_blocked(monkeypatch, tmp_path):
 
     store = ArtifactStore(tmp_path / "store")
     store.create(name="myart", content="<p>test</p>", kind="widget")
-    monkeypatch.setattr(handlers, "get_default_store", lambda: store)
+    monkeypatch.setattr("kiro_crew.deploy.core.get_default_store", lambda: store)
 
     engine_called = []
     monkeypatch.setattr(engine, "deploy", lambda *a, **kw: engine_called.append(1) or {})
@@ -1359,7 +1359,7 @@ def test_deploy_ttl_nonzero_no_base_stack_returns_409(monkeypatch, tmp_path):
     src = tmp_path / "site"
     src.mkdir()
     (src / "index.html").write_text("<h1>hi</h1>")
-    monkeypatch.setattr(handlers, "_allowed_local_roots", lambda: [tmp_path])
+    monkeypatch.setattr("kiro_crew.deploy.core._allowed_local_roots", lambda: [tmp_path])
 
     # Override the autouse mock: base stack not found
     monkeypatch.setattr(engine, "run_aws", lambda *a, **kw: (255, "", "stack not found"))
@@ -1380,7 +1380,7 @@ def test_deploy_ttl_zero_no_base_stack_succeeds(monkeypatch, tmp_path):
     src = tmp_path / "site"
     src.mkdir()
     (src / "index.html").write_text("<h1>hi</h1>")
-    monkeypatch.setattr(handlers, "_allowed_local_roots", lambda: [tmp_path])
+    monkeypatch.setattr("kiro_crew.deploy.core._allowed_local_roots", lambda: [tmp_path])
 
     # Override the autouse mock: base stack not found
     monkeypatch.setattr(engine, "run_aws", lambda *a, **kw: (255, "", "stack not found"))
@@ -1552,7 +1552,7 @@ def test_deploy_local_dir_staged_copy_cleaned(tmp_path, monkeypatch):
 
     fake_cfg = tmp_path / "fakecfg"
     fake_cfg.mkdir()
-    monkeypatch.setattr(handlers, "config_dir", lambda: fake_cfg)
+    monkeypatch.setattr("kiro_crew.deploy.staging.config_dir", lambda: fake_cfg)
 
     public = tmp_path / "myapp"
     public.mkdir()
@@ -1569,7 +1569,7 @@ def test_deploy_local_dir_staged_copy_cleaned(tmp_path, monkeypatch):
         return {"url": "https://fake.cloudfront.net/my-app/"}
 
     monkeypatch.setattr(engine, "deploy", fake_deploy)
-    monkeypatch.setattr(handlers, "_allowed_local_roots", lambda: [tmp_path])
+    monkeypatch.setattr("kiro_crew.deploy.core._allowed_local_roots", lambda: [tmp_path])
 
     status, body = _run(handlers._do_deploy({
         "site_id": "staged-test",
@@ -1593,7 +1593,7 @@ def test_allowed_local_roots_no_bare_tmp(monkeypatch, tmp_path):
     monkeypatch.setattr(KiroCrewConfig, "load", lambda: type("C", (), {
         "agent": type("A", (), {"subagent_cwd_allowed_roots": ["/home/testuser/workplace"]})()
     })())
-    monkeypatch.setattr(handlers, "config_dir", lambda: tmp_path)
+    monkeypatch.setattr("kiro_crew.deploy.staging.config_dir", lambda: tmp_path)
     roots = handlers._allowed_local_roots()
     root_strs = [str(r) for r in roots]
     # /tmp should NOT be in the list
