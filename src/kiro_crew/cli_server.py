@@ -1001,6 +1001,22 @@ async def _gateway(
     test_mode: bool = False,
 ) -> None:
     """Load config and start the Slack Socket Mode gateway."""
+    # ── Legacy ~/.meshclaw -> ~/.kirocrew one-time import (Phase 2) ──
+    # MUST run before any store is opened by run_gateway() below: the import
+    # replaces memory.db (old-wins) and the workspace knowledge.db in place and
+    # finally renames the legacy dir, so an open SQLite connection would be
+    # clobbered underneath or block the rename. If the onboarding step wrote an
+    # intent marker on a previous boot, this performs the import now, then
+    # clears the intent + writes the done marker. Microsecond no-op otherwise.
+    try:
+        from kiro_crew.migrations.meshclaw_import import run_pending_meshclaw_import
+
+        run_pending_meshclaw_import()
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "meshclaw->kirocrew import runner failed (continuing boot)", exc_info=True
+        )
+
     # Activate mise once at gateway start so every subprocess we
     # later spawn — MCP servers, script crons, kiro-cli — inherits the user's
     # mise-managed toolchain. Without this, Node-based MCP servers spawn against

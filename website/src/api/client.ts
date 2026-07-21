@@ -646,6 +646,16 @@ export interface AgentImportApplyResponse {
   summary: AgentImportSummary
 }
 
+/** GET /api/onboarding/meshclaw-import/status — legacy ~/.meshclaw data dir
+ *  discovery for the first-run import onboarding card. `available` is false on
+ *  fresh installs with no legacy dir, so the card never renders for them. */
+export interface MeshclawImportStatus {
+  available: boolean
+  sourcePath: string
+  sizeEstimateBytes: number
+  sessionCount: number
+}
+
 export const api = {
   status: () => fetch('/api/status').then(j),
   tunnelStatus: () => fetch('/api/tunnel/status').then(j) as Promise<TunnelStatus>,
@@ -1445,6 +1455,14 @@ export const api = {
     const errText = await r.text()
     throw new ApiError(r.status, errText || `HTTP ${r.status}`)
   },
+
+  // Onboarding: legacy MeshClaw data import (first-run migration card).
+  // start() triggers a gateway restart that performs the import; the UI shows a
+  // reconnecting state and the existing socket-reconnect logic re-establishes.
+  meshclawImportStatus: () =>
+    get('/api/onboarding/meshclaw-import/status').then(j) as Promise<MeshclawImportStatus>,
+  meshclawImportStart: () =>
+    post('/api/onboarding/meshclaw-import/start').then(j) as Promise<{ status: string }>,
 
   // Tips
   tipsNext: () => get('/api/tips/next').then(jNullable) as Promise<{ tip: { id: string; feature: string; title: string; body: string; why: string; doc: string; cta_prompt: string; action?: { kind: 'route'; label: string; route: string } | null } | null; glow: boolean } | null>,

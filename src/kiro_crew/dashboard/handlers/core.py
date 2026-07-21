@@ -1597,3 +1597,107 @@ async def api_app_token(request: web.Request) -> web.Response:
         source="app_auth",
     )
     return web.json_response({"token": token})
+
+
+# ── Legacy ~/.meshclaw -> ~/.kirocrew one-time import (onboarding) ──
+
+
+async def api_meshclaw_import_status(request: web.Request) -> web.Response:
+    """GET /api/onboarding/meshclaw-import/status — is a legacy import available?
+
+    Returns availability plus lightweight metadata (source path, byte-size
+    estimate, session count). Read-only; safe to poll.
+    """
+    from kiro_crew.migrations.meshclaw_import import detect_meshclaw_import_available
+
+    info = await asyncio.to_thread(detect_meshclaw_import_available)
+    return web.json_response(info)
+
+
+async def api_meshclaw_import_start(request: web.Request) -> web.Response:
+    """POST /api/onboarding/meshclaw-import/start — request the import + restart.
+
+    Writes the Phase-1 intent marker and restarts the gateway using the same
+    in-process exec-restart the update flow exposes. On the next boot, the
+    early runner (before any store opens) performs the import, renames
+    ``~/.meshclaw`` -> ``~/.meshclaw.bak``, and writes the done marker.
+    """
+    from kiro_crew.migrations.meshclaw_import import (
+        clear_import_intent,
+        detect_meshclaw_import_available,
+        write_import_intent,
+    )
+
+    caller = request.get("user", "dashboard")
+    state: DashboardState = request.app["state"]
+
+    # Double-restart guard: the flag is checked-and-set with no await in
+    # between, so two concurrent POSTs cannot both schedule a restart — the
+    # second gets a 409.
+    if state.meshclaw_import_restart_inflight:
+        _sel().log_api_access(
+            caller=caller,
+            operation="meshclaw_import.start",
+            outcome="denied",
+            error="restart already in flight",
+        )
+        return web.json_response({"error": "restart already in flight"}, status=409)
+    state.meshclaw_import_restart_inflight = True
+
+    try:
+        info = await asyncio.to_thread(detect_meshclaw_import_available)
+        if not info.get("available"):
+            state.meshclaw_import_restart_inflight = False
+            _sel().log_api_access(
+                caller=caller,
+                operation="meshclaw_import.start",
+                outcome="denied",
+                error="import not available",
+            )
+            return web.json_response(
+                {"error": "meshclaw import not available", **info}, status=409
+            )
+
+        await asyncio.to_thread(write_import_intent)
+    except BaseException:
+        # Nothing was scheduled — release the guard so a later request works.
+        state.meshclaw_import_restart_inflight = False
+        raise
+    _sel().log_api_access(
+        caller=caller,
+        operation="meshclaw_import.start",
+        outcome="allowed",
+        resources=str(info.get("sourcePath", "~/.meshclaw")),
+    )
+
+    # Restart via the same mechanism the update flow exposes (save state,
+    # close sessions, os.execv the same process). Scheduled as a tracked
+    # background task so this response flushes before the exec.
+    from kiro_crew.dashboard.handlers.updates import _restart_gateway
+
+    task = asyncio.create_task(_restart_gateway(state))
+    state._background_tasks.add(task)
+
+    def _on_restart_done(t: "asyncio.Task[None]") -> None:
+        state._background_tasks.discard(t)
+        # Reaching this callback at all means no exec happened (a successful
+        # restart exec()s the process and never returns here), so release
+        # the guard UNCONDITIONALLY — covering the invalid-executable early
+        # return, exceptions, and cancellation — so a non-exec restart can
+        # never leave the flag stuck True and permanently 409 the endpoint.
+        state.meshclaw_import_restart_inflight = False
+        if not t.cancelled() and t.exception() is not None:
+            logger.warning(
+                "meshclaw import: gateway restart failed: %s", t.exception()
+            )
+        # The restart this intent was written for is not coming, so the
+        # consent must not linger for an unrelated later restart to consume.
+        # A genuine re-request simply rewrites the marker. File IO — run it
+        # off the event loop, tracked like other background work.
+        cleanup = asyncio.create_task(asyncio.to_thread(clear_import_intent))
+        state._background_tasks.add(cleanup)
+        cleanup.add_done_callback(state._background_tasks.discard)
+
+    task.add_done_callback(_on_restart_done)
+
+    return web.json_response({"status": "restarting"})

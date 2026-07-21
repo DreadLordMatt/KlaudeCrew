@@ -70,6 +70,7 @@ import { useUpdateSubscription } from './hooks/useUpdateSubscription'
 import UpdateModal from './components/UpdateModal'
 import BottomTerminalPanel from './components/BottomTerminalPanel'
 import { toggleBottomTerminal } from './hooks/useBottomTerminal'
+import { MeshclawImportCard } from './components/MeshclawImportCard'
 import { setTerminalEnabledFlag } from './utils/terminalRegistry'
 import AppsPage from './pages/AppsPage'
 import AppPage from './pages/AppPage'
@@ -1696,6 +1697,11 @@ export default function App() {
         initialOpen={showOnboarding}
         onComplete={() => { markOnboarded(); setShowOnboarding(false) }}
       />
+
+      {/* First-run legacy MeshClaw data import. Self-gates on backend
+          availability; suppressed while the onboarding flow is still open so
+          the two first-run overlays never stack. */}
+      <MeshclawImportCard suppressed={showOnboarding || showAgentImport} />
 
       {/* Mobile backdrop */}
       <AnimatePresence>

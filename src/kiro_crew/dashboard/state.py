@@ -1604,6 +1604,10 @@ class DashboardState:
         # Sidebar columns — flat list of {id, name, tag_ids, mode, order, include_untagged}
         self._tag_boards: list[dict[str, Any]] = []
         self._background_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
+        # True once a meshclaw-import restart has been scheduled; a second
+        # concurrent POST /api/onboarding/meshclaw-import/start gets a 409
+        # instead of scheduling a second _restart_gateway.
+        self.meshclaw_import_restart_inflight: bool = False
         self.no_crons: bool = False  # --no-crons flag: cron execution disabled
         self._hook_store: Any = None  # Lazy-init ScriptHookStore
         # Task refine state (background LLM spec generation)

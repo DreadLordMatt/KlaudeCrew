@@ -1366,6 +1366,8 @@ async def start_dashboard(
     app.router.add_get("/api/stream", handlers.api_stream)
     app.router.add_get("/api/sso-ttl", handlers.api_sso_ttl)
     app.router.add_get("/api/dashboard/branding", handlers.api_branding)
+    app.router.add_get("/api/onboarding/meshclaw-import/status", handlers.api_meshclaw_import_status)
+    app.router.add_post("/api/onboarding/meshclaw-import/start", handlers.api_meshclaw_import_start)
     app.router.add_get("/api/health", handlers.api_health)
     app.router.add_get("/api/live", handlers.api_live)
     app.router.add_get("/api/ready", handlers.api_ready)
