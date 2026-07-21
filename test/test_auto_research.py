@@ -44,9 +44,16 @@ def _isolate(tmp_path: Path):
     """Isolate DB and research dir per test."""
     with (
         patch(
-            "kiro_crew.apps.builtins.auto_research.handlers.DB_PATH",
+            "kiro_crew.apps.builtins.auto_research.db.DB_PATH",
             tmp_path / "test.db",
         ),
+        patch(
+            "kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR",
+            tmp_path / "research",
+        ),
+        # handlers re-exports RESEARCH_DIR for backward compat; keep it in sync
+        # with files.RESEARCH_DIR (the binding the code actually uses) so tests
+        # that read the attribute via the handlers shim see the isolated dir.
         patch(
             "kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR",
             tmp_path / "research",
@@ -71,7 +78,7 @@ class TestPathValidation:
         assert not _validate_campaign_id("")
 
     def test_safe_dir_rejects_invalid(self, tmp_path: Path):
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             assert _safe_campaign_dir("../etc") is None
             assert _safe_campaign_dir("a1b2c3d4") is not None
 
@@ -139,7 +146,7 @@ class TestStagnation:
         assert not check_stagnation("a1b2c3d4")
 
     def test_fewer_than_5(self, tmp_path: Path):
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             d = tmp_path / "a1b2c3d4" / "findings"
             d.mkdir(parents=True)
             for i in range(4):
@@ -147,7 +154,7 @@ class TestStagnation:
             assert not check_stagnation("a1b2c3d4")
 
     def test_5_zeros_stagnant(self, tmp_path: Path):
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             d = tmp_path / "a1b2c3d4" / "findings"
             d.mkdir(parents=True)
             for i in range(5):
@@ -155,7 +162,7 @@ class TestStagnation:
             assert check_stagnation("a1b2c3d4")
 
     def test_recent_finding_not_stagnant(self, tmp_path: Path):
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             d = tmp_path / "a1b2c3d4" / "findings"
             d.mkdir(parents=True)
             for i in range(4):
@@ -164,7 +171,7 @@ class TestStagnation:
             assert not check_stagnation("a1b2c3d4")
 
     def test_malformed_json_safe(self, tmp_path: Path):
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             d = tmp_path / "a1b2c3d4" / "findings"
             d.mkdir(parents=True)
             for i in range(4):
@@ -184,7 +191,7 @@ class TestCycleFileMatching:
         return d
 
     def test_canonical_names_matched(self, tmp_path: Path):
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             d = self._findings_dir(tmp_path)
             (d / "cycle_000.json").write_text(json.dumps({"cycle": 0, "new_findings_count": 1}))
             (d / "cycle_001.json").write_text(json.dumps({"cycle": 1, "new_findings_count": 1}))
@@ -192,7 +199,7 @@ class TestCycleFileMatching:
 
     def test_near_miss_names_matched(self, tmp_path: Path):
         # Unpadded, dash separator, and mixed case all map to a real cycle.
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             d = self._findings_dir(tmp_path)
             (d / "cycle_0.json").write_text(json.dumps({"cycle": 0, "new_findings_count": 1}))
             (d / "cycle-1.json").write_text(json.dumps({"cycle": 1, "new_findings_count": 1}))
@@ -202,7 +209,7 @@ class TestCycleFileMatching:
     def test_duplicate_name_variants_deduped_by_cycle_number(self, tmp_path: Path):
         # Two name variants of the SAME logical cycle must count once, not twice
         # (else total_cycles/cycle_offset inflate and a finding surfaces twice).
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             d = self._findings_dir(tmp_path)
             (d / "cycle_001.json").write_text(json.dumps({"cycle": 1, "new_findings_count": 1}))
             (d / "cycle-1.json").write_text(json.dumps({"cycle": 1, "new_findings_count": 1}))
@@ -212,7 +219,7 @@ class TestCycleFileMatching:
 
     def test_non_cycle_files_ignored(self, tmp_path: Path):
         # A descriptive name (the 02dfaefd incident) and unrelated json are skipped.
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             d = self._findings_dir(tmp_path)
             (d / "cycle_000.json").write_text(json.dumps({"cycle": 0, "new_findings_count": 1}))
             (d / "01-kiroom-vs-kirocrew.md").write_text("# not a cycle file")
@@ -221,7 +228,7 @@ class TestCycleFileMatching:
 
     def test_orders_by_cycle_number_not_lexically(self, tmp_path: Path):
         # Regression: lexical sort puts cycle_10 before cycle_2; integer sort fixes it.
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             d = self._findings_dir(tmp_path)
             for n in (2, 10, 1):
                 (d / f"cycle_{n}.json").write_text(
@@ -231,7 +238,7 @@ class TestCycleFileMatching:
 
     def test_stagnation_counts_near_miss_names(self, tmp_path: Path):
         # 5 zero-finding cycles under near-miss names still trips stagnation.
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             d = self._findings_dir(tmp_path)
             for i in range(5):
                 (d / f"cycle-{i}.json").write_text(json.dumps({"new_findings_count": 0}))
@@ -242,7 +249,7 @@ class TestCycleFileMatching:
         # widen the exfiltration surface — a finding under a near-miss name is
         # still LLM-authored content, so get_findings() must run the SAME
         # credential + exfil-URL redaction on it as on a canonical-named file.
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             d = self._findings_dir(tmp_path)
             # 40+ char base64-ish blob in the query = exfil-shaped URL, which the
             # URL leg redacts wholesale (domain included). A plain source URL is
@@ -272,24 +279,24 @@ class TestCycleFileMatching:
 
 class TestFileInterface:
     def test_write_status(self, tmp_path: Path):
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             write_status("a1b2c3d4", "running")
             d = json.loads((tmp_path / "a1b2c3d4" / "status.json").read_text())
             assert d["status"] == "running"
 
     def test_write_status_rejects_invalid(self, tmp_path: Path):
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             write_status("../etc", "running")
             assert not (tmp_path / ".." / "etc").exists()
 
     def test_write_guidance(self, tmp_path: Path):
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             write_status("a1b2c3d4", "running")
             write_guidance("a1b2c3d4", "focus on X")
             assert (tmp_path / "a1b2c3d4" / "guidance.txt").read_text() == "focus on X"
 
     def test_get_findings_sorted(self, tmp_path: Path):
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             d = tmp_path / "a1b2c3d4" / "findings"
             d.mkdir(parents=True)
             (d / "cycle_002.json").write_text(json.dumps({"cycle": 2, "new_findings_count": 1}))
@@ -490,7 +497,7 @@ class TestHandlerValidation:
         assert "error" in result
 
     def test_write_guidance_rejects_invalid(self, tmp_path: Path):
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             write_guidance("../etc", "text")
             # Should not create any file outside research dir
             assert not (tmp_path / ".." / "etc" / "guidance.txt").exists()
@@ -601,11 +608,11 @@ class TestHTTPHandlers:
 
         with (
             patch(
-                "kiro_crew.apps.builtins.auto_research.handlers.DB_PATH",
+                "kiro_crew.apps.builtins.auto_research.db.DB_PATH",
                 tmp_path / "t.db",
             ),
             patch(
-                "kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR",
+                "kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR",
                 tmp_path / "r",
             ),
         ):
@@ -618,8 +625,8 @@ class TestHTTPHandlers:
         from aiohttp.test_utils import TestClient, TestServer
 
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post(
@@ -636,8 +643,8 @@ class TestHTTPHandlers:
         from kiro_crew.apps.builtins.auto_research import handlers as h
 
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             async with TestClient(TestServer(app)) as c:
                 cr = await c.post(
@@ -661,8 +668,8 @@ class TestHTTPHandlers:
         from kiro_crew.apps.builtins.auto_research import handlers as h
 
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             async with TestClient(TestServer(app)) as c:
                 cr = await c.post(
@@ -680,8 +687,8 @@ class TestHTTPHandlers:
         from aiohttp.test_utils import TestClient, TestServer
 
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post(
@@ -701,8 +708,8 @@ class TestHTTPHandlers:
         from aiohttp.test_utils import TestClient, TestServer
 
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post(
@@ -726,8 +733,8 @@ class TestHTTPHandlers:
         from kiro_crew.apps.builtins.auto_research import handlers as h
 
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             async with TestClient(TestServer(app)) as c:
                 cr = await c.post(
@@ -747,8 +754,8 @@ class TestHTTPHandlers:
         from aiohttp.test_utils import TestClient, TestServer
 
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             async with TestClient(TestServer(app)) as c:
                 cr = await c.post(
@@ -768,8 +775,8 @@ class TestHTTPHandlers:
         from aiohttp.test_utils import TestClient, TestServer
 
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             async with TestClient(TestServer(app)) as c:
                 cr = await c.post(
@@ -793,8 +800,8 @@ class TestHTTPHandlers:
         from aiohttp.test_utils import TestClient, TestServer
 
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post(
@@ -812,8 +819,8 @@ class TestHTTPHandlers:
         from aiohttp.test_utils import TestClient, TestServer
 
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post(
@@ -831,8 +838,8 @@ class TestHTTPHandlers:
         from aiohttp.test_utils import TestClient, TestServer
 
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post(
@@ -850,8 +857,8 @@ class TestHTTPHandlers:
         from aiohttp.test_utils import TestClient, TestServer
 
         from kiro_crew.apps.builtins.auto_research import handlers as h
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"), \
-             patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"), \
+             patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post("/api/apps/auto-research/campaigns", json={
                     "question": "How do teams handle rate limiting?",
@@ -876,8 +883,8 @@ class TestHTTPHandlers:
     async def test_add_question_empty(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"), \
-             patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"), \
+             patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post("/api/apps/auto-research/campaigns", json={
                     "question": "How do teams handle rate limiting?",
@@ -891,8 +898,8 @@ class TestHTTPHandlers:
     async def test_add_question_not_found(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"), \
-             patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"), \
+             patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post("/api/apps/auto-research/campaigns/deadbeef/questions",
                                  json={"text": "Something"})
@@ -902,8 +909,8 @@ class TestHTTPHandlers:
     async def test_to_knowledge_no_findings(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"), \
-             patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"), \
+             patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post("/api/apps/auto-research/campaigns", json={
                     "question": "How do teams handle rate limiting?",
@@ -918,8 +925,8 @@ class TestHTTPHandlers:
         from aiohttp.test_utils import TestClient, TestServer
 
         from kiro_crew.apps.builtins.auto_research import handlers as h
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"), \
-             patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"), \
+             patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post("/api/apps/auto-research/campaigns", json={
                     "question": "How do teams handle rate limiting?",
@@ -954,8 +961,8 @@ class TestHTTPHandlers:
 
         app["state"] = SimpleNamespace(knowledge_store=_FakeStore())
         app["knowledge_pipeline"] = SimpleNamespace(ingest_file=AsyncMock())
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"), \
-             patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"), \
+             patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post("/api/apps/auto-research/campaigns", json={
                     "question": "How do teams handle rate limiting?",
@@ -979,8 +986,8 @@ class TestHTTPHandlers:
         # never a 503 for a status probe.
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"), \
-             patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"), \
+             patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"):
             async with TestClient(TestServer(app)) as c:
                 cr = await c.post("/api/apps/auto-research/campaigns", json={
                     "question": "How do teams handle rate limiting?", "sources": ["web"]})
@@ -1002,8 +1009,8 @@ class TestHTTPHandlers:
                 return {"id": "sid9"} if present["v"] else None
 
         app["state"] = SimpleNamespace(knowledge_store=_FakeStore())
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"), \
-             patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"), \
+             patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"):
             async with TestClient(TestServer(app)) as c:
                 cr = await c.post("/api/apps/auto-research/campaigns", json={
                     "question": "How do teams handle rate limiting?", "sources": ["web"]})
@@ -1037,8 +1044,8 @@ class TestHTTPHandlers:
             async def shutdown(self) -> None:
                 pass
 
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"), \
-             patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"), \
+        with patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"), \
+             patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"), \
              patch("kiro_crew.apps.builtins.auto_research.handlers.LLMPool",
                    lambda *a, **k: _RaisingPool()), \
              patch("kiro_crew.apps.builtins.auto_research.handlers.ArtifactStore",
@@ -1091,8 +1098,8 @@ class TestHTTPHandlers:
             async def shutdown(self) -> None:
                 pass
 
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"), \
-             patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"), \
+        with patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"), \
+             patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"), \
              patch("kiro_crew.apps.builtins.auto_research.handlers.LLMPool",
                    lambda *a, **k: _FakePool()), \
              patch("kiro_crew.apps.builtins.auto_research.handlers.ArtifactStore",
@@ -1130,8 +1137,8 @@ class TestHTTPHandlers:
             async def shutdown(self) -> None:
                 pass
 
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"), \
-             patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"), \
+        with patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"), \
+             patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"), \
              patch("kiro_crew.apps.builtins.auto_research.handlers.LLMPool",
                    lambda *a, **k: _RaisingPool()), \
              patch("kiro_crew.apps.builtins.auto_research.handlers.ArtifactStore",
@@ -1174,8 +1181,8 @@ class TestHTTPHandlers:
             async def shutdown(self) -> None:
                 pass
 
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"), \
-             patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"), \
+        with patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"), \
+             patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"), \
              patch("kiro_crew.apps.builtins.auto_research.handlers.LLMPool",
                    lambda *a, **k: _RaisingPool()), \
              patch("kiro_crew.apps.builtins.auto_research.handlers.ArtifactStore",
@@ -1199,8 +1206,8 @@ class TestHTTPHandlers:
     async def test_to_artifact_no_findings(self, app, tmp_path: Path):
         from aiohttp.test_utils import TestClient, TestServer
 
-        with patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"), \
-             patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"):
+        with patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"), \
+             patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post("/api/apps/auto-research/campaigns", json={
                     "question": "How do teams handle rate limiting?",
@@ -1218,8 +1225,8 @@ class TestHTTPHandlers:
 
         # No middleware → no user set → handlers must reject with 401
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             no_auth_app = web.Application()
             register_routes(no_auth_app)
@@ -1232,8 +1239,8 @@ class TestHTTPHandlers:
         from aiohttp.test_utils import TestClient, TestServer
 
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.get("/api/apps/auto-research/campaigns/ZZZZZZZZ")
@@ -1244,8 +1251,8 @@ class TestHTTPHandlers:
         from aiohttp.test_utils import TestClient, TestServer
 
         with (
-            patch("kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"),
-            patch("kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"),
+            patch("kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"),
+            patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"),
         ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.patch(
@@ -1296,7 +1303,7 @@ class TestRedactCampaignFields:
 class TestLoopLaunch:
     @pytest.mark.asyncio
     async def test_launch_arms_autonudge(self, monkeypatch):
-        from kiro_crew.apps.builtins.auto_research import handlers as h
+        from kiro_crew.apps.builtins.auto_research import watchdog as h
 
         c = create_campaign(
             {"question": "Research question about something here", "sources": ["web"]}
@@ -1317,7 +1324,7 @@ class TestLoopLaunch:
 
     @pytest.mark.asyncio
     async def test_launch_writes_brief(self, monkeypatch):
-        from kiro_crew.apps.builtins.auto_research import handlers as h
+        from kiro_crew.apps.builtins.auto_research import watchdog as h
 
         c = create_campaign(
             {
@@ -1341,14 +1348,14 @@ class TestLoopLaunch:
 
     @pytest.mark.asyncio
     async def test_launch_noop_without_service(self, monkeypatch):
-        from kiro_crew.apps.builtins.auto_research import handlers as h
+        from kiro_crew.apps.builtins.auto_research import watchdog as h
 
         monkeypatch.setattr(h, "_autonudge_instance", lambda: None)
         await h._launch_loop(SimpleNamespace(app={}), "a1b2c3d4")  # must not raise
 
     @pytest.mark.asyncio
     async def test_stop_removes_loop(self, monkeypatch):
-        from kiro_crew.apps.builtins.auto_research import handlers as h
+        from kiro_crew.apps.builtins.auto_research import watchdog as h
 
         svc = MagicMock()
         svc.remove = AsyncMock()
@@ -1359,7 +1366,7 @@ class TestLoopLaunch:
 
     @pytest.mark.asyncio
     async def test_pause_deactivates_loop(self, monkeypatch):
-        from kiro_crew.apps.builtins.auto_research import handlers as h
+        from kiro_crew.apps.builtins.auto_research import watchdog as h
 
         svc = MagicMock()
         svc.update = AsyncMock()
@@ -1483,13 +1490,13 @@ class TestUnattendedQuestionEnforcement:
 
     def test_unattended_discards_question_and_does_not_pause(self, tmp_path: Path):
         h, d = self._seed(tmp_path)
-        with patch.object(h, "RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             assert h._should_pause_for_question("a1b2c3d4", True) is False
             assert not (d / "questions.json").exists()  # discarded
 
     def test_attended_keeps_question_and_pauses(self, tmp_path: Path):
         h, d = self._seed(tmp_path)
-        with patch.object(h, "RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             assert h._should_pause_for_question("a1b2c3d4", False) is True
             assert (d / "questions.json").exists()  # preserved for the user
 
@@ -1497,7 +1504,7 @@ class TestUnattendedQuestionEnforcement:
         from kiro_crew.apps.builtins.auto_research import handlers as h
 
         (tmp_path / "a1b2c3d4").mkdir()
-        with patch.object(h, "RESEARCH_DIR", tmp_path):
+        with patch("kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path):
             assert h._should_pause_for_question("a1b2c3d4", False) is False
 
 
@@ -1585,11 +1592,11 @@ class TestForkAndGrillTreeHTTP:
 
         with (
             patch(
-                "kiro_crew.apps.builtins.auto_research.handlers.DB_PATH",
+                "kiro_crew.apps.builtins.auto_research.db.DB_PATH",
                 tmp_path / "t.db",
             ),
             patch(
-                "kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR",
+                "kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR",
                 tmp_path / "r",
             ),
         ):
@@ -2003,9 +2010,9 @@ class TestGrillHTTP:
             return await handler(request)
 
         with patch(
-            "kiro_crew.apps.builtins.auto_research.handlers.DB_PATH", tmp_path / "t.db"
+            "kiro_crew.apps.builtins.auto_research.db.DB_PATH", tmp_path / "t.db"
         ), patch(
-            "kiro_crew.apps.builtins.auto_research.handlers.RESEARCH_DIR", tmp_path / "r"
+            "kiro_crew.apps.builtins.auto_research.files.RESEARCH_DIR", tmp_path / "r"
         ):
             a = web.Application(middlewares=[_inject_user])
             register_routes(a)
