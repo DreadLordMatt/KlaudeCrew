@@ -79,7 +79,8 @@ def patch_restricted(monkeypatch):
     def _stub(_state, req) -> bool:
         return req.app.get("_restricted_session", False)
 
-    monkeypatch.setattr(art_handlers, "_is_restricted_session", _stub)
+    for _sub in (art_handlers.core, art_handlers.docs, art_handlers.folders, art_handlers.publishing, art_handlers.comments, art_handlers.remote):
+        monkeypatch.setattr(_sub, "_is_restricted_session", _stub)
 
 
 def _json_body(resp) -> dict:
@@ -828,7 +829,8 @@ class TestDenialAudit:
         from kiro_crew.dashboard.handlers import artifacts as art_handlers
 
         sel_stub = MagicMock()
-        monkeypatch.setattr(art_handlers, "sel", lambda: sel_stub)
+        for _sub in (art_handlers.core, art_handlers.publishing):
+            monkeypatch.setattr(_sub, "sel", lambda: sel_stub)
         return sel_stub
 
     @pytest.mark.asyncio

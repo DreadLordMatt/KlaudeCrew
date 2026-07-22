@@ -29,11 +29,12 @@ def store(tmp_path: Path, monkeypatch) -> ArtifactStore:
 
 @pytest.fixture(autouse=True)
 def not_restricted(monkeypatch):
-    monkeypatch.setattr(
-        h,
-        "_is_restricted_session",
-        lambda state, request: bool(getattr(request, "_restricted", False)),
-    )
+    for _sub in (h.core, h.docs, h.folders, h.publishing, h.comments, h.remote):
+        monkeypatch.setattr(
+            _sub,
+            "_is_restricted_session",
+            lambda state, request: bool(getattr(request, "_restricted", False)),
+        )
 
 
 def _req(
@@ -316,7 +317,7 @@ class TestEditComment:
         prov.capabilities.return_value = {Capability.COMMENTS_EDIT}
         prov.edit_comment = edit
         monkeypatch.setattr(
-            "kiro_crew.dashboard.handlers.artifacts.get_provider", lambda name: prov
+            "kiro_crew.dashboard.handlers.artifacts.comments.get_provider", lambda name: prov
         )
 
         resp = await h.api_artifact_edit_comment(
@@ -352,7 +353,7 @@ class TestEditComment:
         prov.capabilities.return_value = set()  # no COMMENTS_EDIT
         prov.edit_comment = AsyncMock()
         monkeypatch.setattr(
-            "kiro_crew.dashboard.handlers.artifacts.get_provider", lambda name: prov
+            "kiro_crew.dashboard.handlers.artifacts.comments.get_provider", lambda name: prov
         )
 
         resp = await h.api_artifact_edit_comment(
@@ -395,7 +396,7 @@ class TestEditComment:
         prov.capabilities.return_value = {Capability.COMMENTS_EDIT}
         prov.edit_comment = AsyncMock()
         monkeypatch.setattr(
-            "kiro_crew.dashboard.handlers.artifacts.get_provider", lambda name: prov
+            "kiro_crew.dashboard.handlers.artifacts.comments.get_provider", lambda name: prov
         )
         # Ceiling: publish enabled, but destinations allow only "artifactory".
         from kiro_crew.config.loader import KiroCrewConfig

@@ -45,7 +45,8 @@ def patch_restricted(monkeypatch):
     def _stub(_state, req) -> bool:
         return req.app.get("_restricted_session", False)
 
-    monkeypatch.setattr(art_handlers, "_is_restricted_session", _stub)
+    for _sub in (art_handlers.core, art_handlers.docs, art_handlers.folders, art_handlers.publishing, art_handlers.comments, art_handlers.remote):
+        monkeypatch.setattr(_sub, "_is_restricted_session", _stub)
 
 
 def _request(
@@ -319,7 +320,8 @@ class TestUpdateFolderAudit:
         def _spy(**kwargs) -> None:
             audits.append(kwargs)
 
-        monkeypatch.setattr(art_handlers, "_audit", _spy)
+        for _sub in (art_handlers.core, art_handlers.docs, art_handlers.folders, art_handlers.publishing, art_handlers.comments, art_handlers.remote):
+            monkeypatch.setattr(_sub, "_audit", _spy)
         resp = await api_artifact_update(
             _request(body={"folder": f["id"]}, match={"slug": art.slug})
         )
@@ -337,7 +339,8 @@ class TestUpdateFolderAudit:
         store, _fstore = stores
         art = store.create(name="doc", content="x")
         audits: list[dict] = []
-        monkeypatch.setattr(art_handlers, "_audit", lambda **kw: audits.append(kw))
+        for _sub in (art_handlers.core, art_handlers.docs, art_handlers.folders, art_handlers.publishing, art_handlers.comments, art_handlers.remote):
+            monkeypatch.setattr(_sub, "_audit", lambda **kw: audits.append(kw))
         resp = await api_artifact_update(
             _request(body={"description": "d"}, match={"slug": art.slug})
         )
@@ -393,7 +396,7 @@ class TestFolderAutoIcon:
             return "🚀"
 
         monkeypatch.setattr(
-            "kiro_crew.dashboard.handlers.artifacts.generate_emoji_for_name", _fake_gen
+            "kiro_crew.dashboard.handlers.artifacts.folders.generate_emoji_for_name", _fake_gen
         )
         _store, fstore = stores
         resp = await api_artifact_folder_create(_request(body={"name": "Rockets"}))
@@ -417,7 +420,7 @@ class TestFolderAutoIcon:
             return "🐛"
 
         monkeypatch.setattr(
-            "kiro_crew.dashboard.handlers.artifacts.generate_emoji_for_name", _fake_gen
+            "kiro_crew.dashboard.handlers.artifacts.folders.generate_emoji_for_name", _fake_gen
         )
         _store, fstore = stores
         f = fstore.create("Old")
@@ -450,7 +453,7 @@ class TestFolderAutoIcon:
             return ""  # generate_emoji_for_name returns "" on invalid replies
 
         monkeypatch.setattr(
-            "kiro_crew.dashboard.handlers.artifacts.generate_emoji_for_name", _fake_gen
+            "kiro_crew.dashboard.handlers.artifacts.folders.generate_emoji_for_name", _fake_gen
         )
         _store, fstore = stores
         resp = await api_artifact_folder_create(_request(body={"name": "Plain"}))

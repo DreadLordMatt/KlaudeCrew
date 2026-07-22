@@ -47,7 +47,8 @@ class TestPickerIncludesInstallable:
         ready = _fake_provider("ready", available=True, installable=False)
         heals = _fake_provider("heals", available=False, installable=True)
         hidden = _fake_provider("hidden", available=False, installable=False)
-        monkeypatch.setattr(handlers, "list_providers", lambda: [ready, heals, hidden])
+        for _sub in (handlers.publishing,):
+            monkeypatch.setattr(_sub, "list_providers", lambda: [ready, heals, hidden])
 
         req = make_mocked_request("GET", "/api/artifacts/publish-providers?kind=markdown")
         resp = await handlers.api_artifact_publish_providers(req)

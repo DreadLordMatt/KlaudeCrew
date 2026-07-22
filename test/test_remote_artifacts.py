@@ -178,7 +178,8 @@ def patch_restricted(monkeypatch):
     def _stub(_state, req) -> bool:
         return req.app.get("_restricted_session", False)
 
-    monkeypatch.setattr(art_handlers, "_is_restricted_session", _stub)
+    for _sub in (art_handlers.core, art_handlers.docs, art_handlers.folders, art_handlers.publishing, art_handlers.comments, art_handlers.remote):
+        monkeypatch.setattr(_sub, "_is_restricted_session", _stub)
 
 
 @pytest.fixture
@@ -190,7 +191,8 @@ def gate_open(monkeypatch):
         calls.append(provider_name)
         return None
 
-    monkeypatch.setattr(art_handlers, "_publish_governance_denied", _permit)
+    for _sub in (art_handlers.publishing, art_handlers.comments, art_handlers.remote):
+        monkeypatch.setattr(_sub, "_publish_governance_denied", _permit)
     return calls
 
 
@@ -203,7 +205,8 @@ def gate_denied(monkeypatch):
         calls.append(provider_name)
         return "publishing not permitted by policy"
 
-    monkeypatch.setattr(art_handlers, "_publish_governance_denied", _deny)
+    for _sub in (art_handlers.publishing, art_handlers.comments, art_handlers.remote):
+        monkeypatch.setattr(_sub, "_publish_governance_denied", _deny)
     return calls
 
 
@@ -918,7 +921,8 @@ class TestRemoteAuditRedaction:
 
     def _capture_sel(self, monkeypatch):
         sel_stub = MagicMock()
-        monkeypatch.setattr(art_handlers, "sel", lambda: sel_stub)
+        for _sub in (art_handlers.core, art_handlers.publishing):
+            monkeypatch.setattr(_sub, "sel", lambda: sel_stub)
         return sel_stub
 
     @pytest.mark.asyncio

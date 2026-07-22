@@ -1142,7 +1142,7 @@ class TestPublishGovernanceGate:
         # Default-open ceiling, but the operator's config allowlist restricts to
         # a single destination — config narrows, never widens.
         from kiro_crew.config.loader import KiroCrewConfig, PublishConfig
-        from kiro_crew.dashboard.handlers import artifacts as art
+        from kiro_crew.dashboard.handlers.artifacts import publishing as art
 
         _install(None)
         cfg = KiroCrewConfig.load()
@@ -1152,7 +1152,7 @@ class TestPublishGovernanceGate:
         assert art._publish_governance_denied(self._req(), "chorus") is not None
 
     def test_composition_error_propagates(self, monkeypatch):
-        from kiro_crew.dashboard.handlers import artifacts as art
+        from kiro_crew.dashboard.handlers.artifacts import publishing as art
         from kiro_crew.platform.context import PlatformCompositionError
 
         def _compose_fail(*a, **k):
@@ -1166,7 +1166,7 @@ class TestPublishGovernanceGate:
         # Unlike messaging/cron (fail-open on a transient error), the publish
         # gate is an exfil authorization decision and must DENY when governance
         # cannot be evaluated.
-        from kiro_crew.dashboard.handlers import artifacts as art
+        from kiro_crew.dashboard.handlers.artifacts import publishing as art
 
         def _boom(*a, **k):
             raise RuntimeError("governance module broken")
@@ -1183,7 +1183,7 @@ class TestPublishGovernanceGate:
         # governance_permits (e.g. resolve() throwing) must still DENY — the
         # handler-level except never sees this error. Before the fix this path
         # returned permitted==True and the gate wrongly permitted the publish.
-        from kiro_crew.dashboard.handlers import artifacts as art
+        from kiro_crew.dashboard.handlers.artifacts import publishing as art
 
         def _resolve_boom(*a, **k):
             raise RuntimeError("resolver exploded")
@@ -1236,13 +1236,13 @@ class TestPublishGovernanceGate:
             assert getattr(d, "permitted", None) is True, sk
         # End-to-end: the handler gate permits (returns None) for an ungoverned
         # dashboard user even with the fail_closed call site.
-        from kiro_crew.dashboard.handlers import artifacts as art
+        from kiro_crew.dashboard.handlers.artifacts import publishing as art
 
         assert art._publish_governance_denied(self._req(), "artifactory") is None
 
     def test_config_load_failure_fails_closed(self, monkeypatch):
         from kiro_crew.config.loader import KiroCrewConfig
-        from kiro_crew.dashboard.handlers import artifacts as art
+        from kiro_crew.dashboard.handlers.artifacts import publishing as art
 
         _install(None)  # governance permits; the config read is what fails
 
@@ -1266,7 +1266,7 @@ class TestPublishGovernanceGate:
 
         from kiro_crew import artifacts as art_mod
         from kiro_crew.artifacts import ArtifactPublication, ArtifactStore
-        from kiro_crew.dashboard.handlers import artifacts as art
+        from kiro_crew.dashboard.handlers.artifacts import publishing as art
 
         store = ArtifactStore(root=tmp_path / "artifacts")
         store.create(name="Doc", content="hi", slug="doc", kind="markdown")
