@@ -22,7 +22,7 @@ def _make_app(slack_client=None) -> web.Application:
 
 @pytest.fixture
 def mock_sel():
-    with patch("kiro_crew.dashboard.handlers.files._sel") as m:
+    with patch("kiro_crew.dashboard.handlers.files.outbox._sel") as m:
         instance = MagicMock()
         m.return_value = instance
         yield instance
@@ -48,7 +48,7 @@ class TestSlackUploadBinary:
         slack = MagicMock()
         slack.upload_file = AsyncMock()
 
-        with patch("kiro_crew.dashboard.handlers.files.is_tracked_channel", return_value=True):
+        with patch("kiro_crew.dashboard.handlers.files.outbox.is_tracked_channel", return_value=True):
             async with TestClient(TestServer(_make_app(slack_client=slack))) as client:
                 resp = await client.post("/api/slack/upload-file", json={
                     "file_path": str(pdf),
@@ -111,7 +111,7 @@ class TestSlackUploadBinary:
         slack = MagicMock()
         slack.upload_file = AsyncMock()
 
-        with patch("kiro_crew.dashboard.handlers.files.is_tracked_channel", return_value=True):
+        with patch("kiro_crew.dashboard.handlers.files.outbox.is_tracked_channel", return_value=True):
             async with TestClient(TestServer(_make_app(slack_client=slack))) as client:
                 resp = await client.post("/api/slack/upload-file", json={
                     "file_path": str(pdf),

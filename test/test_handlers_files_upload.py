@@ -37,7 +37,7 @@ def _make_app() -> web.Application:
 def mock_sel():
     """Patch the late-bound ``_sel()`` in handlers.files so SEL audit
     calls in the upload handler don't blow up on a missing global."""
-    with patch("kiro_crew.dashboard.handlers.files._sel") as m:
+    with patch("kiro_crew.dashboard.handlers.files.upload._sel") as m:
         instance = MagicMock()
         m.return_value = instance
         yield instance
@@ -49,7 +49,7 @@ def upload_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     pollute the real ``~/.kirocrew/uploads/`` and don't race other tests."""
     target = tmp_path / "uploads"
     monkeypatch.setattr(
-        "kiro_crew.dashboard.handlers.files._UPLOAD_DIR",
+        "kiro_crew.dashboard.handlers.files.upload._UPLOAD_DIR",
         target,
     )
     return target
@@ -95,7 +95,7 @@ async def test_upload_docx_emits_match_true_diagnostic(
         ),
     )
     with caplog.at_level(
-        logging.INFO, logger="kiro_crew.dashboard.handlers.files",
+        logging.INFO, logger="kiro_crew.dashboard.handlers.files.upload",
     ):
         async with TestClient(TestServer(_make_app())) as client:
             resp = await client.post("/api/upload/file", data=form)
@@ -159,7 +159,7 @@ async def test_upload_image_emits_diagnostic_without_zip_check(
         "file", png, filename="dot.png", content_type="image/png",
     )
     with caplog.at_level(
-        logging.INFO, logger="kiro_crew.dashboard.handlers.files",
+        logging.INFO, logger="kiro_crew.dashboard.handlers.files.upload",
     ):
         async with TestClient(TestServer(_make_app())) as client:
             resp = await client.post("/api/upload/file", data=form)
@@ -203,7 +203,7 @@ async def test_upload_text_skips_diagnostic_block_entirely(
         content_type="text/markdown",
     )
     with caplog.at_level(
-        logging.INFO, logger="kiro_crew.dashboard.handlers.files",
+        logging.INFO, logger="kiro_crew.dashboard.handlers.files.upload",
     ):
         async with TestClient(TestServer(_make_app())) as client:
             resp = await client.post("/api/upload/file", data=form)

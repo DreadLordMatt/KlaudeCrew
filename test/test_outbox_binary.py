@@ -23,7 +23,7 @@ def _make_app(state=None) -> web.Application:
 
 @pytest.fixture
 def mock_sel():
-    with patch("kiro_crew.dashboard.handlers.files._sel") as m:
+    with patch("kiro_crew.dashboard.handlers.files.outbox._sel") as m:
         instance = MagicMock()
         m.return_value = instance
         yield instance

@@ -28,7 +28,7 @@ def _make_app() -> web.Application:
 @pytest.fixture
 def mock_sel():
     with patch("kiro_crew.sel.sel") as m, \
-         patch("kiro_crew.dashboard.handlers.files.is_sensitive_path", return_value=False):
+         patch("kiro_crew.dashboard.handlers.files.browse.is_sensitive_path", return_value=False):
         instance = MagicMock()
         m.return_value = instance
         yield instance
@@ -127,7 +127,7 @@ async def test_text_file_redacted_blocks_download(tmp_path, mock_sel):
     """
     f = tmp_path / "leaky.txt"
     f.write_text("ok body")
-    redact_path = "kiro_crew.dashboard.handlers.files.redact"
+    redact_path = "kiro_crew.dashboard.handlers.files.browse.redact"
     with patch("kiro_crew.dashboard.handlers._validate_dashboard_path", return_value=str(f)), \
             patch(redact_path, return_value="ok body REDACTED"):
         async with TestClient(TestServer(_make_app())) as client:
@@ -155,7 +155,7 @@ async def test_sensitive_path_rejected(tmp_path):
     # Patch is_sensitive_path on the importing module so the alias bound at
     # files.py import-time resolves to the True-returning mock.
     with patch("kiro_crew.dashboard.handlers._validate_dashboard_path", return_value=str(f)), \
-         patch("kiro_crew.dashboard.handlers.files.is_sensitive_path", return_value=True), \
+         patch("kiro_crew.dashboard.handlers.files.browse.is_sensitive_path", return_value=True), \
          patch("kiro_crew.sel.sel") as m:
         m.return_value = MagicMock()
         async with TestClient(TestServer(_make_app())) as client:

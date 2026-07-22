@@ -54,7 +54,7 @@ class TestFileUploadChannel:
             "kiro_crew.config.loader.workspace_root",
             return_value=tmp_path,
         ), patch(
-            "kiro_crew.dashboard.handlers.files.is_tracked_channel",
+            "kiro_crew.dashboard.handlers.files.outbox.is_tracked_channel",
             return_value=True,
         ):
             async with TestClient(TestServer(app)) as client:
@@ -90,7 +90,7 @@ class TestFileUploadChannel:
             "kiro_crew.config.loader.workspace_root",
             return_value=tmp_path,
         ), patch(
-            "kiro_crew.dashboard.handlers.files.is_tracked_channel",
+            "kiro_crew.dashboard.handlers.files.outbox.is_tracked_channel",
             return_value=False,
         ):
             async with TestClient(TestServer(app)) as client:
@@ -200,10 +200,10 @@ class TestFileUploadBinary:
             "kiro_crew.config.loader.workspace_root",
             return_value=tmp_path,
         ), patch(
-            "kiro_crew.dashboard.handlers.files._sel",
+            "kiro_crew.dashboard.handlers.files.outbox._sel",
             return_value=MagicMock(),
         ), patch(
-            "kiro_crew.dashboard.handlers.files.is_tracked_channel",
+            "kiro_crew.dashboard.handlers.files.outbox.is_tracked_channel",
             return_value=True,
         ):
             async with TestClient(TestServer(app)) as client:
@@ -238,7 +238,7 @@ class TestFileUploadBinary:
             "kiro_crew.config.loader.workspace_root",
             return_value=tmp_path,
         ), patch(
-            "kiro_crew.dashboard.handlers.files._sel",
+            "kiro_crew.dashboard.handlers.files.outbox._sel",
             return_value=MagicMock(),
         ):
             async with TestClient(TestServer(app)) as client:
@@ -290,7 +290,7 @@ class TestFileUploadSlotThreading:
         ), patch(
             "kiro_crew.config.loader.workspace_root", return_value=tmp_path
         ), patch(
-            "kiro_crew.dashboard.handlers.files.is_tracked_channel", return_value=False
+            "kiro_crew.dashboard.handlers.files.outbox.is_tracked_channel", return_value=False
         ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
@@ -331,7 +331,7 @@ class TestFileUploadSlotThreading:
         ), patch(
             "kiro_crew.config.loader.workspace_root", return_value=tmp_path
         ), patch(
-            "kiro_crew.dashboard.handlers.files.is_tracked_channel", return_value=False
+            "kiro_crew.dashboard.handlers.files.outbox.is_tracked_channel", return_value=False
         ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
@@ -414,7 +414,7 @@ class TestFileUploadSlotThreading:
         ), patch(
             "kiro_crew.config.loader.workspace_root", return_value=tmp_path
         ), patch(
-            "kiro_crew.dashboard.handlers.files.is_tracked_channel", return_value=True
+            "kiro_crew.dashboard.handlers.files.outbox.is_tracked_channel", return_value=True
         ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
@@ -456,7 +456,7 @@ class TestFileUploadSlotThreading:
         ), patch(
             "kiro_crew.config.loader.workspace_root", return_value=tmp_path
         ), patch(
-            "kiro_crew.dashboard.handlers.files.is_tracked_channel", return_value=True
+            "kiro_crew.dashboard.handlers.files.outbox.is_tracked_channel", return_value=True
         ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(
@@ -497,7 +497,7 @@ class TestFileUploadSlotThreading:
         ), patch(
             "kiro_crew.config.loader.workspace_root", return_value=tmp_path
         ), patch(
-            "kiro_crew.dashboard.handlers.files.is_tracked_channel", return_value=False
+            "kiro_crew.dashboard.handlers.files.outbox.is_tracked_channel", return_value=False
         ):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post(

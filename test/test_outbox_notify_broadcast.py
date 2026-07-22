@@ -124,7 +124,7 @@ def _make_state_with_empty_slot(has_reader=True):
 
 @pytest.fixture
 def mock_sel():
-    with patch("kiro_crew.dashboard.handlers.files._sel") as m:
+    with patch("kiro_crew.dashboard.handlers.files.outbox._sel") as m:
         instance = MagicMock()
         m.return_value = instance
         yield instance
@@ -364,7 +364,7 @@ class TestOutboxNotifyRedaction:
         # shim (which runs both the exfil-URL and credential passes and applies
         # a loaded companion's extra regexes). Patch that one shim.
         with patch(
-            "kiro_crew.dashboard.handlers.files.redact",
+            "kiro_crew.dashboard.handlers.files.outbox.redact",
             side_effect=lambda s: s.replace("http://evil.com", "[REDACTED_URL]"),
         ) as mock_redact:
             async with TestClient(TestServer(_make_app(state))) as client:
