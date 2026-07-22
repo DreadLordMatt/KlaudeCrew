@@ -13,9 +13,15 @@ from __future__ import annotations
 from pathlib import Path
 
 SRC = Path(__file__).parent.parent / "src" / "kiro_crew"
-HANDLERS = (SRC / "deploy" / "handlers.py").read_text()
+DEPLOY = SRC / "deploy"
+HANDLERS = (DEPLOY / "handlers.py").read_text()
+# deploy/handlers.py was split into a deploy/ package; the source-text
+# assertions below now read the submodule the relocated code actually lives in.
+HANDLERS_PROFILES = (DEPLOY / "handlers_profiles.py").read_text()
+HANDLERS_PENDING = (DEPLOY / "handlers_pending.py").read_text()
+CORE = (DEPLOY / "core.py").read_text()
 MCP_CORE = "\n".join(f.read_text() for f in sorted((SRC / "mcp_core").rglob("*.py")))
-SCRIPTS = SRC / "deploy" / "skills" / "artifact-deploy" / "scripts"
+SCRIPTS = DEPLOY / "skills" / "artifact-deploy" / "scripts"
 DEPLOY_SH = (SCRIPTS / "deploy.sh").read_text()
 DEPLOY_BACKEND_SH = (SCRIPTS / "deploy-backend.sh").read_text()
 REAPER_SH = (SCRIPTS / "reaper.sh").read_text()
@@ -27,11 +33,11 @@ PUBLISHHUB = (
 
 class TestF1ProfilesRedaction:
     def test_default_and_available_redacted(self):
-        assert '_redact_text(str(reg["default"]))' in HANDLERS
-        assert "[_redact_text(str(n))" in HANDLERS
+        assert '_redact_text(str(reg["default"]))' in HANDLERS_PROFILES
+        assert "[_redact_text(str(n))" in HANDLERS_PROFILES
 
     def test_no_raw_default_return(self):
-        assert '"default": reg["default"],' not in HANDLERS
+        assert '"default": reg["default"],' not in HANDLERS_PROFILES
 
 
 class TestF2GitStrippedFromSnapshots:
@@ -84,16 +90,16 @@ class TestF4MCPResponseRedaction:
 
 class TestF5PendingIdentityBinding:
     def test_expected_identity_wired(self):
-        idx = HANDLERS.index('params["expected_content_digest"]')
-        window = HANDLERS[idx - 1200: idx + 1200]
+        idx = HANDLERS_PENDING.index('params["expected_content_digest"]')
+        window = HANDLERS_PENDING[idx - 1200: idx + 1200]
         assert 'params["expected_profile"]' in window
         assert 'params["expected_region"]' in window
 
 
 class TestF6ScanBlockBindings:
     def test_backend_409_carries_bindings(self):
-        idx = HANDLERS.index('"reason": "scan", "findings"')
-        window = HANDLERS[idx: idx + 500]
+        idx = CORE.index('"reason": "scan", "findings"')
+        window = CORE[idx: idx + 500]
         assert '"content_digest"' in window
         assert '"profile": profile' in window
 

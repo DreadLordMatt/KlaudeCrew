@@ -15,10 +15,17 @@ from pathlib import Path
 import pytest
 
 SRC = Path(__file__).parent.parent / "src" / "kiro_crew"
-HANDLERS = (SRC / "deploy" / "handlers.py").read_text()
+DEPLOY = SRC / "deploy"
+HANDLERS = (DEPLOY / "handlers.py").read_text()
 VALIDATION = (SRC / "validation.py").read_text()
 MCP_CORE = "\n".join(f.read_text() for f in sorted((SRC / "mcp_core").rglob("*.py")))
-DEPLOY_INIT = (SRC / "deploy" / "__init__.py").read_text()
+DEPLOY_INIT = (DEPLOY / "__init__.py").read_text()
+# deploy/handlers.py was split into a deploy/ package; the source-text
+# assertions below now read the submodule the relocated code actually lives in.
+HANDLERS_PENDING = (DEPLOY / "handlers_pending.py").read_text()
+CORE = (DEPLOY / "core.py").read_text()
+TEARDOWN = (DEPLOY / "teardown.py").read_text()
+DEPLOY_PKG = "\n".join(f.read_text() for f in sorted(DEPLOY.glob("*.py")))
 
 
 # ── F1: deploy_artifact in MCP_CORE_SCHEMAS ──
@@ -63,17 +70,17 @@ class TestPendingConfirmAuditCoverage:
 
     def test_not_found_denial_audited(self):
         # claim_pending returns None → audit before 409 response
-        assert '_audit("pending_confirm", entry_id, "denied"' in HANDLERS
+        assert '_audit("pending_confirm", entry_id, "denied"' in HANDLERS_PENDING
 
     def test_profile_drift_denial_audited(self):
-        assert "profile drift since preview" in HANDLERS
+        assert "profile drift since preview" in HANDLERS_PENDING
 
     def test_confinement_error_denial_audited(self):
         # The confinement check error string is passed to audit
-        assert 'error=confinement_error)' in HANDLERS
+        assert 'error=confinement_error)' in HANDLERS_PENDING
 
     def test_size_guard_denial_audited(self):
-        assert "size guard exceeded" in HANDLERS
+        assert "size guard exceeded" in HANDLERS_PENDING
 
     def test_content_digest_local_dir_early_check_removed(self):
         # R17 F2: the early live-path digest read (raw Path.read_bytes on an
@@ -81,11 +88,11 @@ class TestPendingConfirmAuditCoverage:
         # _do_deploy's staged-snapshot verification via expected_content_digest
         # (wired in R16 F2). Assert the unsafe early check stays gone and the
         # authoritative param stays wired.
-        assert "content digest mismatch (local_dir)" not in HANDLERS
-        assert 'params["expected_content_digest"]' in HANDLERS
+        assert "content digest mismatch (local_dir)" not in HANDLERS_PENDING
+        assert 'params["expected_content_digest"]' in HANDLERS_PENDING
 
     def test_content_digest_artifact_denial_audited(self):
-        assert "content digest mismatch (artifact modified)" in HANDLERS
+        assert "content digest mismatch (artifact modified)" in HANDLERS_PENDING
 
 
 # ── F3: deploy skills always copied, never symlinked ──
@@ -128,13 +135,13 @@ class TestDeploySkillsCopyNotSymlink:
 class TestDigestBoundConfirm:
     def test_backend_checks_expected_content_digest(self):
         """The confirm path in _do_deploy validates expected_content_digest."""
-        assert 'expected_content_digest' in HANDLERS
-        assert '"code": "stale_preview"' in HANDLERS
+        assert 'expected_content_digest' in CORE
+        assert '"code": "stale_preview"' in CORE
 
     def test_409_stale_preview_on_mismatch(self):
         """The 409 response uses the stale_preview code for frontend detection."""
         # Find the specific error shape
-        assert '"error": "content changed since preview"' in HANDLERS
+        assert '"error": "content changed since preview"' in CORE
 
 
 # ── F5: teardown Windows guard + full sweep ──
@@ -144,30 +151,31 @@ class TestTeardownWindowsGuard:
     def test_handle_teardown_has_nt_guard(self):
         """_handle_teardown checks os.name == 'nt' before any AWS call."""
         # Find the teardown function and verify guard comes before _HAS_ARTIFACTS
-        teardown_start = HANDLERS.index("async def _handle_teardown")
-        first_nt_check = HANDLERS.index('os.name == "nt"', teardown_start)
-        first_has_artifacts = HANDLERS.index("_HAS_ARTIFACTS", first_nt_check)
+        teardown_start = TEARDOWN.index("async def _handle_teardown")
+        first_nt_check = TEARDOWN.index('os.name == "nt"', teardown_start)
+        first_has_artifacts = TEARDOWN.index("_HAS_ARTIFACTS", first_nt_check)
         assert first_nt_check < first_has_artifacts
 
     def test_all_engine_run_aws_callers_guarded(self):
         """Every function that calls engine.run_aws must be under a Windows guard.
 
-        Functions that reach engine.run_aws:
-        - _do_deploy (line ~514 guard)
-        - _handle_list (line ~995 guard)
-        - _handle_verify (line ~1173 guard)
-        - _handle_teardown (line ~1530 guard, via _expire_manifest_best_effort)
-        - _expire_manifest_best_effort (called only from _handle_teardown)
-        - _check_reaper_installed (called from _handle_teardown)
+        Functions that reach engine.run_aws (now spread across the deploy
+        package after the handlers.py split):
+        - _do_deploy (deploy/core.py)
+        - _handle_list / _handle_verify (deploy/core.py)
+        - _handle_teardown (deploy/teardown.py, via _expire_manifest_best_effort)
+        - _expire_manifest_best_effort / _check_reaper_installed (deploy/teardown.py)
         """
-        # Count distinct os.name == "nt" guards — should be at least 4
-        guards = re.findall(r'os\.name == "nt"', HANDLERS)
+        # Count distinct os.name == "nt" guards across the deploy package —
+        # should be at least 4.
+        guards = re.findall(r'os\.name == "nt"', DEPLOY_PKG)
         assert len(guards) >= 4, f"Expected >= 4 Windows guards, found {len(guards)}"
 
     def test_guard_returns_400_with_posix_message(self):
         # The guard in _handle_teardown must match the standard error message.
-        teardown_start = HANDLERS.index("async def _handle_teardown")
-        teardown_end = HANDLERS.index("\nasync def ", teardown_start + 10)
-        teardown_body = HANDLERS[teardown_start:teardown_end]
+        # _handle_teardown is the last async def in deploy/teardown.py, so slice
+        # to end-of-file for the function body.
+        teardown_start = TEARDOWN.index("async def _handle_teardown")
+        teardown_body = TEARDOWN[teardown_start:]
         assert "POSIX shell" in teardown_body
         assert "WSL" in teardown_body
