@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import MagicMock
 
@@ -12,6 +13,7 @@ from kiro_crew.dashboard.state import (
     _maybe_trim_notifications,
     _persist_notification,
 )
+from kiro_crew.notifications.bus import payload_from_legacy
 
 
 class TestDashboard:
@@ -160,6 +162,24 @@ class TestNotificationPersistence:
         assert loaded[0]["title"] == "Test Job"
         assert "ts" in loaded[0]  # timestamp added
 
+    def test_bus_sink_is_redacting_deliver_note(self, monkeypatch, tmp_path) -> None:
+        """Wiring guarantee for Phase 2 app producers: the production bus sink
+        IS the redacting _deliver_note, so an app push through
+        notification_bus.push() gets its title/body/meta redacted there --
+        producers (e.g. the push endpoint) rely on this and do not
+        pre-redact."""
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = DashboardState(
+            sessions=MagicMock(count=0),
+            crons=MagicMock(),
+            lessons=MagicMock(),
+            start_time=0.0,
+        )
+        note = state.notification_bus.push(
+            payload_from_legacy("cron", "key AKIAIOSFODNN7EXAMPLE via bus", "b")
+        )
+        assert "AKIAIOSFODNN7EXAMPLE" not in note["title"]
+
     def test_deliver_note_redacts_nested_strings(self, monkeypatch, tmp_path) -> None:
         """Redaction descends into nested structures like action labels.
 
@@ -216,3 +236,58 @@ class TestNotificationPersistence:
         assert len(state._notification_log) == 2
         assert state._notification_log[0]["title"] == "Old"
         assert state._notification_log[1]["title"] == "Old2"
+
+    def test_deliver_note_offloads_persist_on_running_loop(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """On a running event loop, persistence goes through the single-worker
+        executor (never blocking the loop), rows land in delivery order, and a
+        later in-memory mutation (e.g. ack) does not leak into the snapshot
+        that was handed to the executor."""
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        from kiro_crew.dashboard.state import _notification_io_executor
+
+        state = DashboardState(
+            sessions=MagicMock(count=0),
+            crons=MagicMock(),
+            lessons=MagicMock(),
+            start_time=0.0,
+        )
+
+        async def scenario() -> None:
+            state._deliver_note({"ts": "t1", "kind": "cron", "title": "First", "body": "b"})
+            state._deliver_note({"ts": "t2", "kind": "cron", "title": "Second", "body": "b"})
+            # Mutate the in-memory note AFTER delivery (ack semantics); the
+            # executor received a snapshot, so disk must not see this flag.
+            state._notification_log[0]["acked"] = True
+            # Fence: a no-op on the same single-worker executor runs only
+            # after both pending persist jobs (FIFO) have completed.
+            await asyncio.get_running_loop().run_in_executor(
+                _notification_io_executor(), lambda: None
+            )
+
+        asyncio.run(scenario())
+
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "notifications.jsonl").read_text().splitlines()
+        ]
+        assert [r["title"] for r in rows] == ["First", "Second"]
+        assert "acked" not in rows[0]
+
+    def test_deliver_note_persists_inline_without_loop(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Without a running loop (sync callers), persist happens inline so
+        the row is on disk immediately after _deliver_note returns."""
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = DashboardState(
+            sessions=MagicMock(count=0),
+            crons=MagicMock(),
+            lessons=MagicMock(),
+            start_time=0.0,
+        )
+        state._deliver_note({"ts": "t1", "kind": "cron", "title": "Sync", "body": "b"})
+        rows = (tmp_path / "notifications.jsonl").read_text().splitlines()
+        assert len(rows) == 1
+        assert json.loads(rows[0])["title"] == "Sync"

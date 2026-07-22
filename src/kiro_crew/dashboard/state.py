@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
 import re
 import tempfile
+import threading
 import time
 import traceback
 import uuid
@@ -29,6 +31,7 @@ from kiro_crew.notifications.bus import (
     normalize_note,
     payload_from_legacy,
 )
+from kiro_crew.notifications.rate_limit import AppRateLimiter
 from kiro_crew.safety_override import safety_override
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
@@ -1354,6 +1357,10 @@ class DashboardState:
         # Notification bus (schema v2) — notify() adapts legacy calls onto it;
         # _deliver_note is the delivery sink (log, count, broadcast, persist).
         self.notification_bus = NotificationBus(sink=self._deliver_note)
+        # Per-app push rate limiter (RFC Phase 2). State-owned (not a module
+        # global) so its lifecycle matches the gateway instance and tests get
+        # isolation for free.
+        self.notification_rate_limiter = AppRateLimiter()
         self._slots: dict[str, _ChatSlot] = {}
         self._slack_to_slot: dict[str, str] = {}  # Slack session_key → slot name
         self._slot_counter = 0
@@ -1815,7 +1822,19 @@ class DashboardState:
         self._notification_log.append(note)
         self._unread_count += 1
         self._broadcast(note)
-        _persist_notification(note)
+        # Persistence does blocking file I/O (append + possible trim). The
+        # bus sink is now externally drivable (Phase 2 app producers), so on
+        # a running event loop the write is offloaded to a dedicated
+        # single-worker executor (FIFO keeps on-disk order = delivery order).
+        # A snapshot copy is handed off because the in-memory note can be
+        # mutated afterwards on the loop (e.g. ack sets note["acked"]).
+        # Without a running loop (unit tests, sync callers) persist inline.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _persist_notification(note)
+        else:
+            loop.run_in_executor(_notification_io_executor(), _persist_notification, dict(note))
 
     def register_sse(self) -> asyncio.Queue[dict[str, Any]]:
         """Register a new SSE client and return its dedicated queue."""
@@ -2624,15 +2643,33 @@ def _load_notifications() -> list[dict[str, Any]]:
         return []
 
 
+# Notification file I/O coordination. Appends from the delivery executor and
+# whole-file rewrites from the loop (delete/ack) must not interleave, so both
+# take this lock. The executor is a single worker: appends stay FIFO.
+_notification_io_lock = threading.Lock()
+_notification_io_pool: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _notification_io_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Lazily create the single-worker executor for notification persistence."""
+    global _notification_io_pool
+    if _notification_io_pool is None:
+        _notification_io_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="notif-io"
+        )
+    return _notification_io_pool
+
+
 def _persist_notification(note: dict[str, str]) -> None:
     """Append a single notification to the JSONL file on disk."""
     path = _notifications_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(note) + "\n")
-        # Trim if file grows too large (keep last N lines)
-        _maybe_trim_notifications(path)
+        with _notification_io_lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(note) + "\n")
+            # Trim if file grows too large (keep last N lines)
+            _maybe_trim_notifications(path)
     except Exception:
         logger.debug("Failed to persist notification", exc_info=True)
 
@@ -2641,9 +2678,10 @@ def _rewrite_notifications(notifications: list[dict[str, str]]) -> None:
     """Rewrite the entire notifications file from the in-memory list."""
     path = _notifications_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lines = [json.dumps(n) + "\n" for n in notifications[-_MAX_PERSISTED_NOTIFICATIONS:]]
-        path.write_text("".join(lines), encoding="utf-8")
+        with _notification_io_lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            lines = [json.dumps(n) + "\n" for n in notifications[-_MAX_PERSISTED_NOTIFICATIONS:]]
+            path.write_text("".join(lines), encoding="utf-8")
     except Exception:
         logger.debug("Failed to rewrite notifications file", exc_info=True)
 
