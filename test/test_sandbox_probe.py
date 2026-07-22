@@ -10,31 +10,31 @@ import pytest
 from kiro_crew.sandbox import _probe_sandbox_exec
 
 
-@patch("kiro_crew.sandbox.sys")
+@patch("kiro_crew.sandbox.backends.sys")
 def test_non_darwin_returns_false(mock_sys):
     mock_sys.platform = "linux"
     assert _probe_sandbox_exec() is False
 
 
-@patch("kiro_crew.sandbox.sys")
-@patch("kiro_crew.sandbox.os.path.exists", return_value=False)
+@patch("kiro_crew.sandbox.backends.sys")
+@patch("kiro_crew.sandbox.backends.os.path.exists", return_value=False)
 def test_sandbox_exec_not_found_returns_false(mock_exists, mock_sys):
     mock_sys.platform = "darwin"
     assert _probe_sandbox_exec() is False
 
 
-@patch("kiro_crew.sandbox.sys")
-@patch("kiro_crew.sandbox.os.path.exists", return_value=True)
-@patch("kiro_crew.sandbox.subprocess.run")
+@patch("kiro_crew.sandbox.backends.sys")
+@patch("kiro_crew.sandbox.backends.os.path.exists", return_value=True)
+@patch("kiro_crew.sandbox.backends.subprocess.run")
 def test_sandbox_exec_works(mock_run, mock_exists, mock_sys):
     mock_sys.platform = "darwin"
     mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
     assert _probe_sandbox_exec() is True
 
 
-@patch("kiro_crew.sandbox.sys")
-@patch("kiro_crew.sandbox.os.path.exists", return_value=True)
-@patch("kiro_crew.sandbox.subprocess.run")
+@patch("kiro_crew.sandbox.backends.sys")
+@patch("kiro_crew.sandbox.backends.os.path.exists", return_value=True)
+@patch("kiro_crew.sandbox.backends.subprocess.run")
 def test_sandbox_exec_works_on_macos_26(mock_run, mock_exists, mock_sys):
     """macOS 26 (Tahoe) is NOT hard-blocked: sandbox-exec + the Seatbelt kernel
     subsystem still work there, so the probe decides empirically. A passing probe
@@ -46,18 +46,18 @@ def test_sandbox_exec_works_on_macos_26(mock_run, mock_exists, mock_sys):
     assert _probe_sandbox_exec() is True
 
 
-@patch("kiro_crew.sandbox.sys")
-@patch("kiro_crew.sandbox.os.path.exists", return_value=True)
-@patch("kiro_crew.sandbox.subprocess.run")
+@patch("kiro_crew.sandbox.backends.sys")
+@patch("kiro_crew.sandbox.backends.os.path.exists", return_value=True)
+@patch("kiro_crew.sandbox.backends.subprocess.run")
 def test_sandbox_exec_fails_returns_false(mock_run, mock_exists, mock_sys):
     mock_sys.platform = "darwin"
     mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1)
     assert _probe_sandbox_exec() is False
 
 
-@patch("kiro_crew.sandbox.sys")
-@patch("kiro_crew.sandbox.os.path.exists", side_effect=[True, False])
-@patch("kiro_crew.sandbox.subprocess.run")
+@patch("kiro_crew.sandbox.backends.sys")
+@patch("kiro_crew.sandbox.backends.os.path.exists", side_effect=[True, False])
+@patch("kiro_crew.sandbox.backends.subprocess.run")
 def test_missing_trusted_probe_binary_fails_closed(mock_run, mock_exists, mock_sys):
     mock_sys.platform = "darwin"
 
@@ -66,9 +66,9 @@ def test_missing_trusted_probe_binary_fails_closed(mock_run, mock_exists, mock_s
     assert mock_exists.call_count == 2
 
 
-@patch("kiro_crew.sandbox.sys")
-@patch("kiro_crew.sandbox.os.path.exists", return_value=True)
-@patch("kiro_crew.sandbox.subprocess.run", side_effect=OSError("timeout"))
+@patch("kiro_crew.sandbox.backends.sys")
+@patch("kiro_crew.sandbox.backends.os.path.exists", return_value=True)
+@patch("kiro_crew.sandbox.backends.subprocess.run", side_effect=OSError("timeout"))
 def test_subprocess_exception_returns_false(mock_run, mock_exists, mock_sys):
     mock_sys.platform = "darwin"
     assert _probe_sandbox_exec() is False
@@ -76,7 +76,7 @@ def test_subprocess_exception_returns_false(mock_run, mock_exists, mock_sys):
 
 def test_userns_available_delegates_to_probe(monkeypatch):
     """Public userns_available() is a stable alias for the private probe."""
-    import kiro_crew.sandbox as sb
+    import kiro_crew.sandbox.backends as sb
 
     monkeypatch.setattr(sb, "_probe_unshare", lambda: True)
     assert sb.userns_available() is True

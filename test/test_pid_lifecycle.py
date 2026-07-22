@@ -1255,8 +1255,8 @@ class TestSpawnedMarkerInjection:
         from kiro_crew.sandbox import sandboxed_spawn_argv
 
         with (
-            patch("kiro_crew.sandbox.wrap_argv", return_value=(["echo"], None)),
-            patch("kiro_crew.sandbox.cgroup_scope_argv", side_effect=lambda a: a),
+            patch("kiro_crew.sandbox.core.wrap_argv", return_value=(["echo"], None)),
+            patch("kiro_crew.sandbox.cgroups.cgroup_scope_argv", side_effect=lambda a: a),
         ):
             _, env, _ = sandboxed_spawn_argv(["echo"], env={"PATH": "/bin"})
 
@@ -1272,7 +1272,7 @@ class TestSpawnedMarkerInjection:
         deleted in the public fork)."""
         src_root = Path(__file__).resolve().parent.parent / "src" / "kiro_crew"
         spawn_sites = [
-            "sandbox.py",
+            "sandbox/core.py",
             "acp/runtime.py",
             "acp/client.py",
             "mcp_gateway/backend.py",

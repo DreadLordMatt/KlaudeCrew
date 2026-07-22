@@ -45,31 +45,31 @@ class TestDetectBackend:
         result = detect_backend(config_mode="off")
         assert result == "none"
 
-    @patch("kiro_crew.sandbox._probe_unshare", return_value=False)
-    @patch("kiro_crew.sandbox._probe_sandbox_exec", return_value=False)
+    @patch("kiro_crew.sandbox.backends._probe_unshare", return_value=False)
+    @patch("kiro_crew.sandbox.backends._probe_sandbox_exec", return_value=False)
     def test_no_backend_available(self, mock_sb, mock_ns):
         result = detect_backend(config_mode="auto")
         assert result == "none"
 
-    @patch("kiro_crew.sandbox._probe_unshare", return_value=True)
+    @patch("kiro_crew.sandbox.backends._probe_unshare", return_value=True)
     def test_linux_namespace(self, mock_ns):
         result = detect_backend(config_mode="auto")
         assert result == "namespace"
 
-    @patch("kiro_crew.sandbox._probe_unshare", return_value=False)
-    @patch("kiro_crew.sandbox._probe_sandbox_exec", return_value=True)
+    @patch("kiro_crew.sandbox.backends._probe_unshare", return_value=False)
+    @patch("kiro_crew.sandbox.backends._probe_sandbox_exec", return_value=True)
     def test_macos_sandbox_exec(self, mock_sb, mock_ns):
         result = detect_backend(config_mode="auto")
         assert result == "sandbox-exec"
 
-    @patch("kiro_crew.sandbox._probe_unshare", return_value=True)
+    @patch("kiro_crew.sandbox.backends._probe_unshare", return_value=True)
     def test_caches_result(self, mock_ns):
         detect_backend(config_mode="auto")
         detect_backend(config_mode="auto")
         # Only probed once due to caching
         assert mock_ns.call_count == 1
 
-    @patch("kiro_crew.sandbox._probe_unshare", return_value=True)
+    @patch("kiro_crew.sandbox.backends._probe_unshare", return_value=True)
     def test_invalidates_on_mode_change(self, mock_ns):
         detect_backend(config_mode="auto")
         detect_backend(config_mode="off")
@@ -78,8 +78,8 @@ class TestDetectBackend:
 
 
 class TestWrapArgv:
-    @patch("kiro_crew.sandbox._allow_unsandboxed_exec", return_value=True)
-    @patch("kiro_crew.sandbox.detect_backend", return_value="none")
+    @patch("kiro_crew.sandbox.policy._allow_unsandboxed_exec", return_value=True)
+    @patch("kiro_crew.sandbox.backends.detect_backend", return_value="none")
     def test_no_sandbox_returns_original(self, mock_detect, mock_allow):
         argv = ["kiro-cli", "acp"]
         result, cleanup = wrap_argv(argv, mode="auto")
@@ -92,15 +92,15 @@ class TestWrapArgv:
         assert result == argv
         assert cleanup is None
 
-    @patch("kiro_crew.sandbox.detect_backend", return_value="namespace")
-    @patch("kiro_crew.sandbox.namespace_argv")
+    @patch("kiro_crew.sandbox.backends.detect_backend", return_value="namespace")
+    @patch("kiro_crew.sandbox.launcher.namespace_argv")
     def test_namespace_backend(self, mock_ns_argv, mock_detect):
         mock_ns_argv.return_value = [sys.executable, "/tmp/launcher.py", "kiro-cli"]
         result, cleanup = wrap_argv(["kiro-cli"], mode="strict")
         mock_ns_argv.assert_called_once_with(["kiro-cli"], "strict", strip_python_env=False)
 
-    @patch("kiro_crew.sandbox.detect_backend", return_value="sandbox-exec")
-    @patch("kiro_crew.sandbox.sandbox_exec_argv")
+    @patch("kiro_crew.sandbox.backends.detect_backend", return_value="sandbox-exec")
+    @patch("kiro_crew.sandbox.seatbelt.sandbox_exec_argv")
     def test_sandbox_exec_backend(self, mock_sb_argv, mock_detect):
         mock_sb_argv.return_value = (["sandbox-exec", "-f", "/tmp/p.sb", "kiro-cli"], "/tmp/p.sb")
         result, cleanup = wrap_argv(["kiro-cli"], mode="strict")
@@ -490,7 +490,7 @@ class TestSandboxExecArgv:
 
 
 class TestNamespaceArgv:
-    @patch("kiro_crew.sandbox._resolve_agent_executable", return_value="/usr/local/bin/kiro-cli")
+    @patch("kiro_crew.sandbox.launcher._resolve_agent_executable", return_value="/usr/local/bin/kiro-cli")
     def test_wraps_with_python_launcher(self, mock_resolve):
         result = namespace_argv(["kiro-cli", "acp"], "strict")
         assert result[0] == sys.executable
@@ -500,7 +500,7 @@ class TestNamespaceArgv:
         # Cleanup temp file
         os.unlink(result[1])
 
-    @patch("kiro_crew.sandbox._resolve_agent_executable", return_value="/usr/local/bin/kiro-cli")
+    @patch("kiro_crew.sandbox.launcher._resolve_agent_executable", return_value="/usr/local/bin/kiro-cli")
     def test_launcher_script_is_executable(self, mock_resolve):
         result = namespace_argv(["kiro-cli"], "strict")
         launcher_path = result[1]
@@ -540,7 +540,7 @@ class TestAgentExecutableResolver:
         resolver.resolve_executable.return_value = "/opt/agent/bin/kiro-cli"
         context = MagicMock()
         context.agent_executable = resolver
-        with patch("kiro_crew.sandbox.current_context", return_value=context):
+        with patch("kiro_crew.sandbox.launcher.current_context", return_value=context):
             result = _resolve_agent_executable("/usr/local/bin/kiro-cli")
         assert result == "/opt/agent/bin/kiro-cli"
         resolver.resolve_executable.assert_called_once_with("/usr/local/bin/kiro-cli")
@@ -550,7 +550,7 @@ class TestAgentExecutableResolver:
         resolver.resolve_executable.side_effect = RuntimeError("resolver unavailable")
         context = MagicMock()
         context.agent_executable = resolver
-        with patch("kiro_crew.sandbox.current_context", return_value=context):
+        with patch("kiro_crew.sandbox.launcher.current_context", return_value=context):
             result = _resolve_agent_executable("/usr/local/bin/kiro-cli")
         assert result == "/usr/local/bin/kiro-cli"
 
@@ -561,7 +561,7 @@ class TestAgentExecutableResolver:
         resolver.resolve_executable.side_effect = PlatformCompositionError("companion unavailable")
         context = MagicMock()
         context.agent_executable = resolver
-        with patch("kiro_crew.sandbox.current_context", return_value=context), pytest.raises(
+        with patch("kiro_crew.sandbox.launcher.current_context", return_value=context), pytest.raises(
             PlatformCompositionError
         ):
             _resolve_agent_executable("/usr/local/bin/kiro-cli")
@@ -576,9 +576,9 @@ class TestSandboxNoWarningWhenExpected:
     this preserves Mesh-2054's "don't spam on expected states" intent.
     """
 
-    @patch("kiro_crew.sandbox._allow_unsandboxed_exec", return_value=True)
-    @patch("kiro_crew.sandbox._allow_no_isolation", return_value=True)
-    @patch("kiro_crew.sandbox.detect_backend", return_value="none")
+    @patch("kiro_crew.sandbox.policy._allow_unsandboxed_exec", return_value=True)
+    @patch("kiro_crew.sandbox.policy._allow_no_isolation", return_value=True)
+    @patch("kiro_crew.sandbox.backends.detect_backend", return_value="none")
     def test_no_sandbox_opted_in_logs_info_not_warning(self, mock_detect, mock_optin, mock_allow, caplog):
         import logging
         if hasattr(wrap_argv, "_warned"):
@@ -606,9 +606,9 @@ class TestCleanupStaleSandboxProfiles:
         stale_file = run_dir / "kirocrew_sandbox_99999_abc123.sb"
         stale_file.write_text("(version 1)")
 
-        with patch("kiro_crew.sandbox.os.path.expanduser", return_value=str(tmp_path)):
+        with patch("kiro_crew.sandbox.seatbelt.os.path.expanduser", return_value=str(tmp_path)):
             with patch(
-                "kiro_crew.sandbox.platform_compat.pid_exists", return_value=False
+                "kiro_crew.sandbox.seatbelt.platform_compat.pid_exists", return_value=False
             ):
                 removed = cleanup_stale_sandbox_profiles(legacy_dir=str(tmp_path / "nonexistent"))
 
@@ -624,7 +624,7 @@ class TestCleanupStaleSandboxProfiles:
         live_file = run_dir / f"kirocrew_sandbox_{os.getpid()}_xyz789.sb"
         live_file.write_text("(version 1)")
 
-        with patch("kiro_crew.sandbox.os.path.expanduser", return_value=str(tmp_path)):
+        with patch("kiro_crew.sandbox.seatbelt.os.path.expanduser", return_value=str(tmp_path)):
             removed = cleanup_stale_sandbox_profiles(legacy_dir=str(tmp_path / "nonexistent"))
 
         assert live_file.exists()
@@ -639,7 +639,7 @@ class TestCleanupStaleSandboxProfiles:
         other_file = run_dir / "something_else.txt"
         other_file.write_text("keep me")
 
-        with patch("kiro_crew.sandbox.os.path.expanduser", return_value=str(tmp_path)):
+        with patch("kiro_crew.sandbox.seatbelt.os.path.expanduser", return_value=str(tmp_path)):
             removed = cleanup_stale_sandbox_profiles(legacy_dir=str(tmp_path / "nonexistent"))
 
         assert other_file.exists()
@@ -652,12 +652,12 @@ class TestResourceLimitPreexec:
     (Talos bdf0d7e5 / V2285983353)."""
 
     def _reset_cache(self):
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         sb._RESOURCE_PREEXEC = sb._UNSET
 
     def test_returns_callable_and_caches(self):
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         self._reset_cache()
         try:
@@ -671,7 +671,7 @@ class TestResourceLimitPreexec:
     def test_config_read_failure_falls_back_to_defaults(self):
         """If config load raises, the preexec still builds from safe defaults
         (no crash, protection still applied)."""
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         self._reset_cache()
         try:
@@ -685,11 +685,11 @@ class TestResourceLimitPreexec:
         """On non-POSIX (os.name != 'posix'), returns None — create_subprocess_exec
         rejects any non-None preexec_fn on Windows with ValueError, so the
         contract must be None there (AutoSDE CR-289826109)."""
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         self._reset_cache()
         try:
-            with patch("kiro_crew.sandbox.os.name", "nt"):
+            with patch("kiro_crew.sandbox.cgroups.os.name", "nt"):
                 assert sb.resource_limit_preexec() is None
         finally:
             self._reset_cache()
@@ -701,12 +701,12 @@ class TestSessionHostPreexec:
     managing many MCP server subprocesses."""
 
     def _reset_cache(self):
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         sb._SESSION_HOST_PREEXEC = sb._UNSET
 
     def test_returns_callable_and_caches(self):
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         self._reset_cache()
         try:
@@ -721,7 +721,7 @@ class TestSessionHostPreexec:
         """The preexec callable raises NOFILE soft to the hard limit."""
         import resource
 
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         self._reset_cache()
         try:
@@ -747,11 +747,11 @@ class TestSessionHostPreexec:
             self._reset_cache()
 
     def test_non_posix_returns_none(self):
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         self._reset_cache()
         try:
-            with patch("kiro_crew.sandbox.os.name", "nt"):
+            with patch("kiro_crew.sandbox.cgroups.os.name", "nt"):
                 assert sb.session_host_preexec() is None
         finally:
             self._reset_cache()
@@ -763,23 +763,23 @@ class TestCgroupScopeArgv:
     ceiling the finding's headline threats require (Talos bdf0d7e5)."""
 
     def _reset_probe(self):
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         sb._CGROUP_SCOPE_PROBE = None
         sb._CGROUP_WARNED = False
 
     def test_available_prepends_systemd_scope_with_limits(self):
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         self._reset_probe()
         try:
             with (
-                patch("kiro_crew.sandbox._probe_cgroup_scope", return_value=(True, "ok")),
+                patch("kiro_crew.sandbox.cgroups._probe_cgroup_scope", return_value=(True, "ok")),
                 patch(
-                    "kiro_crew.sandbox._cgroup_limits_from_config",
+                    "kiro_crew.sandbox.cgroups._cgroup_limits_from_config",
                     return_value=(8192, 8192, 50, 0),
                 ),
-                patch("kiro_crew.sandbox._cpu_controller_delegated", return_value=True),
+                patch("kiro_crew.sandbox.cgroups._cpu_controller_delegated", return_value=True),
             ):
                 out = sb.cgroup_scope_argv(["kiro-cli", "chat"])
             assert out[0] == "systemd-run"
@@ -800,7 +800,7 @@ class TestCgroupScopeArgv:
         keep pids/memory enforcement)."""
         from unittest.mock import mock_open
 
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         try:
             sb._CPU_DELEGATED = None
@@ -819,17 +819,17 @@ class TestCgroupScopeArgv:
             sb._CPU_DELEGATED = None
 
     def test_cpu_quota_emitted_when_configured(self):
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         self._reset_probe()
         try:
             with (
-                patch("kiro_crew.sandbox._probe_cgroup_scope", return_value=(True, "ok")),
+                patch("kiro_crew.sandbox.cgroups._probe_cgroup_scope", return_value=(True, "ok")),
                 patch(
-                    "kiro_crew.sandbox._cgroup_limits_from_config",
+                    "kiro_crew.sandbox.cgroups._cgroup_limits_from_config",
                     return_value=(8192, 8192, 75, 200),
                 ),
-                patch("kiro_crew.sandbox._cpu_controller_delegated", return_value=True),
+                patch("kiro_crew.sandbox.cgroups._cpu_controller_delegated", return_value=True),
             ):
                 out = sb.cgroup_scope_argv(["kiro-cli", "chat"])
             assert "CPUWeight=75" in out
@@ -840,17 +840,17 @@ class TestCgroupScopeArgv:
     def test_no_cpu_properties_without_cpu_delegation(self):
         """pids/memory enforcement must not be lost when only cpu delegation
         is missing — the scope is still created, minus the CPU properties."""
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         self._reset_probe()
         try:
             with (
-                patch("kiro_crew.sandbox._probe_cgroup_scope", return_value=(True, "ok")),
+                patch("kiro_crew.sandbox.cgroups._probe_cgroup_scope", return_value=(True, "ok")),
                 patch(
-                    "kiro_crew.sandbox._cgroup_limits_from_config",
+                    "kiro_crew.sandbox.cgroups._cgroup_limits_from_config",
                     return_value=(8192, 8192, 50, 200),
                 ),
-                patch("kiro_crew.sandbox._cpu_controller_delegated", return_value=False),
+                patch("kiro_crew.sandbox.cgroups._cpu_controller_delegated", return_value=False),
             ):
                 out = sb.cgroup_scope_argv(["kiro-cli", "chat"])
             assert out[0] == "systemd-run"
@@ -863,12 +863,12 @@ class TestCgroupScopeArgv:
     def test_unavailable_is_passthrough_and_warns_once(self, caplog):
         import logging
 
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         self._reset_probe()
         try:
             with patch(
-                "kiro_crew.sandbox._probe_cgroup_scope",
+                "kiro_crew.sandbox.cgroups._probe_cgroup_scope",
                 return_value=(False, "not Linux"),
             ):
                 with caplog.at_level(logging.WARNING):
@@ -883,7 +883,7 @@ class TestCgroupScopeArgv:
             self._reset_probe()
 
     def test_config_overrides_cgroup_limits(self):
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         self._reset_probe()
         try:
@@ -907,7 +907,7 @@ class TestCgroupScopeArgv:
             self._reset_probe()
 
     def test_config_defaults_when_absent_or_zero(self):
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         self._reset_probe()
         try:
@@ -940,7 +940,7 @@ class TestCgroupScopeArgv:
 
     def test_default_max_memory_is_host_proportional(self):
         """The memory default scales with physical RAM (65%), not a flat cap."""
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         # A known 16 GiB box -> 65% -> ~10649 MB.
         sixteen_g = 16 * 1024**3
@@ -951,7 +951,7 @@ class TestCgroupScopeArgv:
 
     def test_default_max_memory_falls_back_when_ram_unknown(self):
         """If sysconf can't report RAM, fall back to the flat MB constant."""
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         with patch("os.sysconf", side_effect=OSError("no sysconf")):
             assert sb._default_max_memory_mb() == sb._CGROUP_FALLBACK_MAX_MEMORY_MB
@@ -964,14 +964,14 @@ class TestCgroupScopeArgv:
         """If this host actually has cgroup delegation, the scope must ENFORCE
         pids.max — a child under a tiny TasksMax cannot fork past it. Skips
         cleanly where delegation is unavailable (the probe returns False)."""
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.cgroups as sb
 
         self._reset_probe()
         try:
             available, _ = sb._probe_cgroup_scope()
             if not available:
                 pytest.skip("no cgroup v2 delegation on this host")
-            with patch("kiro_crew.sandbox._cgroup_limits_from_config", return_value=(20, 8192, 50, 0)):
+            with patch("kiro_crew.sandbox.cgroups._cgroup_limits_from_config", return_value=(20, 8192, 50, 0)):
                 argv = sb.cgroup_scope_argv(
                     [
                         sys.executable,
@@ -1003,7 +1003,7 @@ class TestKiroInternalSandboxExclusion:
         p = tmp_path / "amazon-internal.json"
         if content is not None:
             p.write_text(content)
-        monkeypatch.setattr("kiro_crew.sandbox._KIRO_INTERNAL_SETTINGS_PATH", str(p))
+        monkeypatch.setattr("kiro_crew.sandbox.policy._KIRO_INTERNAL_SETTINGS_PATH", str(p))
         return p
 
     # --- kiro_internal_sandbox_enabled() helper ---
@@ -1043,8 +1043,8 @@ class TestKiroInternalSandboxExclusion:
     def test_darwin_kiro_spawn_delegates(self, tmp_path, monkeypatch):
         """kiro sandbox ON + darwin + kiro-cli argv -> no seatbelt wrap."""
         self._write_settings(tmp_path, monkeypatch, '{"sandbox": true}')
-        monkeypatch.setattr("kiro_crew.sandbox.sys.platform", "darwin")
-        with patch("kiro_crew.sandbox.detect_backend") as mock_detect:
+        monkeypatch.setattr("kiro_crew.sandbox.core.sys.platform", "darwin")
+        with patch("kiro_crew.sandbox.backends.detect_backend") as mock_detect:
             argv, cleanup = wrap_argv(["/usr/local/bin/kiro-cli", "acp"], mode="auto")
         assert "sandbox-exec" not in argv
         assert argv[-2:] == ["/usr/local/bin/kiro-cli", "acp"]
@@ -1055,7 +1055,7 @@ class TestKiroInternalSandboxExclusion:
     def test_darwin_kiro_spawn_delegation_scrubs_env(self, tmp_path, monkeypatch):
         """The delegated spawn keeps the seatbelt path's env scrub."""
         self._write_settings(tmp_path, monkeypatch, '{"sandbox": true}')
-        monkeypatch.setattr("kiro_crew.sandbox.sys.platform", "darwin")
+        monkeypatch.setattr("kiro_crew.sandbox.core.sys.platform", "darwin")
         monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "sentinel")
         argv, _ = wrap_argv(["kiro-cli", "acp"], mode="auto")
         assert argv[0] == "env"
@@ -1065,9 +1065,9 @@ class TestKiroInternalSandboxExclusion:
     def test_darwin_non_kiro_spawn_stays_wrapped(self, tmp_path, monkeypatch):
         """Non-kiro spawns have no internal sandbox — seatbelt stays on."""
         self._write_settings(tmp_path, monkeypatch, '{"sandbox": true}')
-        monkeypatch.setattr("kiro_crew.sandbox.sys.platform", "darwin")
-        with patch("kiro_crew.sandbox.detect_backend", return_value="sandbox-exec"), patch(
-            "kiro_crew.sandbox.sandbox_exec_argv",
+        monkeypatch.setattr("kiro_crew.sandbox.core.sys.platform", "darwin")
+        with patch("kiro_crew.sandbox.backends.detect_backend", return_value="sandbox-exec"), patch(
+            "kiro_crew.sandbox.seatbelt.sandbox_exec_argv",
             return_value=(["sandbox-exec", "python3"], "/tmp/p.sb"),
         ) as mock_sb:
             wrap_argv(["python3", "-m", "worker"], mode="auto")
@@ -1076,9 +1076,9 @@ class TestKiroInternalSandboxExclusion:
     def test_darwin_kiro_disabled_stays_wrapped(self, tmp_path, monkeypatch):
         """kiro sandbox OFF -> KiroCrew's seatbelt ON (the inverse rule)."""
         self._write_settings(tmp_path, monkeypatch, '{"sandbox": false}')
-        monkeypatch.setattr("kiro_crew.sandbox.sys.platform", "darwin")
-        with patch("kiro_crew.sandbox.detect_backend", return_value="sandbox-exec"), patch(
-            "kiro_crew.sandbox.sandbox_exec_argv",
+        monkeypatch.setattr("kiro_crew.sandbox.core.sys.platform", "darwin")
+        with patch("kiro_crew.sandbox.backends.detect_backend", return_value="sandbox-exec"), patch(
+            "kiro_crew.sandbox.seatbelt.sandbox_exec_argv",
             return_value=(["sandbox-exec", "kiro-cli"], "/tmp/p.sb"),
         ) as mock_sb:
             wrap_argv(["kiro-cli", "acp"], mode="auto")
@@ -1087,9 +1087,9 @@ class TestKiroInternalSandboxExclusion:
     def test_linux_unaffected(self, tmp_path, monkeypatch):
         """Mutual exclusion is macOS-only — Linux namespace path unchanged."""
         self._write_settings(tmp_path, monkeypatch, '{"sandbox": true}')
-        monkeypatch.setattr("kiro_crew.sandbox.sys.platform", "linux")
-        with patch("kiro_crew.sandbox.detect_backend", return_value="namespace"), patch(
-            "kiro_crew.sandbox.namespace_argv",
+        monkeypatch.setattr("kiro_crew.sandbox.core.sys.platform", "linux")
+        with patch("kiro_crew.sandbox.backends.detect_backend", return_value="namespace"), patch(
+            "kiro_crew.sandbox.launcher.namespace_argv",
             return_value=["/bin/sh", "/tmp/launcher.sh", "kiro-cli"],
         ) as mock_ns:
             wrap_argv(["kiro-cli", "acp"], mode="auto")
@@ -1099,9 +1099,9 @@ class TestKiroInternalSandboxExclusion:
         """Audit-or-deny: if the SEL audit cannot be written, the delegation
         is refused and the spawn falls back to KiroCrew's own seatbelt."""
         self._write_settings(tmp_path, monkeypatch, '{"sandbox": true}')
-        monkeypatch.setattr("kiro_crew.sandbox.sys.platform", "darwin")
+        monkeypatch.setattr("kiro_crew.sandbox.core.sys.platform", "darwin")
         with patch("kiro_crew.sel.sel", side_effect=RuntimeError("audit down")), patch(
-            "kiro_crew.sandbox.sandbox_exec_argv",
+            "kiro_crew.sandbox.seatbelt.sandbox_exec_argv",
             return_value=(["sandbox-exec", "-f", "/tmp/p.sb", "kiro-cli", "acp"], "/tmp/p.sb"),
         ) as mock_sb:
             argv, cleanup = wrap_argv(["kiro-cli", "acp"], mode="auto")
@@ -1131,7 +1131,7 @@ class TestKiroInternalSandboxExclusion:
         sensitive.write_text('{"sandbox": true}')
         link = tmp_path / "amazon-internal.json"
         link.symlink_to(sensitive)
-        monkeypatch.setattr("kiro_crew.sandbox._KIRO_INTERNAL_SETTINGS_PATH", str(link))
+        monkeypatch.setattr("kiro_crew.sandbox.policy._KIRO_INTERNAL_SETTINGS_PATH", str(link))
         assert kiro_internal_sandbox_enabled() is False
 
     def test_sel_failure_does_not_burn_warn_once_flag(self, tmp_path, monkeypatch, caplog):
@@ -1140,16 +1140,16 @@ class TestKiroInternalSandboxExclusion:
         import logging
 
         self._write_settings(tmp_path, monkeypatch, '{"sandbox": true}')
-        monkeypatch.setattr("kiro_crew.sandbox.sys.platform", "darwin")
-        monkeypatch.setattr("kiro_crew.sandbox._kiro_delegation_warned", False)
+        monkeypatch.setattr("kiro_crew.sandbox.core.sys.platform", "darwin")
+        monkeypatch.setattr("kiro_crew.sandbox.policy._kiro_delegation_warned", False)
 
         # First call: SEL down -> seatbelt fallback, no delegation warning.
         with patch("kiro_crew.sel.sel", side_effect=RuntimeError("audit down")), patch(
-            "kiro_crew.sandbox.sandbox_exec_argv",
+            "kiro_crew.sandbox.seatbelt.sandbox_exec_argv",
             return_value=(["sandbox-exec", "-f", "/tmp/p.sb", "kiro-cli"], "/tmp/p.sb"),
         ):
             wrap_argv(["kiro-cli", "acp"], mode="auto")
-        import kiro_crew.sandbox as sb
+        import kiro_crew.sandbox.policy as sb
 
         assert sb._kiro_delegation_warned is False
 

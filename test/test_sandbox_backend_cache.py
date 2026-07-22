@@ -26,7 +26,8 @@ import types
 
 import pytest
 
-import kiro_crew.sandbox as sb
+import kiro_crew.sandbox as _sbx  # shim, for core-owned wrap_argv
+import kiro_crew.sandbox.backends as sb  # backends owns the probe/cache internals under test
 
 _EAGAIN_REASON = "fork failed with errno 11 (EAGAIN)"
 _EPERM_REASON = "unshare(CLONE_NEWUSER|CLONE_NEWNS) failed with errno 1 (EPERM)"
@@ -175,10 +176,10 @@ def test_off_mode_short_circuits_without_probing(monkeypatch):
 
 def test_fail_closed_transient_message_advises_retry_not_optout(monkeypatch):
     monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
-    monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: False)
+    monkeypatch.setattr("kiro_crew.sandbox.policy._allow_unsandboxed_exec", lambda: False)
     sb._last_unshare_failure = (True, _EAGAIN_REASON)
     with pytest.raises(RuntimeError) as excinfo:
-        sb.wrap_argv(["kiro-cli", "acp"], mode="standard")
+        _sbx.wrap_argv(["kiro-cli", "acp"], mode="standard")
     msg = str(excinfo.value)
     assert f"Probe detail: {_EAGAIN_REASON}" in msg
     assert "TRANSIENT" in msg
@@ -189,10 +190,10 @@ def test_fail_closed_transient_message_advises_retry_not_optout(monkeypatch):
 
 def test_fail_closed_permanent_message_includes_optout_and_detail(monkeypatch):
     monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
-    monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: False)
+    monkeypatch.setattr("kiro_crew.sandbox.policy._allow_unsandboxed_exec", lambda: False)
     sb._last_unshare_failure = (False, _EPERM_REASON)
     with pytest.raises(RuntimeError) as excinfo:
-        sb.wrap_argv(["kiro-cli", "acp"], mode="standard")
+        _sbx.wrap_argv(["kiro-cli", "acp"], mode="standard")
     msg = str(excinfo.value)
     assert f"Probe detail: {_EPERM_REASON}" in msg
     assert "sandbox_allow_unsandboxed_exec=true" in msg

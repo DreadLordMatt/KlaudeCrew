@@ -22,9 +22,9 @@ def _reset_warned():
 def test_no_backend_emits_security_warning(monkeypatch, caplog):
     """Default (not opted in): falling back to no isolation logs a WARNING."""
     _reset_warned()
-    monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
-    monkeypatch.setattr(sb, "_allow_no_isolation", lambda: False)
-    monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: True)
+    monkeypatch.setattr("kiro_crew.sandbox.backends.detect_backend", lambda config_mode="auto": "none")
+    monkeypatch.setattr("kiro_crew.sandbox.policy._allow_no_isolation", lambda: False)
+    monkeypatch.setattr("kiro_crew.sandbox.policy._allow_unsandboxed_exec", lambda: True)
 
     with caplog.at_level(logging.WARNING, logger=sb.logger.name):
         argv, cleanup = sb.wrap_argv(["echo", "hi"], mode="standard")
@@ -40,9 +40,9 @@ def test_no_backend_emits_security_warning(monkeypatch, caplog):
 def test_no_backend_opted_in_demotes_to_info(monkeypatch, caplog):
     """When the operator opts in, the fallback is logged at info, not warning."""
     _reset_warned()
-    monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
-    monkeypatch.setattr(sb, "_allow_no_isolation", lambda: True)
-    monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: True)
+    monkeypatch.setattr("kiro_crew.sandbox.backends.detect_backend", lambda config_mode="auto": "none")
+    monkeypatch.setattr("kiro_crew.sandbox.policy._allow_no_isolation", lambda: True)
+    monkeypatch.setattr("kiro_crew.sandbox.policy._allow_unsandboxed_exec", lambda: True)
 
     with caplog.at_level(logging.INFO, logger=sb.logger.name):
         sb.wrap_argv(["echo", "hi"], mode="standard")
@@ -55,9 +55,9 @@ def test_no_backend_opted_in_demotes_to_info(monkeypatch, caplog):
 def test_warning_emitted_once_per_process(monkeypatch, caplog):
     """The warning is one-shot — repeated calls do not spam the log."""
     _reset_warned()
-    monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
-    monkeypatch.setattr(sb, "_allow_no_isolation", lambda: False)
-    monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: True)
+    monkeypatch.setattr("kiro_crew.sandbox.backends.detect_backend", lambda config_mode="auto": "none")
+    monkeypatch.setattr("kiro_crew.sandbox.policy._allow_no_isolation", lambda: False)
+    monkeypatch.setattr("kiro_crew.sandbox.policy._allow_unsandboxed_exec", lambda: True)
 
     with caplog.at_level(logging.WARNING, logger=sb.logger.name):
         sb.wrap_argv(["echo", "1"], mode="standard")
@@ -69,7 +69,7 @@ def test_warning_emitted_once_per_process(monkeypatch, caplog):
 def test_mode_off_does_not_warn(monkeypatch, caplog):
     """mode='off' is an explicit operator choice — it returns early, no warning."""
     _reset_warned()
-    monkeypatch.setattr(sb, "_allow_no_isolation", lambda: False)
+    monkeypatch.setattr("kiro_crew.sandbox.policy._allow_no_isolation", lambda: False)
 
     with caplog.at_level(logging.WARNING, logger=sb.logger.name):
         argv, cleanup = sb.wrap_argv(["echo", "hi"], mode="off")
@@ -106,9 +106,9 @@ def test_strip_python_env_holds_on_fail_open_path(monkeypatch):
     launcher strips PYTHONPATH), so sandboxed_spawn_argv MUST strip the Python
     env vars from the returned env itself (AutoSDE finding on Talos 92e24570)."""
     _reset_warned()
-    monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
-    monkeypatch.setattr(sb, "_allow_no_isolation", lambda: True)
-    monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: True)
+    monkeypatch.setattr("kiro_crew.sandbox.backends.detect_backend", lambda config_mode="auto": "none")
+    monkeypatch.setattr("kiro_crew.sandbox.policy._allow_no_isolation", lambda: True)
+    monkeypatch.setattr("kiro_crew.sandbox.policy._allow_unsandboxed_exec", lambda: True)
     # This test asserts the bare fail-open argv (the PYTHONPATH-strip is via the
     # parent-level scrub, not a launcher). Neutralize the cgroup v2 scope probe
     # so a host WITH systemd cgroup delegation doesn't prepend `systemd-run` and
@@ -133,9 +133,9 @@ def test_strip_python_env_false_keeps_python_env(monkeypatch):
     """Without strip_python_env, the chokepoint leaves PYTHONPATH intact (our own
     sandboxed Python children import kiro_crew via it)."""
     _reset_warned()
-    monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
-    monkeypatch.setattr(sb, "_allow_no_isolation", lambda: True)
-    monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: True)
+    monkeypatch.setattr("kiro_crew.sandbox.backends.detect_backend", lambda config_mode="auto": "none")
+    monkeypatch.setattr("kiro_crew.sandbox.policy._allow_no_isolation", lambda: True)
+    monkeypatch.setattr("kiro_crew.sandbox.policy._allow_unsandboxed_exec", lambda: True)
 
     base = {"PATH": "/usr/bin", "PYTHONPATH": "/kirocrew/site"}
     _, env, _ = sb.sandboxed_spawn_argv(["python", "-m", "x"], env=base)

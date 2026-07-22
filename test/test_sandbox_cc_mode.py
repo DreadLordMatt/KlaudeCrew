@@ -142,7 +142,7 @@ class TestBuildSeatbeltProfileCcMode:
 
 
 class TestWrapArgvCcMode:
-    @patch("kiro_crew.sandbox.detect_backend", return_value="sandbox-exec")
+    @patch("kiro_crew.sandbox.backends.detect_backend", return_value="sandbox-exec")
     def test_cc_mode_routes_to_sandbox(self, _mock_backend):
         wrapped, cleanup = wrap_argv(["echo", "hi"], mode="cc")
         assert len(wrapped) > 2
@@ -154,7 +154,7 @@ class TestWrapArgvCcMode:
         assert wrapped == ["echo", "hi"]
         assert cleanup is None
 
-    @patch("kiro_crew.sandbox.detect_backend", return_value="sandbox-exec")
+    @patch("kiro_crew.sandbox.backends.detect_backend", return_value="sandbox-exec")
     def test_cc_seatbelt_does_not_deny_aws(self, _mock_backend):
         """CC seatbelt does NOT deny .aws on macOS — full access needed."""
         wrapped, cleanup = wrap_argv(["echo", "hi"], mode="cc")
@@ -165,7 +165,7 @@ class TestWrapArgvCcMode:
         finally:
             os.unlink(cleanup)
 
-    @patch("kiro_crew.sandbox.detect_backend", return_value="sandbox-exec")
+    @patch("kiro_crew.sandbox.backends.detect_backend", return_value="sandbox-exec")
     def test_cc_seatbelt_profile_does_not_deny_ssh(self, _mock_backend):
         """CC profile should not contain ssh deny rules."""
         wrapped, cleanup = wrap_argv(["echo", "hi"], mode="cc")
@@ -233,7 +233,7 @@ class TestAgentDeniedEnvKeys:
             if cleanup:
                 os.unlink(cleanup)
 
-    @patch("kiro_crew.sandbox.detect_backend", return_value="namespace")
+    @patch("kiro_crew.sandbox.backends.detect_backend", return_value="namespace")
     def test_cc_namespace_launcher_hides_aws_exposes_config(self, _mock_backend):
         wrapped, cleanup = wrap_argv(["echo", "hi"], mode="cc")
         assert cleanup is not None
@@ -283,8 +283,8 @@ class TestChannelCredentialIsolation:
         for key, value in _FAKE_CHANNEL_ENV.items():
             monkeypatch.setenv(key, value)
         monkeypatch.setenv("KIROCREW_UNRELATED_KEEPME", "keep-this-value")
-        with patch("kiro_crew.sandbox.detect_backend", return_value="none"), patch(
-            "kiro_crew.sandbox._allow_unsandboxed_exec", return_value=True
+        with patch("kiro_crew.sandbox.backends.detect_backend", return_value="none"), patch(
+            "kiro_crew.sandbox.policy._allow_unsandboxed_exec", return_value=True
         ):
             _argv, env, cleanup = sandboxed_spawn_argv(["echo", "hi"], mode="standard")
         try:
