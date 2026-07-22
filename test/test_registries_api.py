@@ -23,12 +23,12 @@ def _setup_env(tmp_path, monkeypatch):
     cfg = home / "config.json"
     cfg.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
-        "kiro_crew.apps.routes.config_path",
+        "kiro_crew.apps.registry_routes.config_path",
         lambda: str(cfg),
     )
     # Mock SEL
     mock_sel = MagicMock()
-    monkeypatch.setattr("kiro_crew.apps.routes.sel", lambda: mock_sel)
+    monkeypatch.setattr("kiro_crew.apps.registry_routes.sel", lambda: mock_sel)
     # Mock bridges/backend to avoid side effects
     import kiro_crew.apps.bridges as bridges_mod
     kiro_agents = tmp_path / "kiro-agents"

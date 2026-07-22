@@ -169,13 +169,13 @@ class TestShellBeforePython:
             sys.modules["kiro_crew.dashboard.server"] = MagicMock()
 
         with (
-            patch("kiro_crew.apps.routes.get_app", return_value=fake_app_info),
-            patch("kiro_crew.apps.routes.enable_app", return_value=MagicMock(ok=True, to_dict=lambda: {"ok": True})),
-            patch("kiro_crew.apps.routes.register_app", return_value=MagicMock(to_dict=lambda: {})),
-            patch("kiro_crew.apps.routes.start_app_backend", return_value=None),
-            patch("kiro_crew.apps.routes._run_lifecycle_script", side_effect=mock_shell),
-            patch("kiro_crew.apps.routes.on_app_enable", side_effect=mock_python),
-            patch("kiro_crew.apps.routes.sel", return_value=MagicMock()),
+            patch("kiro_crew.apps.crud.get_app", return_value=fake_app_info),
+            patch("kiro_crew.apps.crud.enable_app", return_value=MagicMock(ok=True, to_dict=lambda: {"ok": True})),
+            patch("kiro_crew.apps.crud.register_app", return_value=MagicMock(to_dict=lambda: {})),
+            patch("kiro_crew.apps.crud.start_app_backend", return_value=None),
+            patch("kiro_crew.apps.crud._run_lifecycle_script", side_effect=mock_shell),
+            patch("kiro_crew.apps.crud.on_app_enable", side_effect=mock_python),
+            patch("kiro_crew.apps.crud.sel", return_value=MagicMock()),
         ):
             from kiro_crew.apps.routes import handle_enable_app
 

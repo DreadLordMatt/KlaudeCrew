@@ -649,10 +649,9 @@ class TestReverseProxy:
         PAST the 403 guard without exercising the header-forwarding path."""
         from unittest.mock import MagicMock
 
-        import kiro_crew.apps.routes as rmod
         from kiro_crew.apps.routes import handle_app_api_proxy
 
-        monkeypatch.setattr(rmod, "_resolve_app_backend_url", lambda name: "")
+        monkeypatch.setattr("kiro_crew.apps.proxy._resolve_app_backend_url", lambda name: "")
         request = MagicMock()
         request.match_info = {"name": "proxy-app", "path": "health"}
         request.get = lambda key, default="": "proxy-app" if key == "app" else default
@@ -678,10 +677,10 @@ class TestReverseProxy:
             "schemaVersion": 2,
         }
         (app_dir / "installed.json").write_text(json.dumps(installed))
-        import kiro_crew.apps.routes as rmod
-        monkeypatch.setattr(rmod, "_resolve_app_backend_url", lambda name: "http://127.0.0.1:19999")
+        monkeypatch.setattr("kiro_crew.apps.proxy._resolve_app_backend_url", lambda name: "http://127.0.0.1:19999")
         # Clear cache so the missing secret is detected
-        rmod._app_secret_cache.clear()
+        import kiro_crew.apps.proxy as _pmod
+        _pmod._app_secret_cache.clear()
 
         async with self._make_client() as client:
             resp = await client.get("/apps/no-secret-app/api/health")
@@ -692,10 +691,9 @@ class TestReverseProxy:
     @pytest.mark.asyncio
     async def test_backend_unreachable_returns_502(self, monkeypatch):
         """Proxy to unreachable backend returns 502."""
-        import kiro_crew.apps.routes as rmod
 
         # Point to a port that's definitely not listening
-        monkeypatch.setattr(rmod, "_resolve_app_backend_url", lambda name: "http://127.0.0.1:19999")
+        monkeypatch.setattr("kiro_crew.apps.proxy._resolve_app_backend_url", lambda name: "http://127.0.0.1:19999")
 
         async with self._make_client() as client:
             resp = await client.get("/apps/proxy-app/api/health")
@@ -725,8 +723,7 @@ class TestReverseProxy:
         await site.start()
         port = runner.addresses[0][1]
 
-        import kiro_crew.apps.routes as rmod
-        monkeypatch.setattr(rmod, "_resolve_app_backend_url", lambda name: f"http://127.0.0.1:{port}")
+        monkeypatch.setattr("kiro_crew.apps.proxy._resolve_app_backend_url", lambda name: f"http://127.0.0.1:{port}")
 
         try:
             async with self._make_client() as client:
@@ -774,8 +771,7 @@ class TestReverseProxy:
         await site.start()
         port = runner.addresses[0][1]
 
-        import kiro_crew.apps.routes as rmod
-        monkeypatch.setattr(rmod, "_resolve_app_backend_url", lambda name: f"http://127.0.0.1:{port}")
+        monkeypatch.setattr("kiro_crew.apps.proxy._resolve_app_backend_url", lambda name: f"http://127.0.0.1:{port}")
 
         try:
             async with self._make_client() as client:
@@ -829,8 +825,7 @@ class TestReverseProxy:
         await site.start()
         port = runner.addresses[0][1]
 
-        import kiro_crew.apps.routes as rmod
-        monkeypatch.setattr(rmod, "_resolve_app_backend_url", lambda name: f"http://127.0.0.1:{port}")
+        monkeypatch.setattr("kiro_crew.apps.proxy._resolve_app_backend_url", lambda name: f"http://127.0.0.1:{port}")
 
         body_bytes = b'{"hello": "world", "n": 42}'
         try:
@@ -1281,11 +1276,11 @@ class TestRegistryInstallStream:
             }
 
         monkeypatch.setattr(
-            "kiro_crew.apps.routes.install_from_registry", _fake_install,
+            "kiro_crew.apps.registry_routes.install_from_registry", _fake_install,
         )
         # Stub register_app to avoid touching real bridges
         monkeypatch.setattr(
-            "kiro_crew.apps.routes.register_app",
+            "kiro_crew.apps.registry_routes.register_app",
             lambda name: type("R", (), {"to_dict": lambda self: {"ok": True}})(),
         )
 
@@ -1319,7 +1314,7 @@ class TestRegistryInstallStream:
             return {"ok": False, "name": name, "error": "build failed", "log": "\n".join(log_lines or [])}
 
         monkeypatch.setattr(
-            "kiro_crew.apps.routes.install_from_registry", _fake_install,
+            "kiro_crew.apps.registry_routes.install_from_registry", _fake_install,
         )
 
         async with self._make_client() as client:
@@ -1349,7 +1344,7 @@ class TestRegistryInstallStream:
             }
 
         monkeypatch.setattr(
-            "kiro_crew.apps.routes.install_from_registry", _fake_install,
+            "kiro_crew.apps.registry_routes.install_from_registry", _fake_install,
         )
 
         async with self._make_client() as client:
@@ -1373,7 +1368,7 @@ class TestRegistryInstallStream:
             raise RuntimeError("unexpected crash")
 
         monkeypatch.setattr(
-            "kiro_crew.apps.routes.install_from_registry", _fake_install,
+            "kiro_crew.apps.registry_routes.install_from_registry", _fake_install,
         )
 
         async with self._make_client() as client:
@@ -1448,10 +1443,10 @@ class TestRegistryInstallStreamSecurity:
             return {"ok": True, "name": name, "message": "ok", "log": "\n".join(log_lines or [])}
 
         monkeypatch.setattr(
-            "kiro_crew.apps.routes.install_from_registry", _fake_install,
+            "kiro_crew.apps.registry_routes.install_from_registry", _fake_install,
         )
         monkeypatch.setattr(
-            "kiro_crew.apps.routes.register_app",
+            "kiro_crew.apps.registry_routes.register_app",
             lambda name: type("R", (), {"to_dict": lambda self: {"ok": True}})(),
         )
 
@@ -1487,10 +1482,10 @@ class TestRegistryInstallStreamSecurity:
             return {"ok": True, "name": name, "message": "ok", "log": "\n".join(log_lines or [])}
 
         monkeypatch.setattr(
-            "kiro_crew.apps.routes.install_from_registry", _fake_install,
+            "kiro_crew.apps.registry_routes.install_from_registry", _fake_install,
         )
         monkeypatch.setattr(
-            "kiro_crew.apps.routes.register_app",
+            "kiro_crew.apps.registry_routes.register_app",
             lambda name: type("R", (), {"to_dict": lambda self: {"ok": True}})(),
         )
 
