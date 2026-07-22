@@ -29,6 +29,7 @@ from kiro_crew.notifications.bus import (
     normalize_note,
     payload_from_legacy,
 )
+from kiro_crew.notifications.rate_limit import AppRateLimiter
 from kiro_crew.safety_override import safety_override
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
@@ -1354,6 +1355,10 @@ class DashboardState:
         # Notification bus (schema v2) — notify() adapts legacy calls onto it;
         # _deliver_note is the delivery sink (log, count, broadcast, persist).
         self.notification_bus = NotificationBus(sink=self._deliver_note)
+        # Per-app push rate limiter (RFC Phase 2). State-owned (not a module
+        # global) so its lifecycle matches the gateway instance and tests get
+        # isolation for free.
+        self.notification_rate_limiter = AppRateLimiter()
         self._slots: dict[str, _ChatSlot] = {}
         self._slack_to_slot: dict[str, str] = {}  # Slack session_key → slot name
         self._slot_counter = 0

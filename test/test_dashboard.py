@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+from kiro_crew.notifications.bus import payload_from_legacy
 from kiro_crew.dashboard.state import (
     DashboardState,
     _fmt_duration,
@@ -159,6 +160,24 @@ class TestNotificationPersistence:
         assert len(loaded) == 1
         assert loaded[0]["title"] == "Test Job"
         assert "ts" in loaded[0]  # timestamp added
+
+    def test_bus_sink_is_redacting_deliver_note(self, monkeypatch, tmp_path) -> None:
+        """Wiring guarantee for Phase 2 app producers: the production bus sink
+        IS the redacting _deliver_note, so an app push through
+        notification_bus.push() gets its title/body/meta redacted there --
+        producers (e.g. the push endpoint) rely on this and do not
+        pre-redact."""
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = DashboardState(
+            sessions=MagicMock(count=0),
+            crons=MagicMock(),
+            lessons=MagicMock(),
+            start_time=0.0,
+        )
+        note = state.notification_bus.push(
+            payload_from_legacy("cron", "key AKIAIOSFODNN7EXAMPLE via bus", "b")
+        )
+        assert "AKIAIOSFODNN7EXAMPLE" not in note["title"]
 
     def test_deliver_note_redacts_nested_strings(self, monkeypatch, tmp_path) -> None:
         """Redaction descends into nested structures like action labels.
