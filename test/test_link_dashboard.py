@@ -19,6 +19,7 @@ from kiro_crew.slack.format import (
     split_message,
 )
 from kiro_crew.slack.handler import _append_footer_actions
+from kiro_crew.slack import interactions_core
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. format.py — LINK_DASHBOARD_ACTION + build_link_dashboard_button
@@ -134,8 +135,8 @@ def link_orch(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     from kiro_crew.slack import interactions
 
     orch = _make_orch_for_link()
-    monkeypatch.setattr(interactions, "_orch", orch)
-    monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(interactions_core, "_orch", orch)
+    monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: True)
     return orch
 
 
@@ -144,7 +145,7 @@ async def test_link_dashboard_creates_slot_and_imports(link_orch: MagicMock, mon
     from kiro_crew.slack import interactions
 
     mock_sel_inst = MagicMock()
-    monkeypatch.setattr(interactions, "sel", lambda: mock_sel_inst)
+    monkeypatch.setattr(interactions_core, "sel", lambda: mock_sel_inst)
 
     payload = {
         "type": "block_actions",
@@ -212,8 +213,8 @@ async def test_link_dashboard_no_dashboard_state_returns(monkeypatch: pytest.Mon
     orch = MagicMock()
     orch.slack = MagicMock()
     orch.dashboard_state = None
-    monkeypatch.setattr(interactions, "_orch", orch)
-    monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(interactions_core, "_orch", orch)
+    monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: True)
 
     payload = {
         "type": "block_actions",
@@ -260,8 +261,8 @@ async def test_link_dashboard_unauthorized_user(monkeypatch: pytest.MonkeyPatch)
     from kiro_crew.slack import interactions
 
     orch = _make_orch_for_link()
-    monkeypatch.setattr(interactions, "_orch", orch)
-    monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: False)
+    monkeypatch.setattr(interactions_core, "_orch", orch)
+    monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: False)
 
     payload = {
         "type": "block_actions",

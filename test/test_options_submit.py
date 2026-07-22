@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from kiro_crew.slack.format import OPTIONS_CHECKBOXES_ACTION, OPTIONS_SUBMIT_ACTION
+from kiro_crew.slack import interactions_core
+from kiro_crew.slack import interactions_options
 
 
 def _make_payload(selected_values: list[str], all_choices: list[str], thread_ts: str = "t1") -> dict:
@@ -80,8 +82,8 @@ class TestHandleOptionsSubmit:
     @pytest.mark.asyncio
     async def test_denied_user_returns_early(self, orch, monkeypatch):
         from kiro_crew.slack import interactions
-        monkeypatch.setattr(interactions, "_orch", orch)
-        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: False)
+        monkeypatch.setattr(interactions_core, "_orch", orch)
+        monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: False)
 
         payload = _make_payload(["A"], ["A", "B"])
         await interactions._handle_options_submit(payload, "CH1", "msg1")
@@ -94,11 +96,11 @@ class TestHandleOptionsSubmit:
         import asyncio as _aio
 
         from kiro_crew.slack import interactions
-        monkeypatch.setattr(interactions, "_orch", orch)
-        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+        monkeypatch.setattr(interactions_core, "_orch", orch)
+        monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: True)
 
         payload = _make_payload(["A", "C"], ["A", "B", "C"])
-        with patch.object(interactions, "handle_message", new_callable=AsyncMock) as mock_hm:
+        with patch.object(interactions_core, "handle_message", new_callable=AsyncMock) as mock_hm:
             await interactions._handle_options_submit(payload, "CH1", "msg1")
             await _aio.sleep(0)  # let create_task run
 
@@ -121,8 +123,8 @@ class TestHandleOptionsSubmit:
     @pytest.mark.asyncio
     async def test_ignores_empty_selection(self, orch, monkeypatch):
         from kiro_crew.slack import interactions
-        monkeypatch.setattr(interactions, "_orch", orch)
-        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+        monkeypatch.setattr(interactions_core, "_orch", orch)
+        monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: True)
 
         payload = _make_payload([], ["A", "B"])
         await interactions._handle_options_submit(payload, "CH1", "msg1")
@@ -133,7 +135,7 @@ class TestHandleOptionsSubmit:
     @pytest.mark.asyncio
     async def test_no_orch_returns_early(self, monkeypatch):
         from kiro_crew.slack import interactions
-        monkeypatch.setattr(interactions, "_orch", None)
+        monkeypatch.setattr(interactions_core, "_orch", None)
 
         payload = _make_payload(["A"], ["A", "B"])
         await interactions._handle_options_submit(payload, "CH1", "msg1")
@@ -142,11 +144,11 @@ class TestHandleOptionsSubmit:
     @pytest.mark.asyncio
     async def test_single_selection(self, orch, monkeypatch):
         from kiro_crew.slack import interactions
-        monkeypatch.setattr(interactions, "_orch", orch)
-        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+        monkeypatch.setattr(interactions_core, "_orch", orch)
+        monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: True)
 
         payload = _make_payload(["B"], ["A", "B", "C"])
-        with patch.object(interactions, "handle_message", new_callable=AsyncMock):
+        with patch.object(interactions_core, "handle_message", new_callable=AsyncMock):
             await interactions._handle_options_submit(payload, "CH1", "msg1")
 
             call_args = orch.slack.update_message.call_args
@@ -155,11 +157,11 @@ class TestHandleOptionsSubmit:
     @pytest.mark.asyncio
     async def test_duplicate_choices_deduped(self, orch, monkeypatch):
         from kiro_crew.slack import interactions
-        monkeypatch.setattr(interactions, "_orch", orch)
-        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+        monkeypatch.setattr(interactions_core, "_orch", orch)
+        monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: True)
 
         payload = _make_payload(["A"], ["A", "A", "B"])
-        with patch.object(interactions, "handle_message", new_callable=AsyncMock):
+        with patch.object(interactions_core, "handle_message", new_callable=AsyncMock):
             await interactions._handle_options_submit(payload, "CH1", "msg1")
 
             call_args = orch.slack.update_message.call_args
@@ -180,12 +182,12 @@ class TestHandleOptionsSubmit:
         import asyncio as _aio
 
         from kiro_crew.slack import interactions
-        monkeypatch.setattr(interactions, "_orch", orch)
-        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+        monkeypatch.setattr(interactions_core, "_orch", orch)
+        monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: True)
         orch.slack.update_message = AsyncMock(side_effect=Exception("API error"))
 
         payload = _make_payload(["A"], ["A", "B"])
-        with patch.object(interactions, "handle_message", new_callable=AsyncMock) as mock_hm:
+        with patch.object(interactions_core, "handle_message", new_callable=AsyncMock) as mock_hm:
             await interactions._handle_options_submit(payload, "CH1", "msg1")
             await _aio.sleep(0)  # let create_task run
             # Should fall back: post_blocks called, delete_message called
@@ -198,13 +200,13 @@ class TestHandleOptionsSubmit:
     async def test_post_blocks_failure_aborts(self, orch, monkeypatch):
         """When update fails AND post_blocks fallback also returns None, abort."""
         from kiro_crew.slack import interactions
-        monkeypatch.setattr(interactions, "_orch", orch)
-        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+        monkeypatch.setattr(interactions_core, "_orch", orch)
+        monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: True)
         orch.slack.update_message = AsyncMock(side_effect=Exception("API error"))
         orch.slack.post_blocks = AsyncMock(return_value=None)
 
         payload = _make_payload(["A"], ["A", "B"])
-        with patch.object(interactions, "handle_message", new_callable=AsyncMock) as mock_hm:
+        with patch.object(interactions_core, "handle_message", new_callable=AsyncMock) as mock_hm:
             await interactions._handle_options_submit(payload, "CH1", "msg1")
             mock_hm.assert_not_called()
 
@@ -216,8 +218,8 @@ class TestHandleOptionsSubmit:
         delete the entire digest including its 3 sections + footer context.
         """
         from kiro_crew.slack import interactions
-        monkeypatch.setattr(interactions, "_orch", orch)
-        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+        monkeypatch.setattr(interactions_core, "_orch", orch)
+        monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: True)
 
         payload = _make_payload(["A"], ["A", "B"])
         # Wrap the actions block with a section above and a context below
@@ -236,7 +238,7 @@ class TestHandleOptionsSubmit:
         }
         payload["message"]["blocks"] = [section_top, section_mid, actions_block, ctx_footer]
 
-        with patch.object(interactions, "handle_message", new_callable=AsyncMock):
+        with patch.object(interactions_core, "handle_message", new_callable=AsyncMock):
             await interactions._handle_options_submit(payload, "CH1", "msg1")
 
             orch.slack.update_message.assert_called_once()
@@ -262,8 +264,8 @@ class TestCheckboxDispatch:
     @pytest.mark.asyncio
     async def test_checkbox_toggle_is_noop(self, orch, monkeypatch):
         from kiro_crew.slack import interactions
-        monkeypatch.setattr(interactions, "_orch", orch)
-        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+        monkeypatch.setattr(interactions_core, "_orch", orch)
+        monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: True)
 
         payload = {
             "type": "block_actions",
@@ -273,7 +275,7 @@ class TestCheckboxDispatch:
             "message": {"ts": "msg1", "thread_ts": "t1"},
             "actions": [{"action_id": OPTIONS_CHECKBOXES_ACTION, "type": "checkboxes"}],
         }
-        with patch.object(interactions, "_handle_options_submit", new_callable=AsyncMock) as mock_sub:
+        with patch.object(interactions_options, "_handle_options_submit", new_callable=AsyncMock) as mock_sub:
             await interactions.dispatch(payload)
             mock_sub.assert_not_called()
 
@@ -375,14 +377,14 @@ class TestOptionsSubmitDispatch:
     async def test_submit_action_dispatches(self, orch, monkeypatch):
         from kiro_crew.slack import interactions
 
-        monkeypatch.setattr(interactions, "_orch", orch)
-        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+        monkeypatch.setattr(interactions_core, "_orch", orch)
+        monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: True)
 
         payload = _make_payload(["A"], ["A", "B"])
         payload["type"] = "block_actions"
         payload["channel"] = {"id": "CH1"}
         payload["actions"] = [{"action_id": OPTIONS_SUBMIT_ACTION, "type": "button"}]
 
-        with patch.object(interactions, "_handle_options_submit", new_callable=AsyncMock) as mock_sub:
+        with patch.object(interactions_options, "_handle_options_submit", new_callable=AsyncMock) as mock_sub:
             await interactions.dispatch(payload)
             mock_sub.assert_called_once()

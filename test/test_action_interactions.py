@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from kiro_crew.slack import interactions_core
 from kiro_crew.slack.interactions import (
     _extract_selected_value,
     _mark_button_clicked,
@@ -143,7 +144,7 @@ def orch_fixture(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     from kiro_crew.slack import interactions
 
     orch = _make_orch()
-    monkeypatch.setattr(interactions, "_orch", orch)
+    monkeypatch.setattr(interactions_core, "_orch", orch)
     return orch
 
 
@@ -159,7 +160,7 @@ async def test_action_button_happy_path(orch_fixture: MagicMock) -> None:
         value=f"action::{payload_json}", action_id="btn_deploy"
     )
 
-    with patch.object(interactions, "handle_message", new_callable=AsyncMock) as mock_hm:
+    with patch.object(interactions_core, "handle_message", new_callable=AsyncMock) as mock_hm:
         await interactions._handle_options(payload, action, channel, msg_ts)
         # Let the created task run
         await asyncio.sleep(0)
@@ -187,7 +188,7 @@ async def test_extended_element_happy_path(orch_fixture: MagicMock) -> None:
     action["selected_date"] = "2026-04-10"
     action["placeholder"] = {"text": "Pick date"}
 
-    with patch.object(interactions, "handle_message", new_callable=AsyncMock) as mock_hm:
+    with patch.object(interactions_core, "handle_message", new_callable=AsyncMock) as mock_hm:
         await interactions._handle_options(payload, action, channel, msg_ts)
         await asyncio.sleep(0)
         for t in list(orch._handler_tasks):
@@ -211,7 +212,7 @@ async def test_malformed_json_in_action_id_no_crash(orch_fixture: MagicMock) -> 
     )
     action["selected_date"] = "2026-04-10"
 
-    with patch.object(interactions, "handle_message", new_callable=AsyncMock) as mock_hm:
+    with patch.object(interactions_core, "handle_message", new_callable=AsyncMock) as mock_hm:
         # Should not raise
         await interactions._handle_options(payload, action, channel, msg_ts)
         mock_hm.assert_not_called()
@@ -227,7 +228,7 @@ async def test_non_dict_json_in_action_id_no_crash(orch_fixture: MagicMock) -> N
     )
     action["selected_date"] = "2026-04-10"
 
-    with patch.object(interactions, "handle_message", new_callable=AsyncMock) as mock_hm:
+    with patch.object(interactions_core, "handle_message", new_callable=AsyncMock) as mock_hm:
         await interactions._handle_options(payload, action, channel, msg_ts)
         mock_hm.assert_not_called()
 
@@ -244,7 +245,7 @@ async def test_post_message_failure_aborts(orch_fixture: MagicMock) -> None:
         value='action::{"k":"v"}', action_id="btn_x"
     )
 
-    with patch.object(interactions, "handle_message", new_callable=AsyncMock) as mock_hm:
+    with patch.object(interactions_core, "handle_message", new_callable=AsyncMock) as mock_hm:
         await interactions._handle_options(payload, action, channel, msg_ts)
         await asyncio.sleep(0)
         mock_hm.assert_not_called()
@@ -263,7 +264,7 @@ async def test_standard_options_post_message_failure_aborts(orch_fixture: MagicM
         value="some choice", action_id="opt_0"
     )
 
-    with patch.object(interactions, "handle_message", new_callable=AsyncMock) as mock_hm:
+    with patch.object(interactions_core, "handle_message", new_callable=AsyncMock) as mock_hm:
         await interactions._handle_options(payload, action, channel, msg_ts)
         mock_hm.assert_not_called()
 
@@ -282,7 +283,7 @@ async def test_redaction_applied_to_payload(orch_fixture: MagicMock) -> None:
         value=f"action::{evil_url}", action_id="btn_evil"
     )
 
-    with patch.object(interactions, "handle_message", new_callable=AsyncMock) as mock_hm:
+    with patch.object(interactions_core, "handle_message", new_callable=AsyncMock) as mock_hm:
         await interactions._handle_options(payload, action, channel, msg_ts)
         await asyncio.sleep(0)
         for t in list(orch._handler_tasks):
@@ -306,8 +307,8 @@ async def test_sel_audit_logged_for_action(orch_fixture: MagicMock) -> None:
     )
 
     with (
-        patch.object(interactions, "handle_message", new_callable=AsyncMock),
-        patch.object(interactions, "sel") as mock_sel,
+        patch.object(interactions_core, "handle_message", new_callable=AsyncMock),
+        patch.object(interactions_core, "sel") as mock_sel,
     ):
         await interactions._handle_options(payload, action, channel, msg_ts)
         await asyncio.sleep(0)
@@ -354,7 +355,7 @@ async def test_slack_kill_now_action_force_stops(orch_fixture: MagicMock) -> Non
         ],
     }
 
-    with patch.object(interactions, "sel") as mock_sel:
+    with patch.object(interactions_core, "sel") as mock_sel:
         mock_sel.return_value = MagicMock()
         await interactions.dispatch(payload)
 
@@ -413,7 +414,7 @@ async def test_slack_kill_now_posts_to_thread_not_session_key(
     mock_aio_session.__aenter__ = AsyncMock(return_value=mock_aio_session)
     mock_aio_session.__aexit__ = AsyncMock(return_value=None)
     with (
-        patch.object(interactions, "sel") as mock_sel,
+        patch.object(interactions_core, "sel") as mock_sel,
         patch("aiohttp.ClientSession", return_value=mock_aio_session),
     ):
         mock_sel.return_value = MagicMock()
@@ -450,7 +451,7 @@ async def test_slack_kill_now_rejects_unauthorized(orch_fixture: MagicMock) -> N
         ],
     }
 
-    with patch.object(interactions, "sel") as mock_sel:
+    with patch.object(interactions_core, "sel") as mock_sel:
         mock_sel.return_value = MagicMock()
         await interactions.dispatch(payload)
 
@@ -478,7 +479,7 @@ async def test_handle_stop_kill_now_defense_in_depth(orch_fixture: MagicMock) ->
     payload = {"response_url": "", "message": {"ts": "200.0", "thread_ts": "100.0"}}
     action = {"action_id": "stop_kill_now", "value": "session_key_123"}
 
-    with patch.object(interactions, "sel") as mock_sel:
+    with patch.object(interactions_core, "sel") as mock_sel:
         mock_sel.return_value = MagicMock()
         await interactions._handle_stop_kill_now(
             payload, action, channel="C1", msg_ts="200.0", user_id="U_RANDOM"
@@ -517,7 +518,7 @@ async def test_handle_stop_confirm_uses_stop_turn(orch_fixture: MagicMock) -> No
         ],
     }
 
-    with patch.object(interactions, "sel") as mock_sel:
+    with patch.object(interactions_core, "sel") as mock_sel:
         mock_sel.return_value = MagicMock()
         await interactions.dispatch(payload)
 
@@ -560,7 +561,7 @@ async def test_handle_stop_confirm_rejects_unauthorized(orch_fixture: MagicMock)
         ],
     }
 
-    with patch.object(interactions, "sel") as mock_sel:
+    with patch.object(interactions_core, "sel") as mock_sel:
         mock_sel.return_value = MagicMock()
         await interactions.dispatch(payload)
 
@@ -593,9 +594,9 @@ class TestHomeTabSessionResume:
         orch.slack = slack
         orch.sessions = sessions
         orch.dashboard_state = MagicMock()
-        # interactions._orch is a module-level cache that the dispatcher
+        # interactions_core._orch is the module-level cache that the dispatcher
         # consults, so swap it in.
-        interactions._orch = orch
+        interactions_core._orch = orch
         return orch, slack, sessions
 
     def _home_tab_payload(self, key: str, title: str, user_id: str) -> dict:
@@ -623,9 +624,9 @@ class TestHomeTabSessionResume:
         payload = self._home_tab_payload("dashboard:chat-1", "Pipeline triage", "UOWNER")
 
         with (
-            patch.object(interactions, "is_owner", return_value=True),
-            patch.object(interactions, "is_allowed_user", return_value=True),
-            patch.object(interactions, "sel") as mock_sel,
+            patch.object(interactions_core, "is_owner", return_value=True),
+            patch.object(interactions_core, "is_allowed_user", return_value=True),
+            patch.object(interactions_core, "sel") as mock_sel,
         ):
             mock_sel.return_value = MagicMock()
             await interactions.dispatch(payload)
@@ -651,9 +652,9 @@ class TestHomeTabSessionResume:
         payload = self._home_tab_payload("dashboard:chat-1", "Live chat", "UOWNER")
 
         with (
-            patch.object(interactions, "is_owner", return_value=True),
-            patch.object(interactions, "is_allowed_user", return_value=True),
-            patch.object(interactions, "sel") as mock_sel,
+            patch.object(interactions_core, "is_owner", return_value=True),
+            patch.object(interactions_core, "is_allowed_user", return_value=True),
+            patch.object(interactions_core, "sel") as mock_sel,
         ):
             mock_sel.return_value = MagicMock()
             await interactions.dispatch(payload)
@@ -692,7 +693,7 @@ class TestTransportApprovalAuth:
         from kiro_crew.slack import interactions
         from kiro_crew.slack.renderer import SlackApprovalDecider
 
-        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: False)
+        monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: False)
         spy = MagicMock(return_value=True)
         monkeypatch.setattr(SlackApprovalDecider, "resolve_global", spy)
 
@@ -708,7 +709,7 @@ class TestTransportApprovalAuth:
         from kiro_crew.slack import interactions
         from kiro_crew.slack.renderer import SlackApprovalDecider
 
-        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+        monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: True)
         spy = MagicMock(return_value=True)
         monkeypatch.setattr(SlackApprovalDecider, "resolve_global", spy)
 
@@ -723,11 +724,11 @@ class TestTransportApprovalAuth:
         from kiro_crew.slack import interactions
         from kiro_crew.slack.renderer import SlackApprovalDecider
 
-        monkeypatch.setattr(interactions, "is_allowed_user", lambda uid: True)
+        monkeypatch.setattr(interactions_core, "is_allowed_user", lambda uid: True)
         monkeypatch.setattr(SlackApprovalDecider, "session_for", classmethod(lambda cls, rid: "thread-1"))
         monkeypatch.setattr(SlackApprovalDecider, "resolve_global", MagicMock(return_value=True))
         grant = MagicMock()
-        monkeypatch.setattr(interactions, "add_trusted_session", grant)
+        monkeypatch.setattr(interactions_core, "add_trusted_session", grant)
 
         await interactions.dispatch(self._payload("mc_tool_trust_rq1", "U_OWNER"))
         # Trust granted for the resolved session before the approval resolves.

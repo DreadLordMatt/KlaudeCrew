@@ -21,6 +21,8 @@ from kiro_crew.slack.handler import (
     _review_drafts_pop,
     _review_drafts_set,
 )
+from kiro_crew.slack import interactions_core
+from kiro_crew.slack import interactions_review
 from kiro_crew.slack.interactions import (
     _can_act_on_review_draft,
     _delete_review_placeholder,
@@ -415,7 +417,7 @@ def mock_orch():
     orch.consolidator = MagicMock()
     orch.subagent_mgr = MagicMock()
     orch.task_runner = MagicMock()
-    with patch("kiro_crew.slack.interactions._orch", orch):
+    with patch("kiro_crew.slack.interactions_core._orch", orch):
         yield orch
 
 
@@ -424,7 +426,7 @@ def owner_patch():
     """Patch is_owner to return True for OWNER_ID only."""
     def _is_owner(uid: str) -> bool:
         return uid == OWNER_ID
-    with patch("kiro_crew.slack.interactions.is_owner", side_effect=_is_owner):
+    with patch("kiro_crew.slack.interactions_core.is_owner", side_effect=_is_owner):
         yield
 
 
@@ -433,7 +435,7 @@ def sel_mock():
     """Patch sel() to capture audit calls."""
     mock_sel = MagicMock()
     mock_log = mock_sel.log_api_access
-    with patch("kiro_crew.slack.interactions.sel", return_value=mock_sel):
+    with patch("kiro_crew.slack.interactions_core.sel", return_value=mock_sel):
         yield mock_log
 
 
@@ -441,7 +443,7 @@ def sel_mock():
 def auth_err_mock():
     """Patch _post_review_auth_error so we can assert it was invoked on denials."""
     mock = AsyncMock()
-    with patch("kiro_crew.slack.interactions._post_review_auth_error", mock):
+    with patch("kiro_crew.slack.interactions_review._post_review_auth_error", mock):
         yield mock
 
 
@@ -505,7 +507,7 @@ class TestHandleReviewApprove:
 
     @pytest.mark.asyncio
     async def test_no_orch_returns(self) -> None:
-        with patch("kiro_crew.slack.interactions._orch", None):
+        with patch("kiro_crew.slack.interactions_core._orch", None):
             await _handle_review_approve(_make_payload(), _make_action())
 
 
@@ -529,7 +531,7 @@ class TestHandleReviewCancel:
 
     @pytest.mark.asyncio
     async def test_no_orch_returns(self) -> None:
-        with patch("kiro_crew.slack.interactions._orch", None):
+        with patch("kiro_crew.slack.interactions_core._orch", None):
             await _handle_review_cancel(_make_payload(), _make_action())
 
 
@@ -639,9 +641,9 @@ class TestHandleReviewReviseSubmit:
             return task
 
         with patch(
-            "kiro_crew.slack.interactions.handle_message", new_callable=AsyncMock,
+            "kiro_crew.slack.interactions_core.handle_message", new_callable=AsyncMock,
         ) as mock_hm, patch(
-            "kiro_crew.slack.interactions.asyncio.create_task",
+            "kiro_crew.slack.interactions_review.asyncio.create_task",
             side_effect=_track_task,
         ):
             await _handle_review_revise_submit(payload)
@@ -675,5 +677,5 @@ class TestDeleteReviewPlaceholder:
 
     @pytest.mark.asyncio
     async def test_no_orch_no_crash(self) -> None:
-        with patch("kiro_crew.slack.interactions._orch", None):
+        with patch("kiro_crew.slack.interactions_core._orch", None):
             await _delete_review_placeholder("C1", "ts1")  # no crash

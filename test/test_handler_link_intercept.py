@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
+from kiro_crew.slack import interactions_core
 
 from kiro_crew.slack import handler_state as _hstate
 from kiro_crew.slack import slash_commands as _slash
