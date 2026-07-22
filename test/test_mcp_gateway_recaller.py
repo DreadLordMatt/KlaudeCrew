@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from kiro_crew.mcp_gateway import audit
 from kiro_crew.mcp_gateway import gatewayd as gw
 from kiro_crew.mcp_gateway import socketsec
 
@@ -147,6 +148,7 @@ async def _run(
         await asyncio.sleep(0)
 
     monkeypatch.setattr(gw, "SecurityEventLog", _FakeSEL)
+    monkeypatch.setattr(audit, "SecurityEventLog", _FakeSEL)
     monkeypatch.setattr(gw, "_acquire_backend", _fake_acquire)
     monkeypatch.setattr(gw, "_drain_inbox_to_stub", _fake_drain)
 
@@ -285,7 +287,7 @@ def test_caller_rekey_emits_sel_audit_event(monkeypatch: "pytest.MonkeyPatch") -
         def log_api_access(self, **kwargs: Any) -> None:
             calls.append(kwargs)
 
-    monkeypatch.setattr(gw, "SecurityEventLog", _FakeSEL)
+    monkeypatch.setattr(audit, "SecurityEventLog", _FakeSEL)
     gw._audit_caller_rekey("dashboard:chat-QA-1", "kirocrew:kirocrew-core")
 
     assert len(calls) == 1
@@ -309,7 +311,7 @@ def test_recaller_rejected_emits_denied_sel_audit_event(monkeypatch: "pytest.Mon
         def log_api_access(self, **kwargs: Any) -> None:
             calls.append(kwargs)
 
-    monkeypatch.setattr(gw, "SecurityEventLog", _FakeSEL)
+    monkeypatch.setattr(audit, "SecurityEventLog", _FakeSEL)
     gw._audit_recaller_rejected(
         "dashboard:orig-1", "kirocrew:kirocrew-core",
         "recaller pivot attempt to session_key=dashboard:evil-2",

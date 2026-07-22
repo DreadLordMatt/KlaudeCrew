@@ -82,7 +82,7 @@ class TestBackendAcquireMetric:
         from kiro_crew.mcp_gateway.gatewayd import _emit_backend_acquire_metric
 
         rec = _CapturingRecorder()
-        with patch("kiro_crew.mcp_gateway.gatewayd.get_recorder", return_value=rec):
+        with patch("kiro_crew.mcp_gateway.metrics.get_recorder", return_value=rec):
             _emit_backend_acquire_metric(12.5, warm=True)
         assert rec.histograms == [
             ("kirocrew.mcp.backend.acquire.duration", 12.5, "ms", {"warm": True})
@@ -92,7 +92,7 @@ class TestBackendAcquireMetric:
         from kiro_crew.mcp_gateway.gatewayd import _emit_backend_acquire_metric
 
         rec = _CapturingRecorder()
-        with patch("kiro_crew.mcp_gateway.gatewayd.get_recorder", return_value=rec):
+        with patch("kiro_crew.mcp_gateway.metrics.get_recorder", return_value=rec):
             _emit_backend_acquire_metric(340.0, warm=False)
         assert rec.histograms == [
             ("kirocrew.mcp.backend.acquire.duration", 340.0, "ms", {"warm": False})
@@ -111,7 +111,7 @@ class TestLazyLoadMetrics:
         from kiro_crew.mcp_gateway.gatewayd import _emit_lazy_load_metrics
 
         rec = _CapturingRecorder()
-        with patch("kiro_crew.mcp_gateway.gatewayd.get_recorder", return_value=rec):
+        with patch("kiro_crew.mcp_gateway.metrics.get_recorder", return_value=rec):
             _emit_lazy_load_metrics(250.0, warm=False)
 
         # Counter: lazy_load.count

@@ -181,7 +181,7 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "mcp_core.py::_get_ppid",
         "mcp_discovery.py::sync_to_agent_config",
         "mcp_gateway/backend.py::spawn_backend",
-        "mcp_gateway/gatewayd.py::main",
+        "mcp_gateway/cli.py::main",
         "mcp_gateway/manager.py::_spawn_once",
         "mcp_gateway/stub.py::main",
         "mcp_playwright_proxy.py::run_proxy",

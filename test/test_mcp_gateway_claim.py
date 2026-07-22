@@ -29,9 +29,10 @@ from typing import Any, Optional
 
 import pytest
 
+from kiro_crew.mcp_gateway import audit
 from kiro_crew.mcp_gateway import claim as claim_mod
 from kiro_crew.mcp_gateway import gatewayd as gw
-from kiro_crew.mcp_gateway import socketsec
+from kiro_crew.mcp_gateway import peer_identity, socketsec
 from kiro_crew.mcp_gateway import stub as stub_mod
 
 pytestmark = pytest.mark.xdist_group("mcp_gateway")
@@ -195,6 +196,7 @@ def _patch_env(monkeypatch: pytest.MonkeyPatch) -> tuple[_FakeBackend, list[dict
         await asyncio.sleep(0)
 
     monkeypatch.setattr(gw, "SecurityEventLog", _FakeSEL)
+    monkeypatch.setattr(audit, "SecurityEventLog", _FakeSEL)
     monkeypatch.setattr(gw, "_acquire_backend", _fake_acquire)
     monkeypatch.setattr(gw, "_drain_inbox_to_stub", _fake_drain)
     return fake_backend, sel_calls
@@ -367,8 +369,8 @@ def test_resolve_peer_identity_returns_key_and_full_chain(
         # stub(100) → kiro-cli(50, has file) → launcher(20) → init
         return {100: 50, 50: 20, 20: 1}.get(pid, 0)
 
-    monkeypatch.setattr(gw, "_config_dir", lambda: tmp_path)
-    monkeypatch.setattr(gw, "_ppid_fn", mock_parent_pid)
+    monkeypatch.setattr(peer_identity, "_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(peer_identity, "_ppid_fn", mock_parent_pid)
     key, chain = gw._resolve_peer_identity(100)
     assert key == session_key
     assert chain == [100, 50, 20]
@@ -382,8 +384,8 @@ def test_resolve_peer_identity_no_file_still_returns_chain(
     def mock_parent_pid(pid: int) -> int:
         return {300: 250, 250: 240, 240: 1}.get(pid, 0)
 
-    monkeypatch.setattr(gw, "_config_dir", lambda: tmp_path)
-    monkeypatch.setattr(gw, "_ppid_fn", mock_parent_pid)
+    monkeypatch.setattr(peer_identity, "_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(peer_identity, "_ppid_fn", mock_parent_pid)
     key, chain = gw._resolve_peer_identity(300)
     assert key == ""
     assert chain == [300, 250, 240]
@@ -396,7 +398,7 @@ def test_resolve_peer_identity_config_dir_error_returns_empty(
     def _boom() -> Path:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(gw, "_config_dir", _boom)
+    monkeypatch.setattr(peer_identity, "_config_dir", _boom)
     assert gw._resolve_peer_identity(999) == ("", [])
 
 
@@ -414,6 +416,7 @@ def test_claim_zero_connections_warns_and_audits(
             sel_calls.append(kwargs)
 
     monkeypatch.setattr(gw, "SecurityEventLog", _FakeSEL)
+    monkeypatch.setattr(audit, "SecurityEventLog", _FakeSEL)
     gw._CONN_INDEX.clear()
     with caplog.at_level("WARNING", logger="kiro_crew.mcp_gateway.gatewayd"):
         ack = gw._apply_claim(_claim(777777, "dashboard:chat-GHOST"))

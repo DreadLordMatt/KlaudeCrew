@@ -351,9 +351,10 @@ def test_mcp_core_host_pid_env_resolves_in_any_view(topo, monkeypatch, view) -> 
 
 def test_gatewayd_peer_identity_resolves_via_host_walk(topo, monkeypatch) -> None:
     from kiro_crew.mcp_gateway import gatewayd as gw
+    from kiro_crew.mcp_gateway import peer_identity
 
-    monkeypatch.setattr(gw, "_config_dir", lambda: topo.cfg_dir)
-    monkeypatch.setattr(gw, "_ppid_fn", topo.parent_lookup("host"))
+    monkeypatch.setattr(peer_identity, "_config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr(peer_identity, "_ppid_fn", topo.parent_lookup("host"))
 
     key, chain = gw._resolve_peer_identity(MCP_SERVER)
     assert key == SESSION_KEY
@@ -383,7 +384,7 @@ _REGISTERED_CALL_SITES: dict[str, str] = {
         "_resolve_excluded_tools — assumes HOST pids"
     ),
     "mcp_gateway/stub.py": "reader via CallerContext.from_env; register-time caller block — assumes HOST pids",
-    "mcp_gateway/gatewayd.py": (
+    "mcp_gateway/peer_identity.py": (
         "reader: SERVER-side /proc ancestry walk from the SO_PEERCRED peer pid "
         "(_resolve_peer_identity) — runs in gatewayd's own (host) pid namespace, "
         "so it is immune to client-side namespace divergence; also indexes the "

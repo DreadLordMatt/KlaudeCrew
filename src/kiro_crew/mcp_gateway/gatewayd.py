@@ -23,37 +23,86 @@ Graceful shutdown: setting the ``stop_event`` stops accepts, drains
 in-flight connection handlers up to ``_SHUTDOWN_DRAIN_SECS``, shuts the
 pool down, and unlinks the socket before return. SIGTERM/SIGINT handlers
 installed by the caller should just forward into ``stop_event.set()``.
+
+LOC refactor: the connection-handling helpers, audit emitters, sweepers,
+socket lifecycle, diagnostics, framing, peer-identity, claim/abort, metrics,
+and CLI were extracted into sibling modules under ``kiro_crew.mcp_gateway``.
+This module remains the daemon core (``run_gatewayd``, ``_handle_connection``,
+and the backend acquire/respawn helpers) and re-exports the moved names so
+``gatewayd.<symbol>`` access is preserved for importers and tests.
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import contextlib
 import json
 import logging
 import os
-import shlex
-import signal
-import socket as _socket
-import stat
-import sys
 import time
-import traceback
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from kiro_crew import platform_compat
-from kiro_crew.config.loader import config_dir as _config_dir
 from kiro_crew.executors import maintenance_executor, subprocess_executor
 from kiro_crew.mcp_caller import CallerContext
-from kiro_crew.mcp_caller import _parent_pid as _ppid_fn
 from kiro_crew.mcp_gateway import credwatch, socketsec
+from kiro_crew.mcp_gateway.audit import (
+    _audit_abort_applied,
+    _audit_caller_claimed,
+    _audit_caller_rekey,
+    _audit_peer_allowed,
+    _audit_peer_denied,
+    _audit_peer_identity_denied,
+    _audit_peer_identity_resolved,
+    _audit_pool_fallback,
+    _audit_pool_rejected,
+    _audit_prewarm_spawn,
+    _audit_recaller_rejected,
+)
 from kiro_crew.mcp_gateway.backend import Backend, BackendGone, spawn_backend
 from kiro_crew.mcp_gateway.breaker import CircuitBreaker
-from kiro_crew.mcp_gateway.manager import _scrub_sensitive_env
+from kiro_crew.mcp_gateway.claim_abort import _apply_abort, _apply_claim
+from kiro_crew.mcp_gateway.cli import (
+    _DEFAULT_SOCKET_NAME,
+    _DEFAULT_SOCKET_SUBDIR,
+    _amain,
+    _build_argparser,
+    _default_cli_socket_path,
+    main,
+)
+from kiro_crew.mcp_gateway.conn_registry import (
+    _CONN_INDEX,
+    _conn_index_add,
+    _conn_index_discard,
+    _register_pids,
+    _StubConn,
+)
+from kiro_crew.mcp_gateway.diagnostics import (
+    _ZOMBIE_PROBE_INTERVAL_SECS,
+    _collect_task_stacks,
+    _count_open_fds,
+    _read_rss_kb,
+    _snapshot_state,
+    _write_diagnostic,
+    _zombie_diagnostic,
+    _zombie_diagnostic_path,
+)
+from kiro_crew.mcp_gateway.framing import (
+    _MAX_FRAME_BYTES,
+    _REGISTER_TIMEOUT_SECS,
+    _WRITE_REPLY_TIMEOUT_SECS,
+    _jsonrpc_error,
+    _read_first_frame,
+    _TargetUnknown,
+    _write_json_line,
+)
+from kiro_crew.mcp_gateway.metrics import _emit_backend_acquire_metric, _emit_lazy_load_metrics
+from kiro_crew.mcp_gateway.peer_identity import (
+    _caller_from_register,
+    _resolve_peer_identity,
+    env_target_resolver,
+)
 from kiro_crew.mcp_gateway.pool import (
-    DRAIN_DEADLINE_SECS,
     READ_BUFFER_LIMIT_BYTES,
     BackendPool,
     BackendUnavailable,
@@ -65,69 +114,24 @@ from kiro_crew.mcp_gateway.prewarm import (
     default_hot_keys_path,
     prewarm_from_payloads,
 )
+from kiro_crew.mcp_gateway.socket_lifecycle import (
+    _SINGLETON_LOCK_SUFFIX,
+    _acquire_singleton_lock,
+    _prepare_socket_dir,
+    _probe_socket_live,
+    _remove_stale_socket,
+)
 from kiro_crew.mcp_gateway.spill import cleanup_old_spill_files
-from kiro_crew.metrics.provider import get_recorder
-from kiro_crew.sandbox import prewarm_backend
+from kiro_crew.mcp_gateway.sweepers import (
+    _drain_and_rewarm_on_credential_change,
+    _heartbeat_sweeper,
+    _hot_keys_flush_sweeper,
+    _idle_sweeper,
+    _prewarm_topup_sweeper,
+)
 from kiro_crew.sel import SecurityEventLog
 
 logger = logging.getLogger(__name__)
-
-
-def _emit_backend_acquire_metric(acquire_ms: float, *, warm: bool) -> None:
-    """Emit kirocrew.mcp.backend.acquire.duration (best-effort).
-
-    Shared by the ensure_backend + lazy-spawn paths and their unit tests so the
-    metric name / attrs live in production, not duplicated in the test
-    (tests must drive real production code).
-    """
-    try:
-        get_recorder().histogram(
-            "kirocrew.mcp.backend.acquire.duration",
-            acquire_ms,
-            unit="ms",
-            attrs={"warm": warm},
-        )
-    except Exception:  # telemetry must never break the gateway hot path
-        logger.debug("backend.acquire metric emit failed", exc_info=True)
-
-
-def _emit_lazy_load_metrics(elapsed_ms: float, *, warm: bool) -> None:
-    """Emit MCP lazy-load count + duration (+ backend.acquire), best-effort.
-
-    Shared by the lazy-spawn path and its unit test.
-    """
-    try:
-        rec = get_recorder()
-        rec.counter("kirocrew.mcp.lazy_load.count", attrs={"transport": "stdio"})
-        rec.histogram(
-            "kirocrew.mcp.lazy_load.duration",
-            elapsed_ms,
-            unit="ms",
-            attrs={"transport": "stdio"},
-        )
-    except Exception:  # telemetry must never break the gateway hot path
-        logger.debug("lazy_load metric emit failed", exc_info=True)
-    _emit_backend_acquire_metric(elapsed_ms, warm=warm)
-
-
-# Max bytes accepted for any single stub->gateway frame. Registration
-# payloads from the stub are well under 4 KiB; 1 MiB is a very loose cap
-# that still guards against a malformed or hostile peer blowing memory
-# with ``readuntil(b"\n")``.
-_MAX_FRAME_BYTES = READ_BUFFER_LIMIT_BYTES  # 1 MiB; see pool.READ_BUFFER_LIMIT_BYTES
-
-# How long a connection handler waits for the first Register message
-# before giving up on an idle client. Keeps the event loop from
-# accumulating half-open connections that never send anything.
-_REGISTER_TIMEOUT_SECS = 5.0
-
-# Upper bound on a single control/handshake reply's ``drain()`` (pong, stats,
-# registered, rejected, ready, forward-error — everything sent via
-# ``_write_json_line``). ``_REGISTER_TIMEOUT_SECS`` only bounds the inbound
-# first-frame read; without a write bound a same-uid peer that passes the
-# handshake then stops reading would pin its handler task for the daemon's
-# lifetime. Generous — a peer that cannot accept a small reply in 30s is dead.
-_WRITE_REPLY_TIMEOUT_SECS = 30.0
 
 # Graceful-shutdown grace: in-flight connection handlers get this long to
 # finish their current JSON-RPC round-trip before gatewayd cancels them
@@ -166,12 +170,6 @@ _HOT_KEYS_FLUSH_INTERVAL_SECS = 30.0
 # often, while still recovering a lost backend well within a few minutes.
 _PREWARM_TOPUP_INTERVAL_SECS = 120.0
 
-# Subdirectory under ``$XDG_RUNTIME_DIR`` (or ``/tmp`` fallback) where the
-# gateway puts its socket by default. Callers normally supply an explicit
-# path via :func:`run_gatewayd`; this default is for tests and ad-hoc runs.
-_DEFAULT_SOCKET_SUBDIR = "kirocrew"
-_DEFAULT_SOCKET_NAME = "mcp-gateway.sock"
-
 # --- Type aliases -----------------------------------------------------------
 
 #: A ``target_resolver`` takes a :class:`PoolKey` and returns the
@@ -186,26 +184,6 @@ TargetResolver = Callable[
 
 
 # --- Public API -------------------------------------------------------------
-
-
-def _default_cli_socket_path() -> Path:
-    """Fallback socket path for the CLI's ``--socket`` argparse default.
-
-    This is used ONLY when ``python -m kiro_crew.mcp_gateway.gatewayd`` is
-    invoked without an explicit ``--socket`` flag — a rare operator path,
-    typically ad-hoc debugging. The KiroCrew production path always
-    derives the socket from ``McpGatewayConfig.socket_path`` / the
-    ``default_socket_path()`` in :mod:`kiro_crew.mcp_gateway.rewriter`,
-    which returns ``$KIROCREW_HOME/mcp-gateway/gateway.sock``.
-
-    Preference order for this CLI fallback:
-    1. ``$XDG_RUNTIME_DIR/kirocrew/mcp-gateway.sock`` when XDG is set.
-    2. ``/tmp/kirocrew-mcp-gateway.sock`` fallback.
-    """
-    xdg = os.environ.get("XDG_RUNTIME_DIR")
-    if xdg:
-        return Path(xdg) / _DEFAULT_SOCKET_SUBDIR / _DEFAULT_SOCKET_NAME
-    return Path("/tmp") / f"kirocrew-{_DEFAULT_SOCKET_NAME}"
 
 
 async def run_gatewayd(
@@ -651,714 +629,7 @@ async def run_gatewayd(
         logger.info("gatewayd stopped")
 
 
-async def _idle_sweeper(
-    pool: BackendPool,
-    idle_timeout_secs: int,
-    interval: float,
-    stop_event: asyncio.Event,
-) -> None:
-    """Periodically drop idle backends from ``pool`` until ``stop_event``
-    is set. One sweep per ``interval`` seconds; sweeps themselves are
-    non-blocking.
-    """
-    try:
-        while not stop_event.is_set():
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval)
-                break  # stop_event fired — exit cleanly
-            except asyncio.TimeoutError:
-                pass
-            try:
-                evicted = await pool.evict_idle(idle_timeout_secs)
-                if evicted:
-                    logger.debug("idle sweep evicted %d backends", evicted)
-            except Exception:  # pragma: no cover — defensive
-                logger.exception("idle sweep failed; continuing")
-    except asyncio.CancelledError:
-        pass
-
-
-async def _hot_keys_flush_sweeper(
-    hot_keys: HotKeyStore,
-    interval: float,
-    stop_event: asyncio.Event,
-) -> None:
-    """Persist the hot-key tally once per ``interval`` until ``stop_event``
-    is set. The write runs via :func:`asyncio.to_thread` so the blocking
-    file IO never stalls the event loop — the on-loop path only ever
-    mutates an in-memory dict. A flush that writes nothing (no new hits) is
-    a cheap no-op inside :meth:`HotKeyStore.flush`.
-    """
-    try:
-        while not stop_event.is_set():
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval)
-                break  # stop_event fired — exit cleanly (final flush at shutdown)
-            except asyncio.TimeoutError:
-                pass
-            try:
-                wrote = await asyncio.to_thread(hot_keys.flush)
-                if wrote:
-                    logger.debug("hot-keys: flushed to %s", hot_keys.path)
-            except Exception:  # pragma: no cover — defensive
-                logger.exception("hot-keys flush failed; continuing")
-    except asyncio.CancelledError:
-        pass
-
-
-async def _prewarm_topup_sweeper(
-    schedule_prewarm: Callable[[], None],
-    interval: float,
-    stop_event: asyncio.Event,
-) -> None:
-    """Re-warm the hot set once per ``interval`` until ``stop_event`` is set.
-
-    Calls ``schedule_prewarm`` (a fire-and-forget scheduler), which runs an
-    idempotent pass: a hot key whose backend is still pooled is reused at no
-    cost, and one whose backend has died or been reclaimed is respawned. This
-    keeps the warm set populated for the daemon's whole lifetime instead of
-    only at startup. The scheduler itself is non-blocking, so the sweeper just
-    sleeps between triggers.
-    """
-    try:
-        while not stop_event.is_set():
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval)
-                break  # stop_event fired — exit cleanly
-            except asyncio.TimeoutError:
-                pass
-            try:
-                schedule_prewarm()
-            except Exception:  # pragma: no cover — defensive
-                logger.exception("prewarm top-up scheduling failed; continuing")
-    except asyncio.CancelledError:
-        pass
-
-
-async def _drain_and_rewarm_on_credential_change(
-    pool: BackendPool,
-    schedule_prewarm: Callable[[], None],
-) -> None:
-    """Handle a credential rotation via blue-green cutover: move ALL
-    active backends (including in-use, refcount>0) to the draining list,
-    then re-warm fresh backends with the new credential.
-
-    Draining backends continue serving in-flight requests but are invisible
-    to new acquires. The heartbeat sweeper reaps them when refcount drops to
-    0 or the deadline expires, whichever first. New requests immediately cut
-    over to fresh backends spawned with the rotated credential.
-
-    If the drain itself raises, we deliberately skip the re-warm: stale
-    backends may still be pooled, and re-warming would reuse + PIN them,
-    making them harder to evict next cycle. Skipping leaves recovery to the
-    next credential change or the top-up sweeper once they idle out.
-    """
-    try:
-        # First evict truly idle backends (refcount==0) immediately — they
-        # have no in-flight work and can be killed outright.
-        idle_drained = await pool.evict_idle(0.0, include_pinned=True)
-        # Move in-use backends (refcount>0) to the draining list for
-        # blue-green cutover — they finish in-flight work then get reaped.
-        moved = await pool.drain_all_to_bluegreen()
-        logger.info(
-            "credential file changed: blue-green cutover — evicted %d idle, "
-            "moved %d in-use to draining (deadline=%ds)",
-            idle_drained,
-            moved,
-            int(DRAIN_DEADLINE_SECS),
-        )
-    except Exception:
-        logger.exception("credential-change blue-green cutover failed; skipping re-warm")
-        return
-    schedule_prewarm()
-
-
-async def _heartbeat_sweeper(
-    pool: BackendPool,
-    interval: float,
-    stop_event: asyncio.Event,
-    backends_pidfile: Optional[Path] = None,
-) -> None:
-    """Probe every pooled backend's liveness once per ``interval`` and recycle
-    any that are gone or wedged, until ``stop_event`` is set.
-
-    For each backend, :meth:`Backend._heartbeat_once` classifies it:
-
-    * ``"gone"`` / ``"wedged"`` -- the classify call has already errored every
-      attached stub (via ``_broadcast_backend_gone``); the sweeper evicts the
-      backend from the pool, shuts it down, and records the death against the
-      circuit breaker so a crash loop trips it.
-    * ``"alive"`` -- record a healthy signal that closes any OPEN breaker for
-      the server.
-    * ``"idle"`` -- left untouched; the idle sweeper owns eviction.
-
-    The first sweep fires one full ``interval`` after startup, so short-lived
-    runs (tests) never trigger the periodic logic.
-    """
-    try:
-        while not stop_event.is_set():
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval)
-                break  # stop_event fired — exit cleanly
-            except asyncio.TimeoutError:
-                pass
-            try:
-                now = time.monotonic()
-                for key, backend in await pool.snapshot():
-                    try:
-                        state = await backend._heartbeat_once(now)
-                    except Exception:  # pragma: no cover — defensive
-                        logger.exception("heartbeat probe crashed for %s", key.human_readable())
-                        continue
-                    if state in ("gone", "wedged"):
-                        pool.note_backend_death(key.stable_hash(), now - backend.created_at)
-                        evicted = await pool.evict(key, expected=backend)
-                        if evicted is not None:
-                            with contextlib.suppress(Exception):
-                                await evicted.shutdown(timeout=2.0)
-                        logger.warning(
-                            "heartbeat recycled %s backend pool=%s",
-                            state,
-                            key.human_readable(),
-                        )
-                    elif state == "alive":
-                        pool.note_backend_healthy(key.stable_hash())
-                # Reap draining backends (blue-green cutover) whose refcount
-                # hit 0 or whose deadline expired.
-                reaped = await pool.reap_draining()
-                for backend in reaped:
-                    logger.info(
-                        "heartbeat reaped draining backend server=%s pid=%s "
-                        "refcount=%d (credential-rotation cutover)",
-                        backend.pool_key.server_name,
-                        backend.pid,
-                        backend.refcount,
-                    )
-                # Persist live backend pids out-of-band so the supervising
-                # manager can killpg them if it must SIGKILL a wedged gatewayd
-                # (which then never runs pool.shutdown_all()).
-                if backends_pidfile is not None:
-                    # Offload the file write: it is otherwise a synchronous
-                    # open+write+close on the event loop (every other write in
-                    # this module — _write_diagnostic, hot_keys.flush, socket
-                    # probes — is offloaded via to_thread for the same reason).
-                    pids = "\n".join(str(p) for p in pool.live_backend_pids())
-                    with contextlib.suppress(OSError):
-                        await asyncio.to_thread(backends_pidfile.write_text, pids)
-            except Exception:  # pragma: no cover — defensive
-                logger.exception("heartbeat sweep failed; continuing")
-    except asyncio.CancelledError:
-        pass
-
-
-def env_target_resolver(pool_key: PoolKey) -> Optional[tuple[str, list[str], dict[str, str], str]]:
-    """Look up ``MC_MCP_TARGET_<SERVER>`` in the process env and return the
-    spawn tuple, or ``None`` if no mapping is set.
-
-    Wire format: ``MC_MCP_TARGET_SLACK_MCP="slack-mcp --stdio"``.
-    The server name is upper-cased with ``-`` replaced by ``_``. Env is
-    inherited from the gateway process with ``KIROCREW_CHANNEL_ID``
-    overlaid when the pool key carries one — this keeps cron / send_message
-    fallbacks pointed at the correct channel on a per-pool-key basis.
-
-    Defense-in-depth: env is scrubbed through
-    :func:`kiro_crew.mcp_gateway.manager._scrub_sensitive_env` so even if
-    the gateway process somehow inherited credential vars, backends won't.
-    """
-    base = "MC_MCP_TARGET_" + pool_key.server_name.upper().replace("-", "_")
-    # Prefer the args-disambiguated entry (written by
-    # rewriter._collect_target_env) so two agents that share a server name but
-    # declare different --target-args each spawn their OWN backend command,
-    # instead of resolving to whichever agent sorted first alphabetically. Fall
-    # back to the bare server-name entry for older overlays predating the
-    # disambiguated keys.
-    spec = os.environ.get(base + "__" + pool_key.command_args_hash) or os.environ.get(base)
-    if not spec:
-        return None
-    parts = shlex.split(spec)
-    if not parts:
-        return None
-    command, *args = parts
-    env = _scrub_sensitive_env(dict(os.environ))
-    # Strip PYTHONPATH/PYTHONHOME so the KiroCrew process's own Python
-    # environment doesn't leak into Python-based MCP backends (import conflicts).
-    env.pop("PYTHONPATH", None)
-    env.pop("PYTHONHOME", None)
-    if pool_key.channel_id:
-        env["KIROCREW_CHANNEL_ID"] = pool_key.channel_id
-    return command, args, env, pool_key.work_dir
-
-
 # --- Connection handling ----------------------------------------------------
-
-
-def _audit_peer_denied(reason: str) -> None:
-    """Emit a SEL audit event for a denied gateway connection.
-
-    The peer-uid / socket-perms rejection is a security-sensitive access
-    decision, so it is recorded in the HMAC-chained security event log
-    (:mod:`kiro_crew.sel`) in addition to the WARNING log line. Wrapped
-    defensively -- an audit-log failure must never break connection handling.
-    The companion :func:`_audit_peer_allowed` records accepted connections,
-    so the SEL captures both outcomes of the peer access decision.
-    """
-    try:
-        SecurityEventLog().log_api_access(
-            caller="unverified-peer",
-            operation="mcp-gateway.connect",
-            outcome="denied",
-            source="gateway",
-            error=reason,
-        )
-    except Exception:  # pragma: no cover — audit must never break the handler
-        logger.debug("SEL audit emit for gateway denial failed", exc_info=True)
-
-
-def _audit_peer_allowed(caller: str, pool_label: str) -> None:
-    """Emit a SEL audit event for an accepted gateway connection.
-
-    Accepting a stub connection is a permission decision just like rejecting
-    one, so for a complete access-decision trail it is recorded in the
-    HMAC-chained security event log (:mod:`kiro_crew.sel`) alongside the
-    denial path. Unlike a denial -- which fires before identity is known and
-    is logged as ``unverified-peer`` -- an accept runs after the Register
-    handshake, so it carries the real caller identity. It fires once per stub
-    connection (at registration), not per request, so the volume sits far
-    below the per-tool-call events SEL already records. Wrapped defensively --
-    an audit-log failure must never break connection handling.
-    """
-    try:
-        SecurityEventLog().log_api_access(
-            caller=caller or "unknown",
-            operation="mcp-gateway.connect",
-            outcome="allowed",
-            source="gateway",
-            resources=pool_label,
-        )
-    except Exception:  # pragma: no cover — audit must never break the handler
-        logger.debug("SEL audit emit for gateway accept failed", exc_info=True)
-
-
-def _audit_caller_rekey(caller: str, pool_label: str) -> None:
-    """Emit a SEL audit event when a stub's caller identity is updated
-    mid-connection via a ``recaller`` frame (warm-pool caller repair).
-
-    Re-binding the connection's caller from key-less to a real session
-    identity is a security-relevant authorization change: it moves the
-    connection from effectively unauthorized (no ``_meta.kirocrew.caller`` on
-    forwarded tool calls, so pooled state-mutating tools are refused) to acting
-    as a specific session. Recording it in the HMAC-chained SEL gives an
-    auditable trail of identity transitions alongside the
-    :func:`_audit_peer_allowed` event from the original register — so a stub
-    that sends a spoofed recaller claiming another session leaves a record.
-    Wrapped defensively -- an audit-log failure must never break connection
-    handling.
-    """
-    try:
-        SecurityEventLog().log_api_access(
-            caller=caller or "unknown",
-            operation="mcp-gateway.caller-rekey",
-            outcome="allowed",
-            source="gateway",
-            resources=pool_label,
-        )
-    except Exception:  # pragma: no cover — audit must never break the handler
-        logger.debug("SEL audit emit for gateway caller-rekey failed", exc_info=True)
-
-
-def _audit_recaller_rejected(existing_caller: str, pool_label: str, reason: str) -> None:
-    """Emit a SEL audit event when a ``recaller`` frame is REJECTED — either a
-    pivot attempt (the connection already carries a session identity) or a
-    malformed/empty ``session_key`` claim.
-
-    Rejecting an identity claim is a security-relevant permission decision —
-    potentially a compromised or misbehaving stub — so EVERY rejection is
-    recorded in the HMAC-chained SEL alongside the accept path
-    (:func:`_audit_caller_rekey`), mirroring the :func:`_audit_peer_allowed` /
-    :func:`_audit_peer_denied` pairing. ``reason`` describes the rejection (and
-    any attempted target) for the trail. Wrapped defensively -- an audit-log
-    failure must never break connection handling.
-    """
-    try:
-        SecurityEventLog().log_api_access(
-            caller=existing_caller or "unknown",
-            operation="mcp-gateway.caller-rekey",
-            outcome="denied",
-            source="gateway",
-            resources=pool_label,
-            error=reason,
-        )
-    except Exception:  # pragma: no cover — audit must never break the handler
-        logger.debug("SEL audit emit for gateway recaller reject failed", exc_info=True)
-
-
-class _StubConn:
-    """Mutable per-connection identity holder, indexed by the owning runtime's
-    ancestor PID chain so a ``claim`` frame (claim-push) can update the caller
-    of every stub connection belonging to a just-claimed warm-pool runtime.
-
-    ``ancestor_pids`` is the stub's parent chain (nearest first) from the
-    Register frame. The connection is indexed under EVERY ancestor because
-    the PID the gateway names in a claim (``AcpClient._process.pid``) can sit
-    several layers above the stub's immediate parent (sandbox wrapper →
-    kiro-cli → kiro-cli-chat → stub); indexing a single level was found live
-    to make every claim miss.
-
-    ``caller`` starts as the register-time identity (often ``None`` for
-    warm-pool stubs) and is replaced by ``recaller`` frames (stub-initiated,
-    deny-by-default) or ``claim`` frames (gateway-initiated, replace-allowed).
-    Single event loop — no locking needed.
-    """
-
-    __slots__ = ("stub_uuid", "ancestor_pids", "pool_label", "caller")
-
-    def __init__(
-        self,
-        stub_uuid: str,
-        ancestor_pids: list[int],
-        pool_label: str,
-        caller: Optional[CallerContext],
-    ) -> None:
-        self.stub_uuid = stub_uuid
-        self.ancestor_pids = ancestor_pids
-        self.pool_label = pool_label
-        self.caller = caller
-
-
-#: Live stub connections indexed by every ancestor PID of the kiro-cli
-#: process tree that spawned the stub (``ancestor_pids`` on the Register
-#: frame; legacy single ``parent_pid`` accepted). Claim-push looks up this
-#: index to retarget every connection of a claimed runtime at once. Entries
-#: without usable PIDs (old stubs) are simply not indexed — they keep the
-#: recaller-poll fallback.
-_CONN_INDEX: dict[int, set[_StubConn]] = {}
-
-
-def _register_pids(register: dict[str, Any]) -> list[int]:
-    """Extract the ancestor PID list from a Register frame.
-
-    Accepts the current ``ancestor_pids`` list and the legacy single
-    ``parent_pid`` int. Non-int and out-of-range entries are dropped
-    (deny-by-default: garbage never lands in the index).
-    """
-    raw = register.get("ancestor_pids")
-    if not isinstance(raw, list):
-        legacy = register.get("parent_pid")
-        raw = [legacy] if legacy is not None else []
-    return [p for p in raw if isinstance(p, int) and not isinstance(p, bool) and p > 1]
-
-
-def _conn_index_add(conn: _StubConn) -> None:
-    for pid in conn.ancestor_pids:
-        _CONN_INDEX.setdefault(pid, set()).add(conn)
-
-
-def _conn_index_discard(conn: _StubConn) -> None:
-    for pid in conn.ancestor_pids:
-        conns = _CONN_INDEX.get(pid)
-        if conns is not None:
-            conns.discard(conn)
-            if not conns:
-                _CONN_INDEX.pop(pid, None)
-
-
-def _audit_caller_claimed(
-    old_caller: str, new_caller: str, pool_label: str, outcome: str, reason: str = ""
-) -> None:
-    """Emit a SEL audit event for a ``claim`` frame (claim-push identity set).
-
-    A claim frame re-binds — and unlike ``recaller``, may REPLACE — the caller
-    identity of every connection owned by the claimed runtime PID. That is an
-    authorization change and is recorded per connection in the HMAC-chained
-    SEL, mirroring :func:`_audit_caller_rekey`. The trust basis for allowing
-    replacement is the socket itself: it is uid-gated 0700, the same trust
-    level that authenticates Register frames. Wrapped defensively — an audit
-    failure must never break connection handling.
-    """
-    try:
-        SecurityEventLog().log_api_access(
-            caller=new_caller or "unknown",
-            operation="mcp-gateway.caller-claim",
-            outcome=outcome,
-            source="gateway",
-            resources=pool_label,
-            error=reason or (f"replaced caller={old_caller}" if old_caller else ""),
-        )
-    except Exception:  # pragma: no cover — audit must never break the handler
-        logger.debug("SEL audit emit for gateway caller-claim failed", exc_info=True)
-
-
-def _resolve_peer_identity(peer_pid: int) -> tuple[str, list[int]]:
-    """Walk the peer's real-PID ancestry (server-side): session key + host chain.
-
-    Runs in gatewayd's own PID namespace (real pids), so it works regardless
-    of how the stub sees the world. A single /proc walk returns both:
-
-    * the session_key from the first ancestor with a ``session_pid_<pid>.txt``
-      file (``""`` when none matches — normal at register time for a runtime
-      that has not been claimed yet), and
-    * the full HOST ancestor PID chain (peer first). The register handler
-      indexes the stub connection under this chain so a later ``claim`` frame
-      — which always carries the runtime's HOST pid — matches even when the
-      stub's self-reported ``ancestor_pids`` are namespace-local (sandbox
-      PID-namespace topology). Without the host chain in ``_CONN_INDEX`` the
-      claim-push silently updates zero connections and the stub stays
-      identity-less for life: orphan subagents with empty ``parent_session``
-      and undeliverable completion events (Mesh ticket 8abcd9fe).
-
-    The walk continues past a session-key match so the chain is complete for
-    claim matching at any ancestry level.
-    """
-    session_key = ""
-    chain: list[int] = []
-    try:
-        cfg_dir = _config_dir()
-    except Exception:
-        return "", []
-
-    pid = peer_pid
-    seen: set[int] = set()
-    while pid > 1 and pid not in seen:
-        seen.add(pid)
-        chain.append(pid)
-        if not session_key:
-            pid_file = cfg_dir / f"session_pid_{pid}.txt"
-            try:
-                if pid_file.exists():
-                    session_key = pid_file.read_text(encoding="utf-8").strip()
-            except OSError:
-                pass
-        try:
-            pid = _ppid_fn(pid)
-        except (OSError, ValueError):
-            # Target exited mid-walk (/proc/<pid>/stat gone or malformed).
-            break
-    return session_key, chain
-
-
-def _audit_peer_identity_resolved(caller: str, peer_pid: int, stub_uuid: str) -> None:
-    """SEL audit: gatewayd granted a key-less stub an identity via the
-    SO_PEERCRED + /proc-ancestry mechanism. Granting identity server-side is
-    a permission decision — leave a trail. Wrapped defensively; audit failure
-    must never break the handshake."""
-    try:
-        SecurityEventLog().log_api_access(
-            caller=caller,
-            operation="mcp-gateway.peer-identity-resolved",
-            outcome="allowed",
-            source="gateway",
-            resources=f"peer_pid={peer_pid} stub_uuid={stub_uuid}",
-        )
-    except Exception:  # pragma: no cover — audit must never break the handler
-        logger.debug("SEL audit emit for peer identity resolution failed", exc_info=True)
-
-
-def _audit_peer_identity_denied(
-    reason: str, peer_pid: int | None, stub_uuid: str
-) -> None:
-    """SEL audit: a key-less peer whose credentials could not be positively
-    attested was refused server-side identity resolution (potential
-    unauthorized identity acquisition). Deny arm of
-    :func:`_audit_peer_identity_resolved`."""
-    try:
-        SecurityEventLog().log_api_access(
-            caller="unknown",
-            operation="mcp-gateway.peer-identity-denied",
-            outcome="denied",
-            source="gateway",
-            resources=f"peer_pid={peer_pid} stub_uuid={stub_uuid} reason={reason}",
-        )
-    except Exception:  # pragma: no cover — audit must never break the handler
-        logger.debug("SEL audit emit for peer identity denial failed", exc_info=True)
-
-
-def _apply_claim(frame: dict[str, Any]) -> dict[str, Any]:
-    """Apply a ``claim`` frame to every indexed connection of the target PID.
-
-    Returns the ack frame. Validation is deny-by-default: a non-integer or
-    out-of-range pid, or an empty/malformed caller, updates nothing and is
-    audited as denied. A valid claim REPLACES existing identities (gateway-
-    trusted; this is what keeps callers correct across warm-pool re-claims).
-    """
-    raw_pid = frame.get("pid")
-    pid = raw_pid if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) else 0
-    updated_caller = _caller_from_register(frame)
-    if pid <= 1 or updated_caller is None or not updated_caller.session_key:
-        reason = f"malformed claim: pid={raw_pid!r} session_key={'' if updated_caller is None else updated_caller.session_key!r}"
-        logger.warning("claim rejected: %s", reason)
-        _audit_caller_claimed("", "", "pid-index", "denied", reason)
-        return {"type": "claim-rejected", "reason": reason}
-    conns = _CONN_INDEX.get(pid, set())
-    if not conns:
-        # A claim naming a pid with NO indexed connection is the exact silent
-        # failure that produced orphan subagents (host-pid claim vs
-        # namespace-pid index, Mesh ticket 8abcd9fe). It can also mean the
-        # runtime's stubs disconnected — either way it deserves a loud trail,
-        # not a silent {"updated": 0}.
-        logger.warning(
-            "claim matched ZERO connections: pid=%d session_key=%s — "
-            "stub identity will stay stale (possible pid-index mismatch)",
-            pid, updated_caller.session_key,
-        )
-        _audit_caller_claimed(
-            "", updated_caller.session_key, "pid-index", "noop",
-            f"claim pid={pid} matched no indexed connection",
-        )
-        return {"type": "claim-noop", "updated": 0, "connections": 0}
-    updated = 0
-    for conn in conns:
-        old_key = conn.caller.session_key if conn.caller is not None else ""
-        if old_key == updated_caller.session_key:
-            continue  # already correct — idempotent re-claim
-        conn.caller = updated_caller
-        updated += 1
-        _audit_caller_claimed(old_key, updated_caller.session_key, conn.pool_label, "allowed")
-        logger.info(
-            "stub %s claim → session_key=%s type=%s (was %s)",
-            conn.stub_uuid,
-            updated_caller.session_key,
-            updated_caller.session_type,
-            old_key or "<none>",
-        )
-    return {"type": "claimed", "updated": updated, "connections": len(conns)}
-
-
-def _audit_abort_applied(
-    pids: list[int], reason: str, outcome: str, cancelled: int = 0, stubs: int = 0
-) -> None:
-    """Emit a SEL audit event for an ``abort`` frame (gateway-authoritative
-    cancel of in-flight tool calls, with possible backend recycle).
-
-    Cancelling another runtime's in-flight tool work is a security-relevant
-    action: it terminates executing tools and may SIGKILL a pooled backend.
-    Recorded in the HMAC-chained SEL mirroring :func:`_audit_caller_claimed`.
-    Trust basis: the uid-gated 0700 socket, same as Register/Claim. Wrapped
-    defensively — an audit failure must never break the abort path.
-    """
-    try:
-        SecurityEventLog().log_api_access(
-            caller="gateway",
-            operation="mcp-gateway.abort-in-flight",
-            outcome=outcome,
-            source="gateway",
-            resources=f"pids={pids} stubs={stubs}",
-            error=f"reason={reason} cancelled={cancelled}" if outcome == "allowed" else reason,
-        )
-    except Exception:  # pragma: no cover — audit must never break the handler
-        logger.debug("SEL audit emit for gateway abort failed", exc_info=True)
-
-
-async def _apply_abort(frame: dict[str, Any], pool: "BackendPool") -> dict[str, Any]:
-    """Apply an ``abort`` frame: cancel in-flight requests for all stubs under
-    the named PIDs.
-
-    This is the gateway-authoritative abort path (Mesh-2808 Scope A):
-    on session hard-stop, the gateway sends abort for the killed runtime's
-    PIDs so gatewayd can propagate MCP cancel notifications to backends.
-    Backend recycle happens on the subsequent stub disconnect path, not here.
-    """
-    raw_pids = frame.get("pids")
-    if not isinstance(raw_pids, list):
-        _audit_abort_applied([], "missing or invalid pids", "denied")
-        return {"type": "abort-rejected", "reason": "missing or invalid pids"}
-    pids = [p for p in raw_pids if isinstance(p, int) and not isinstance(p, bool) and p > 1]
-    if not pids:
-        _audit_abort_applied([], "no valid pids", "denied")
-        return {"type": "abort-rejected", "reason": "no valid pids"}
-    reason = str(frame.get("reason", "session hard-stop"))
-
-    total_cancelled = 0
-    affected_stubs = set()
-    for pid in pids:
-        conns = _CONN_INDEX.get(pid, set())
-        for conn in list(conns):
-            affected_stubs.add(conn.stub_uuid)
-    # Find backends attached to the affected stubs and cancel their in-flight work
-    for backend in pool.all_backends():
-        for stub_uuid in affected_stubs:
-            cancelled = await backend.cancel_in_flight_for_stub(stub_uuid)
-            total_cancelled += len(cancelled)
-
-    logger.info(
-        "abort applied: pids=%r reason=%s cancelled=%d stubs=%d",
-        pids,
-        reason,
-        total_cancelled,
-        len(affected_stubs),
-    )
-    _audit_abort_applied(pids, reason, "allowed", total_cancelled, len(affected_stubs))
-    return {"type": "aborted", "cancelled": total_cancelled, "stubs": len(affected_stubs)}
-
-
-def _audit_pool_fallback(caller: str, pool_label: str, reason: str) -> None:
-    """Emit a SEL audit event when the gateway directs a stub to fall back to a
-    direct, unpooled per-session exec.
-
-    Telling a stub to run its backend outside the pool is an operational
-    degradation worth a security-audit trail: a sustained fallback storm (pool
-    chronically saturated, or a server repeatedly failing to spawn under the
-    jail/pool) is then visible in the HMAC-chained SEL, not just in the stub's
-    best-effort jsonl + the pool ``capacity_rejects`` counter. Wrapped
-    defensively -- an audit-log failure must never break connection handling.
-    """
-    try:
-        SecurityEventLog().log_api_access(
-            caller=caller or "unknown",
-            operation="mcp-gateway.fallback",
-            outcome="fallback",
-            source="gateway",
-            resources=pool_label,
-            error=reason,
-        )
-    except Exception:  # pragma: no cover — audit must never break the handler
-        logger.debug("SEL audit emit for gateway fallback failed", exc_info=True)
-
-
-def _audit_pool_rejected(caller: str, pool_label: str, reason: str) -> None:
-    """Emit a SEL audit event for a TERMINAL backend-acquire denial.
-
-    Refusing a stub a backend with no fallback (unknown target, breaker-open on
-    the legacy lazy path, or an unexpected gateway-internal error) is a
-    permission decision just like the fallback path, so for a complete
-    access-decision trail it is recorded in the HMAC-chained SEL alongside
-    :func:`_audit_pool_fallback`. Wrapped defensively -- an audit-log failure
-    must never break connection handling.
-    """
-    try:
-        SecurityEventLog().log_api_access(
-            caller=caller or "unknown",
-            operation="mcp-gateway.ensure_backend",
-            outcome="denied",
-            source="gateway",
-            resources=pool_label,
-            error=reason,
-        )
-    except Exception:  # pragma: no cover — audit must never break the handler
-        logger.debug("SEL audit emit for gateway reject failed", exc_info=True)
-
-
-def _audit_prewarm_spawn(pool_label: str) -> None:
-    """Emit a SEL audit event for a backend spawned by the warm-pool prewarmer.
-
-    Prewarming spawns a backend subprocess from a PERSISTED hot key, before any
-    stub connects, so it bypasses the Register handshake that drives
-    :func:`_audit_peer_allowed` on the live path. Spawning from persisted data
-    is a distinct security-relevant event (new pid, new time, no live peer to
-    attribute), so it gets its own access-decision record in the HMAC-chained
-    SEL. ``caller`` is the synthetic ``prewarm`` principal — there is no live
-    peer — and the volume is bounded by the prewarm count, far below per-call
-    events. Wrapped defensively: an audit-log failure must never abort a warm.
-    """
-    try:
-        SecurityEventLog().log_api_access(
-            caller="prewarm",
-            operation="mcp-gateway.prewarm-spawn",
-            outcome="allowed",
-            source="gateway",
-            resources=pool_label,
-        )
-    except Exception:  # pragma: no cover — audit must never break prewarm
-        logger.debug("SEL audit emit for prewarm spawn failed", exc_info=True)
 
 
 async def _handle_connection(
@@ -2196,541 +1467,89 @@ async def _drain_inbox_to_stub(
         raise
 
 
-def _caller_from_register(register: dict[str, Any]) -> Optional[CallerContext]:
-    """Build a :class:`CallerContext` from the stub's Register payload.
-
-    The wire format is flexible to support both short and long-lived stubs:
-
-    * Inline ``session_key`` / ``session_type`` / ``principal_id`` /
-      ``channel_id`` fields on the Register envelope (tests and the Rust
-      stub both use this shape).
-    * A nested ``caller`` dict with the same field names — matches the
-      Rust ``StubToGateway::Register { caller }`` variant.
-
-    Missing fields default to the empty string. ``from_gateway=True`` is
-    forced since this context came through the gateway register path.
-    """
-    nested = register.get("caller")
-    src: dict[str, Any] = nested if isinstance(nested, dict) else register
-    session_key = str(src.get("session_key") or src.get("sessionKey") or "")
-    if not session_key:
-        return None
-    return CallerContext(
-        session_key=session_key,
-        session_type=str(src.get("session_type") or src.get("sessionType") or "unknown"),
-        principal_id=str(src.get("principal_id") or src.get("principalId") or ""),
-        channel_id=str(src.get("channel_id") or src.get("channelId") or ""),
-        from_gateway=True,
-    )
-
-
-def _jsonrpc_error(msg: dict[str, Any], reason: str) -> dict[str, Any]:
-    """Return a JSON-RPC 2.0 error envelope mirroring the id of ``msg``.
-
-    Used to close the loop when a backend dies mid-forward: the stub sees
-    a plain error response under its own id instead of a dangling request.
-    """
-    return {
-        "jsonrpc": "2.0",
-        "id": msg.get("id"),
-        "error": {"code": -32000, "message": reason},
-    }
-
-
-class _TargetUnknown(RuntimeError):
-    """Resolver returned no mapping — treated as a clean Register rejection
-    rather than an internal error."""
-
-
-async def _read_first_frame(reader: asyncio.StreamReader) -> Optional[dict[str, Any]]:
-    """Read the first line-delimited JSON object from ``reader``.
-
-    Returns ``None`` on clean EOF before a full line arrives, on malformed
-    JSON, or on idle timeout. The caller dispatches on the ``type`` field:
-    ``"ping"`` gets a pong reply, ``"register"`` (or no type) starts the
-    handshake, anything else is logged and dropped.
-    """
-    try:
-        line = await asyncio.wait_for(
-            reader.readuntil(b"\n"),
-            timeout=_REGISTER_TIMEOUT_SECS,
-        )
-    except asyncio.IncompleteReadError as exc:
-        # Peer closed without a newline — treat as clean disconnect only
-        # if we received zero bytes; partial frames are truncation errors.
-        if exc.partial:
-            logger.warning("stub sent partial first frame (%d bytes)", len(exc.partial))
-        return None
-    except asyncio.TimeoutError:
-        logger.warning("stub idle for %.1fs without first frame; closing", _REGISTER_TIMEOUT_SECS)
-        return None
-    except asyncio.LimitOverrunError:
-        logger.warning("stub first frame exceeded %d bytes; closing", _MAX_FRAME_BYTES)
-        return None
-
-    if len(line) > _MAX_FRAME_BYTES:
-        logger.warning("stub first frame too large: %d bytes", len(line))
-        return None
-
-    try:
-        msg = json.loads(line.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        logger.warning("stub first frame not valid JSON: %s", exc)
-        return None
-
-    if not isinstance(msg, dict):
-        logger.warning("stub first frame not a JSON object: got %s", type(msg).__name__)
-        return None
-    return msg
-
-
-async def _write_json_line(writer: asyncio.StreamWriter, obj: Any) -> None:
-    """Serialize ``obj`` as one JSON line with a bounded ``drain()``.
-
-    Backpressure (Phase-0 #2): a misbehaving peer that stops reading can
-    otherwise let the kernel socket buffer fill silently, deadlocking the
-    handler. ``drain()`` yields to the scheduler until the write is
-    accepted or the peer's half of the connection drops.
-
-    The drain is bounded by ``_WRITE_REPLY_TIMEOUT_SECS``: ``_REGISTER_TIMEOUT_SECS``
-    only wraps the inbound first-frame read, so a same-uid peer that passes the
-    handshake then stops reading could otherwise pin this handler task
-    indefinitely on the registered/rejected/pong/stats reply.
-    """
-    payload = json.dumps(obj, separators=(",", ":")).encode("utf-8") + b"\n"
-    lock = getattr(writer, "_mc_write_lock", None)
-    guard: Any = lock if lock is not None else contextlib.nullcontext()
-    async with guard:
-        writer.write(payload)
-        try:
-            await asyncio.wait_for(writer.drain(), timeout=_WRITE_REPLY_TIMEOUT_SECS)
-        except (ConnectionError, asyncio.TimeoutError):
-            # Peer hung up or stopped reading mid-reply; nothing productive to do.
-            return
-
-
-# --- Utilities --------------------------------------------------------------
-
-
-def _prepare_socket_dir(socket_path: Path) -> None:
-    socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    # mkdir's mode is masked by umask and is NOT applied to a pre-existing
-    # directory; re-chmod so the documented owner-only (0700) containing-dir
-    # guarantee holds even when $KIROCREW_HOME/mcp-gateway already existed
-    # with looser permissions (matches how the socket is chmod'd to 0600).
-    try:
-        socket_path.parent.chmod(0o700)
-    except OSError:
-        pass
-
-
-_SINGLETON_LOCK_SUFFIX = ".lock"
-
-
-def _acquire_singleton_lock(socket_path: Path) -> Optional[int]:
-    """Acquire an exclusive, non-blocking advisory lock guarding ``socket_path``.
-
-    Returns the held lock fd on success, or ``None`` if another live gatewayd
-    already holds it. The fd must stay open for the daemon's lifetime; the
-    kernel releases the flock automatically when the holder dies, so there is
-    no stale-lock failure mode and the guard is race-free even when multiple
-    daemons start in the same instant (only one wins ``LOCK_EX``).
-
-    ``O_CLOEXEC`` keeps the lock fd from leaking into the MCP backend
-    subprocesses gatewayd spawns — otherwise a backend would hold the lock
-    open past the daemon's own exit and block the next daemon from starting.
-    """
-    lock_path = socket_path.parent / (socket_path.name + _SINGLETON_LOCK_SUFFIX)
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
-    if not platform_compat.try_acquire_lock(fd, exclusive=True):
-        os.close(fd)
-        return None
-    return fd
-
-
-async def _remove_stale_socket(socket_path: Path) -> None:
-    """Remove a socket left behind by a prior crash.
-
-    Distinguishes a *real* stale socket (file that is not a socket, or a
-    socket with no listener) from a live peer (another daemon currently
-    bound). Refuses to unlink anything that looks like a live socket —
-    ``asyncio.start_unix_server`` will fail later with ``EADDRINUSE``,
-    which is the correct user-visible error.
-
-    The blocking ``socket.connect()`` probe is offloaded to a thread via
-    :func:`asyncio.to_thread` so the event loop is never blocked on a
-    potentially slow or hanging unix-socket connect.
-    """
-    try:
-        st = os.stat(socket_path)
-    except FileNotFoundError:
-        return
-    # S_IFSOCK == 0o140000. For non-socket files this is operator error;
-    # removing them is not our call.
-    if not stat.S_ISSOCK(st.st_mode):
-        logger.warning(
-            "path %s exists and is not a socket (mode=%o); leaving in place",
-            socket_path,
-            st.st_mode,
-        )
-        return
-    # Probe whether the socket is live before unlinking. If connect
-    # succeeds, another daemon is actively listening — don't unlink;
-    # let asyncio.start_unix_server fail with EADDRINUSE instead.
-    # The blocking connect is offloaded to a thread so the event loop
-    # is never stalled.
-    is_live = await asyncio.to_thread(_probe_socket_live, socket_path)
-    if is_live:
-        logger.warning(
-            "socket %s is live (connect succeeded); refusing to unlink — "
-            "another gatewayd instance may be running",
-            socket_path,
-        )
-        return
-    try:
-        socket_path.unlink()
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        logger.warning("could not remove stale socket %s: %s", socket_path, exc)
-
-
-def _probe_socket_live(socket_path: Path) -> bool:
-    """Blocking probe: return True if a listener is bound to ``socket_path``.
-
-    Designed to run inside :func:`asyncio.to_thread` so the event loop is
-    never blocked by the connect syscall.
-    """
-    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-    try:
-        s.settimeout(1.0)
-        s.connect(str(socket_path))
-        return True
-    except (ConnectionRefusedError, OSError):
-        return False
-    finally:
-        s.close()
-
-
-# --- Zombie diagnostic ------------------------------------------------------
-
-# Chronic post-M5 issue: gatewayd's accept coroutine has been observed to
-# exit silently every ~2-3 h on the dev soak. The existing heartbeat only
-# proves the heartbeat task itself is alive; it does not prove the server
-# is still accepting connections. The diagnostic task below closes that
-# gap: it polls ``server.is_serving()`` and, on divergence from the
-# expected "serving while stop_event unset" invariant, dumps a full
-# post-mortem to a JSONL side-channel so the next event has a root-cause
-# paper trail.
-
-# Interval between diagnostic snapshots. A 30 s sample rate catches the
-# ~90 s window between zombie death and watchdog kill without generating
-# excessive log volume in the healthy case.
-_ZOMBIE_PROBE_INTERVAL_SECS = 30.0
-
-
-def _zombie_diagnostic_path() -> Path:
-    """Return the JSONL file path that receives zombie post-mortems.
-
-    Lives next to the soak/gatewayd logs under
-    ``$KIROCREW_HOME/logs/gatewayd_zombie_diagnostic.jsonl`` so a single
-    ``tail -f`` follows both heartbeat (gatewayd.log) and any detected
-    zombie state.
-    """
-    mc_home = os.environ.get("KIROCREW_HOME") or os.path.expanduser("~/.kirocrew")
-    return Path(mc_home) / "logs" / "gatewayd_zombie_diagnostic.jsonl"
-
-
-def _count_open_fds() -> int:
-    """Return the number of open file descriptors for this process.
-
-    FD exhaustion is one of the four hypothesised zombie causes; tracking
-    the count per snapshot lets us confirm or eliminate that path without
-    deploying a separate tracer.
-    """
-    try:
-        return len(os.listdir("/proc/self/fd"))
-    except OSError:
-        return -1
-
-
-def _read_rss_kb() -> int:
-    """Return RSS in kilobytes from ``/proc/self/status`` or ``-1``."""
-    try:
-        with open("/proc/self/status", "r", encoding="ascii") as fh:
-            for line in fh:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1])
-    except (OSError, ValueError, IndexError):
-        pass
-    return -1
-
-
-def _collect_task_stacks() -> list[dict[str, Any]]:
-    """Snapshot every live asyncio task with name + current stack.
-
-    Used on zombie detection — gives the post-mortem enough context to
-    tell whether a specific coroutine (backend pump, stub handler, idle
-    sweeper) wedged the event loop versus an external cause (FD leak,
-    blocking syscall, etc.).
-    """
-    out: list[dict[str, Any]] = []
-    for task in asyncio.all_tasks():
-        frames: list[str] = []
-        try:
-            for frame in task.get_stack(limit=10):
-                frames.append(
-                    "{}:{} in {}".format(
-                        frame.f_code.co_filename,
-                        frame.f_lineno,
-                        frame.f_code.co_name,
-                    )
-                )
-        except Exception:  # pragma: no cover — defensive
-            frames = ["<stack unavailable>"]
-        out.append(
-            {
-                "name": task.get_name(),
-                "done": task.done(),
-                "cancelled": task.cancelled(),
-                "stack": frames,
-            }
-        )
-    return out
-
-
-def _snapshot_state(
-    *,
-    server: Optional[asyncio.base_events.Server],
-    pool: BackendPool,
-    connections: set[asyncio.Task[None]],
-    task_count: int,
-) -> dict[str, Any]:
-    """Gather a single health sample used by the diagnostic loop."""
-    is_serving: Optional[bool]
-    try:
-        is_serving = bool(server.is_serving()) if server is not None else None
-    except Exception:
-        is_serving = None
-    return {
-        "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "ts_epoch": time.time(),
-        "is_serving": is_serving,
-        "task_count": task_count,
-        "fd_count": _count_open_fds(),
-        "rss_kb": _read_rss_kb(),
-        "pool_size": len(pool._backends),  # type: ignore[attr-defined]
-        "connections_in_flight": len(connections),
-    }
-
-
-def _write_diagnostic(path: Path, record: dict[str, Any]) -> None:
-    """Append one JSONL line to the diagnostic side-channel.
-
-    Never raises — the diagnostic task is defensive enough that a missing
-    directory or EROFS on the log volume must not crash gatewayd itself.
-    """
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
-    except OSError as exc:  # pragma: no cover — defensive
-        logger.warning("zombie diagnostic write failed: %s", exc)
-
-
-async def _zombie_diagnostic(
-    server: asyncio.base_events.Server,
-    pool: BackendPool,
-    connections: set[asyncio.Task[None]],
-    stop_event: asyncio.Event,
-) -> None:
-    """Polling watchdog that captures accept-loop death.
-
-    Every :data:`_ZOMBIE_PROBE_INTERVAL_SECS` seconds:
-
-    1. Collect a health snapshot via :func:`_snapshot_state`.
-    2. Append the snapshot to the diagnostic JSONL under the ``probe`` tag
-       so there is a continuous baseline to correlate against.
-    3. If ``server.is_serving()`` is ``False`` while ``stop_event`` is
-       still unset, the accept loop has died silently — dump every live
-       task stack, log at error level, and set ``stop_event`` so the
-       process exits cleanly and the watchdog respawns us.
-    """
-    diag_path = _zombie_diagnostic_path()
-    try:
-        while not stop_event.is_set():
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=_ZOMBIE_PROBE_INTERVAL_SECS)
-                return  # stop_event fired — clean exit
-            except asyncio.TimeoutError:
-                pass
-
-            # asyncio.all_tasks() must be read ON the loop (it needs the
-            # running loop); capture it here before offloading the blocking
-            # /proc walk — calling it inside the worker thread raises
-            # RuntimeError and would kill this watchdog on its first probe.
-            task_count = len(asyncio.all_tasks())
-            snap = await asyncio.to_thread(
-                _snapshot_state,
-                server=server,
-                pool=pool,
-                connections=connections,
-                task_count=task_count,
-            )
-            snap["tag"] = "probe"
-            await asyncio.to_thread(_write_diagnostic, diag_path, snap)
-
-            if snap["is_serving"] is False and not stop_event.is_set():
-                snap["tag"] = "zombie_detected"
-                snap["tasks"] = _collect_task_stacks()
-                snap["traceback"] = traceback.format_stack()
-                await asyncio.to_thread(_write_diagnostic, diag_path, snap)
-                logger.error(
-                    "zombie gatewayd detected: is_serving=False while stop_event unset; "
-                    "tasks=%d fd=%d rss_kb=%d — diagnostic dumped to %s; setting stop_event",
-                    snap["task_count"],
-                    snap["fd_count"],
-                    snap["rss_kb"],
-                    diag_path,
-                )
-                stop_event.set()
-                return
-    except asyncio.CancelledError:
-        pass
-
-
-# --- CLI entry point --------------------------------------------------------
-
-
-def _build_argparser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="mc-mcp-gatewayd",
-        description="KiroCrew MCP gateway daemon — pools MCP backends across sessions",
-    )
-    p.add_argument(
-        "--socket",
-        dest="socket",
-        default=str(_default_cli_socket_path()),
-        help="Unix socket path to bind. Default: $XDG_RUNTIME_DIR/kirocrew/mcp-gateway.sock",
-    )
-    p.add_argument(
-        "--max-backends",
-        dest="max_backends",
-        type=int,
-        default=20,
-        help="Maximum concurrent backend subprocesses. LRU-evicted beyond this.",
-    )
-    p.add_argument(
-        "--idle-timeout-secs",
-        dest="idle_timeout_secs",
-        type=int,
-        default=300,
-        help="Seconds an unattached backend is kept before the idle sweeper drains it.",
-    )
-    p.add_argument(
-        "--prewarm-count",
-        dest="prewarm_count",
-        type=int,
-        default=0,
-        help="Number of hottest observed (agent x server x channel) backends to "
-        "spawn at startup, before the first stub connects, to remove the "
-        "cold-after-restart new-chat latency. 0 (default) disables prewarming.",
-    )
-    p.add_argument(
-        "--credential-watch-path",
-        dest="credential_watch_paths",
-        action="append",
-        default=[],
-        metavar="PATH",
-        help="Credential file to watch for content changes (repeatable). On a "
-        "real rotation, all pooled backends are drained via a blue-green "
-        "cutover and respawned with the fresh credential. No flag "
-        "(default) disables the watcher entirely.",
-    )
-    p.add_argument(
-        "--log-level",
-        dest="log_level",
-        default=os.environ.get("MC_GATEWAYD_LOG", "INFO"),
-        help="Python logging level (DEBUG, INFO, WARNING, ...).",
-    )
-    return p
-
-
-async def _amain(argv: Optional[list[str]] = None) -> int:
-    args = _build_argparser().parse_args(argv)
-    logging.basicConfig(
-        level=args.log_level.upper(),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        stream=sys.stderr,
-    )
-    stop_event = asyncio.Event()
-
-    loop = asyncio.get_running_loop()
-
-    # Catch exceptions that slip past per-task handlers — e.g. a
-    # fire-and-forget coroutine that blows up without ``await``. Without
-    # this hook they get logged through asyncio's default handler only
-    # if the task is awaited; zombie modes have been traced to exactly
-    # this path.
-    def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
-        exc = context.get("exception")
-        msg = context.get("message", "unhandled event loop error")
-        if exc is not None:
-            logger.error("gatewayd event-loop exception: %s", msg, exc_info=exc)
-        else:
-            logger.error("gatewayd event-loop error: %s | context=%r", msg, context)
-
-    loop.set_exception_handler(_loop_exception_handler)
-
-    # Heartbeat: emit a line every 60s so a silent stdout stream becomes
-    # visible proof that the daemon has zombified. Also logs pool stats
-    # to give shape to load growth between heartbeats.
-    async def _heartbeat() -> None:
-        while not stop_event.is_set():
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=60.0)
-            except asyncio.TimeoutError:
-                logger.info("gatewayd heartbeat: alive, stop_event=unset")
-            except asyncio.CancelledError:
-                return
-
-    hb_task = asyncio.create_task(_heartbeat(), name="mcp-gateway-heartbeat")
-
-    # Prewarm sandbox probe cache so backends spawned on-loop never hit cold path
-    prewarm_backend()
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            loop.add_signal_handler(sig, stop_event.set)
-        except (NotImplementedError, RuntimeError):
-            pass
-
-    try:
-        await run_gatewayd(
-            args.socket,
-            max_backends=args.max_backends,
-            idle_timeout_secs=args.idle_timeout_secs,
-            stop_event=stop_event,
-            prewarm_count=args.prewarm_count,
-            credential_watch_paths=[Path(p) for p in args.credential_watch_paths],
-        )
-    except Exception:
-        logger.exception("gatewayd exited with unhandled exception")
-        return 1
-    finally:
-        hb_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await hb_task
-    return 0
-
-
-def main() -> None:
-    """Sync entry point for ``python -m kiro_crew.mcp_gateway.gatewayd``."""
-    try:
-        rc = asyncio.run(_amain())
-    except KeyboardInterrupt:
-        rc = 0
-    sys.exit(rc)
+# --- Backward-compatible public surface -------------------------------------
+# gatewayd.py was split into helper submodules (LOC refactor). ``__all__``
+# declares the module's public API AND marks the re-exported helpers (imported
+# above purely so ``gatewayd.<symbol>`` and the test suite keep working) as
+# used, so linters do not flag them. Names are grouped by their new home.
+__all__ = [
+    # daemon core (defined here)
+    "run_gatewayd",
+    "_handle_connection",
+    "_acquire_backend",
+    "_respawn_backend_for_stub",
+    "_drain_inbox_to_stub",
+    "TargetResolver",
+    "_SHUTDOWN_DRAIN_SECS",
+    "_HEARTBEAT_SWEEP_INTERVAL_SECS",
+    "_CREDENTIAL_WATCH_INTERVAL_SECS",
+    "_HOT_KEYS_FLUSH_INTERVAL_SECS",
+    "_PREWARM_TOPUP_INTERVAL_SECS",
+    # metrics
+    "_emit_backend_acquire_metric",
+    "_emit_lazy_load_metrics",
+    # framing
+    "_MAX_FRAME_BYTES",
+    "_REGISTER_TIMEOUT_SECS",
+    "_WRITE_REPLY_TIMEOUT_SECS",
+    "_jsonrpc_error",
+    "_TargetUnknown",
+    "_read_first_frame",
+    "_write_json_line",
+    # audit
+    "_audit_peer_denied",
+    "_audit_peer_allowed",
+    "_audit_caller_rekey",
+    "_audit_recaller_rejected",
+    "_audit_caller_claimed",
+    "_audit_peer_identity_resolved",
+    "_audit_peer_identity_denied",
+    "_audit_abort_applied",
+    "_audit_pool_fallback",
+    "_audit_pool_rejected",
+    "_audit_prewarm_spawn",
+    # conn_registry
+    "_StubConn",
+    "_CONN_INDEX",
+    "_register_pids",
+    "_conn_index_add",
+    "_conn_index_discard",
+    # peer_identity
+    "env_target_resolver",
+    "_resolve_peer_identity",
+    "_caller_from_register",
+    # sweepers
+    "_idle_sweeper",
+    "_hot_keys_flush_sweeper",
+    "_prewarm_topup_sweeper",
+    "_drain_and_rewarm_on_credential_change",
+    "_heartbeat_sweeper",
+    # socket_lifecycle
+    "_prepare_socket_dir",
+    "_acquire_singleton_lock",
+    "_remove_stale_socket",
+    "_probe_socket_live",
+    "_SINGLETON_LOCK_SUFFIX",
+    # diagnostics
+    "_zombie_diagnostic",
+    "_zombie_diagnostic_path",
+    "_count_open_fds",
+    "_read_rss_kb",
+    "_collect_task_stacks",
+    "_snapshot_state",
+    "_write_diagnostic",
+    "_ZOMBIE_PROBE_INTERVAL_SECS",
+    # claim_abort
+    "_apply_claim",
+    "_apply_abort",
+    # cli
+    "main",
+    "_amain",
+    "_build_argparser",
+    "_default_cli_socket_path",
+    "_DEFAULT_SOCKET_SUBDIR",
+    "_DEFAULT_SOCKET_NAME",
+]
 
 
 if __name__ == "__main__":
