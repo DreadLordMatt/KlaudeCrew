@@ -41,7 +41,7 @@ import type { DisplayItem, TurnItem } from './chat/types'
 import { useScrollManager } from './chat/useScrollManager'
 import { useVirtualChat } from '../hooks/virtualizer/useVirtualChat'
 import { parseFiles, buildRelMap, prepareSendPayload } from '../utils/fileTokens'
-import { type PasteBlock, expandAll as expandPasteTokens, findTokenRanges, pruneBlocks as pruneBlocksUtil, saveStoredPaste } from '../utils/pasteTokens'
+import { type PasteBlock, expandAll as expandPasteTokens, findTokenRanges, pruneBlocks as pruneBlocksUtil, saveStoredPaste, recollapsePastes } from '../utils/pasteTokens'
 import { extractPromptFromToken, extractSlackContextFromToken } from '../utils/tokenPrompt'
 // Roles that fold into a collapsible group in the turn view. Thinking is NOT
 // here: it carries real content and renders as its own standalone block (a
@@ -248,8 +248,25 @@ function renderUserContentInner(content: string, meta: Record<string, unknown> |
 
   if (!pastes.length) return <>{knowledgeBadge}{renderFileSegment(content, meta, onFileOpen, 'seg')}</>
 
-  const ranges = findTokenRanges(content, pastes)
-  if (!ranges.length) return <>{knowledgeBadge}{renderFileSegment(content, meta, onFileOpen, 'seg')}</>
+  // History load re-serves the fully-EXPANDED content (what the LLM saw), so a
+  // message whose bubble was a `[ Paste #N ]` chip when sent comes back as the
+  // raw paste text with no token in it. If mergePreservedPastes couldn't
+  // re-collapse it (no optimistic bubble, side-table entry evicted/missing),
+  // handing that raw text — potentially hundreds of KB / tens of thousands of
+  // lines — to renderFileSegment → MarkdownRenderer parses and lays it out on
+  // the main thread and freezes the tab. Re-collapse deterministically from the
+  // blocks that travel with the message so the chip is restored regardless of
+  // external state. See recollapsePastes / Mesh big-paste freeze.
+  let text = content
+  let ranges = findTokenRanges(text, pastes)
+  if (!ranges.length) {
+    const collapsed = recollapsePastes(content, pastes)
+    if (collapsed !== content) {
+      text = collapsed
+      ranges = findTokenRanges(text, pastes)
+    }
+  }
+  if (!ranges.length) return <>{knowledgeBadge}{renderFileSegment(text, meta, onFileOpen, 'seg')}</>
 
   // Paste chips are inline by nature, so to keep them flowing with the
   // surrounding text (e.g. "hey [chip] thanks"), render each text segment
@@ -264,17 +281,17 @@ function renderUserContentInner(content: string, meta: Record<string, unknown> |
     // its expanded block absorb the line-break that ChatInput.handlePaste
     // forces around the token. Without this, expanding the chip adds an extra
     // visible line (its own block-level display + the still-rendered \n).
-    const trimStart = content[r.start - 1] === '\n' ? r.start - 1 : r.start
-    const trimEnd = content[r.end] === '\n' ? r.end + 1 : r.end
+    const trimStart = text[r.start - 1] === '\n' ? r.start - 1 : r.start
+    const trimEnd = text[r.end] === '\n' ? r.end + 1 : r.end
     if (trimStart > lastIdx) {
-      const seg = content.slice(lastIdx, trimStart)
+      const seg = text.slice(lastIdx, trimStart)
       if (seg) out.push(renderInlineSegment(seg, meta, onFileOpen, `t${i}`))
     }
     out.push(<PastedChip key={`p${i}-${r.block.id}`} block={r.block} />)
     lastIdx = trimEnd
   })
-  if (lastIdx < content.length) {
-    const seg = content.slice(lastIdx)
+  if (lastIdx < text.length) {
+    const seg = text.slice(lastIdx)
     if (seg) out.push(renderInlineSegment(seg, meta, onFileOpen, 'tend'))
   }
   return knowledgeBadge ? <>{knowledgeBadge}{out}</> : out
@@ -579,14 +596,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
 
   const { agents: installedAgents, defaultAgent } = useAgents(refreshTrigger)
   const { open: agentDropdown, setOpen: setAgentDropdown, filter: agentFilter, setFilter: setAgentFilter, dropdownRef: agentDropdownRef, inputRef: agentInputRef, filtered: filteredAgentsByName } = useFilteredDropdown(installedAgents)
-  // Also match project folder name in filter
-  const filteredAgents = agentFilter
-    ? installedAgents.filter(a => {
-        const lf = agentFilter.toLowerCase()
-        const folderName = (a.project_name || a.project_path?.split('/').pop() || '').toLowerCase()
-        return a.name.toLowerCase().includes(lf) || folderName.includes(lf)
-      })
-    : filteredAgentsByName
+  const filteredAgents = filteredAgentsByName
   const { data: availableModels = [{ name: 'auto', description: 'Default' }] } = useQuery({
     queryKey: ['available-models', provider.id],
     queryFn: async () => {
@@ -604,9 +614,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     filteredCount: filteredAgents.length,
     onEnterSingleMatch: () => {
       const a = filteredAgents[0]
-      const isNotFound = a.project_state === 'not_found'
-      const isOtherProject = a.source === 'project' && a.project_path !== (currentSlot?.project || undefined)
-      if (!isNotFound && !isOtherProject) { switchAgent(a.name, a.project_path); setAgentDropdown(false) }
+      if (a) { switchAgent(a.name); setAgentDropdown(false) }
     },
     closeToTrigger: () => setAgentDropdown(false),
   })
@@ -1116,20 +1124,18 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   const sourceLinks = sourceLinkIndex.current.update(activeSlot, messages)
   const [selectedSourceUrl, setSelectedSourceUrl] = useState('')
 
-  // Auto-open the per-slot Changes view only for newly detected source URLs.
-  // Seen state survives panel close, slot switches, route remounts, and reloads,
-  // so a historical PR cannot override a persisted panel dismissal.
+  // Add and focus the per-slot Changes tab for newly detected source URLs,
+  // but leave panel visibility under explicit user control.
   const [seenSourceUrls] = useState(loadSeenPullRequestLinks)
   useEffect(() => {
     if (recordNewPullRequestLinks(seenSourceUrls, activeSlot, sourceLinks)) {
       persistSeenPullRequestLinks(seenSourceUrls)
       tabsCtl.openView('changes')
-      dispatch(openActivityPanel())
     }
-    // tabsCtl/open state are intentionally not dependencies: this effect reacts
-    // only to source discovery, not to panel focus or close operations.
+    // tabsCtl is intentionally not a dependency: this effect reacts only to
+    // source discovery, not tab focus or panel visibility changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSlot, sourceLinks, dispatch, seenSourceUrls])
+  }, [activeSlot, sourceLinks, seenSourceUrls])
 
   useEffect(() => {
     // An uncached slot temporarily has no messages while its history hydrates.
@@ -1277,18 +1283,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     // changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabsCtl, dispatch, search.close, handleFileOpen])
-
-  // Save a document chip from chat into the artifact library (materialize +
-  // pin). Fire-and-forget; the artifact library refetches on its own.
-  const handleSaveDoc = useCallback((path: string) => {
-    // Return the promise (and rethrow) so the DocChip can revert its optimistic
-    // "Starred" state if the materialize fails, rather than claiming success.
-    return api.materializeArtifact(path, activeSlotRef.current ?? undefined).catch((e) => {
-      // eslint-disable-next-line no-console -- surface save failures to the dev console
-      console.warn('save document to library failed', e)
-      throw e
-    })
-  }, [])
 
   // Auto-surface files modified by the agent (carried in m.meta.file_changes)
   // into the activity Files tab so the user sees a unified list. Skip files
@@ -2069,24 +2063,21 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     const n = store.getState().notifications.items.find(x => x.approval_id === aid)
     if (n) dispatch(removeNotificationByTs(n.ts))
   }, [dispatch])
-  const switchAgent = useCallback(async (agentName: string, projectPath?: string) => {
+  const switchAgent = useCallback(async (agentName: string) => {
     if (!activeSlot) {
       setPendingAgent(agentName)
-      // Preserve project context so it's applied via chatSlotProject after slot creation.
-      // Always set (even empty) so switching to a global agent clears stale project state.
-      setPendingProject(projectPath || '')
       const mc = installedAgents.find(a => a.name === agentName)
       const templateName = provider.resolveAgentTemplate(mc || { name: agentName })
       queryClient.fetchQuery({ queryKey: ['resolved-model', templateName, provider.id], queryFn: () => provider.resolveModel(templateName) })
         .then(m => setPendingModel(m)).catch(() => setPendingModel(''))
       return
     }
-    await api.chatSlotAgent(activeSlot, agentName, projectPath)
+    await api.chatSlotAgent(activeSlot, agentName)
     setAgentDropdown(false)
     // queryClient, setAgentDropdown, and the setPending* setters are all stable
     // (react-query client / useState setters / useCallback([])), so listing them
     // satisfies the linter without re-creating this callback.
-  }, [activeSlot, installedAgents, provider, queryClient, setAgentDropdown, setPendingAgent, setPendingModel, setPendingProject])
+  }, [activeSlot, installedAgents, provider, queryClient, setAgentDropdown, setPendingAgent, setPendingModel])
   const switchModel = useCallback(async (modelName: string) => {
     const val = modelName === 'auto' ? '' : modelName
     if (!activeSlot) { setPendingModel(val); return }
@@ -2782,7 +2773,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
             })()
           ) : (
             <div className="flex flex-col gap-0">
-              <AssistantMessage content={m.content} isStreaming={isStreaming} isRegenerating={regenerating && i === lastTextIdx} onFileOpen={handleFileOpen} onQuote={handleQuote} slotRunning={slotRunning} planTaskId={planTaskId} timestamp={chatConfig.showTimestamps ? msgTime : undefined} messageTs={m.ts} slotKey={activeSlot || undefined} slotTitle={activeSlotTitle} mode={mode} fileChanges={(m.meta as Record<string, unknown> | undefined)?.file_changes as FileChangeEntry[] | undefined} onOpenDiff={handleOpenDiff} onSaveDoc={handleSaveDoc} fileChipStyle={chatConfig.fileChipStyle} showFooter={(() => {
+              <AssistantMessage content={m.content} isStreaming={isStreaming} isRegenerating={regenerating && i === lastTextIdx} onFileOpen={handleFileOpen} onQuote={handleQuote} slotRunning={slotRunning} planTaskId={planTaskId} timestamp={chatConfig.showTimestamps ? msgTime : undefined} messageTs={m.ts} slotKey={activeSlot || undefined} slotTitle={activeSlotTitle} mode={mode} fileChanges={(m.meta as Record<string, unknown> | undefined)?.file_changes as FileChangeEntry[] | undefined} onOpenDiff={handleOpenDiff} fileChipStyle={chatConfig.fileChipStyle} showFooter={(() => {
                 // Show footer on the last assistant message of each completed turn
                 if (isStreaming) return false
                 // Find next message after this one that's assistant, user, or streaming
@@ -2814,7 +2805,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     // apply-plan handler, so it belongs here for correctness. approve/send/
     // dismissApproval are NOT referenced in this renderer (user/approval rows go
     // through renderUserContentCb), so they are omitted to keep it stable.
-  }, [messages, visibleIndexMap, slotRunning, slotState, lastTextIdx, handleFileOpen, handleFork, handleQuote, chatConfig, activeSlot, regenerating, handleRegenerate, handleEditResend, slotHasMore, renderUserContentCb, highlightTs, activeSlotTitle, mode, dispatch, handleOpenDiff, handleSaveDoc, handlePlanFromHere, navigate, planTaskId])
+  }, [messages, visibleIndexMap, slotRunning, slotState, lastTextIdx, handleFileOpen, handleFork, handleQuote, chatConfig, activeSlot, regenerating, handleRegenerate, handleEditResend, slotHasMore, renderUserContentCb, highlightTs, activeSlotTitle, mode, dispatch, handleOpenDiff, handlePlanFromHere, navigate, planTaskId])
 
   const [mobileSessions, setMobileSessions] = useState(false)
   // Close mobile sessions panel when a session is selected
@@ -3005,7 +2996,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
           </div>
         )}
         {uploadNotice && (
-          <div className="mx-4 mt-2 mb-0 bg-bg-elevated border rounded-lg p-3 flex items-center gap-3 animate-rise" style={{ borderColor: 'color-mix(in srgb, var(--info) 45%, transparent)' }}>
+          <div className="mx-4 mt-2 mb-0 bg-bg-elevated border rounded-lg p-3 flex items-center gap-3 animate-rise" style={{ borderColor: 'color-mix(in srgb, var(--accent) 45%, transparent)' }}>
             <span className="text-sm text-text flex-1">{uploadNotice}</span>
             <button onClick={() => setUploadNotice('')} aria-label="Dismiss notice" className="text-muted hover:text-text text-lg leading-none">&times;</button>
           </div>
@@ -3065,7 +3056,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
                   <Clickable className="flex items-center gap-1" onClick={() => { if (activeSlot && generatingTitleSlots.has(activeSlot)) return; setEditingTitle(true); setTitleDraft(title) }}>
                     {currentSlot?.memory_mode === 'incognito' && <span title="Incognito — memory writes disabled"><EyeOff size={13} className="shrink-0 text-warn" /></span>}
                     {currentSlot?.memory_mode === 'temporary' && <span title="Temporary — no memory reads or writes"><VenetianMask size={13} className="shrink-0 text-aim" /></span>}
-                    <TypewriterText text={title} className="text-sm font-semibold text-muted font-mono truncate max-w-[40vw]" />
+                    <TypewriterText text={title} className="session-header-title text-sm font-semibold text-muted font-mono truncate max-w-[40vw]" />
                     <Pen size={13} className="shrink-0 text-muted opacity-0 group-hover/header:opacity-60 transition-opacity" />
                   </Clickable>
                   {activeSlot && (generatingTitleSlots.has(activeSlot) ? <Loader size={16} className="shrink-0 text-accent animate-spin" /> : <Btn aria-label="Regenerate title with LLM" className="shrink-0 text-muted opacity-0 group-hover/header:opacity-40 hover:!opacity-100 hover:text-accent transition-all cursor-pointer bg-transparent border-none p-0" title="Regenerate title with LLM" onClick={e => { e.stopPropagation(); if (!activeSlot || generatingTitleSlots.has(activeSlot)) return; const slot = activeSlot; setGeneratingTitleSlots(prev => new Set(prev).add(slot)); api.generateTitle(slot).then(r => { /* title is redacted server-side via redact_exfiltration_urls + redact_credentials */ if (r.title) dispatch(sseSlotTitle({ key: slot, title: r.title })) }).catch(e => {
@@ -3516,7 +3507,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
                   <Input ref={agentInputRef} type="text" aria-label="Filter agents" placeholder="Type to filter…" value={agentFilter} onChange={e => setAgentFilter(e.target.value)} className="w-full px-2 py-1 text-[13px] font-mono" />
                 </div>
                 <div role="listbox" aria-label="Agent list" className="overflow-y-auto max-h-[280px]">
-                <AgentDropdownList agents={filteredAgents} activeAgent={currentSlot?.agent || 'default'} activeProjectPath={currentSlot?.project || undefined} defaultAgent={defaultAgent} onSelect={(name, projectPath) => { switchAgent(name, projectPath); setAgentDropdown(false) }} filter={agentFilter} />
+                <AgentDropdownList agents={filteredAgents} activeAgent={currentSlot?.agent || 'default'} defaultAgent={defaultAgent} onSelect={(name) => { switchAgent(name); setAgentDropdown(false) }} filter={agentFilter} />
                 </div>
               </div>,
               document.body

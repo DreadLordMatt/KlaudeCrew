@@ -124,8 +124,10 @@ from kiro_crew.dashboard.port_reclaim import (
 )
 from kiro_crew.dashboard.state import _DEFAULT_PORT, DashboardState
 from kiro_crew.dashboard.token_auth import (
+    _cookie_port_from_host,
     _is_spa_shell_request,
     token_auth_middleware,
+    token_embed_parent_port,
 )
 from kiro_crew.deploy import _register_core_skills as _register_deploy_skills
 from kiro_crew.deploy.handlers import register_routes as _register_deploy_routes
@@ -256,7 +258,7 @@ _BASE_CSP = (
     # additionally gates on that exact host shape (framablePreviewUrl) so a
     # crafted webapp_metadata URL on any other host is never framed.
     "frame-src 'self' blob: https://*.cloudfront.net{frame_src_extra}; "
-    "object-src 'none'; base-uri 'self'; frame-ancestors 'self'"
+    "object-src 'none'; base-uri 'self'; frame-ancestors {frame_ancestors}"
 )
 
 _INSTANCES_FRAME_SRC_EXTRA = " http://127.0.0.1:* http://localhost:* http://*.localhost:*"
@@ -282,7 +284,63 @@ _IMMUTABLE_PATH_PREFIXES = ("/assets/",)
 _IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
 
-def _apply_security_headers(resp: web.StreamResponse, app: web.Application, path: str = "") -> None:
+def _extra_frame_ancestors(
+    request: "web.Request | None", app: "web.Application | None" = None
+) -> list[str]:
+    """Exact parent origins (beyond ``'self'``) permitted to frame this dashboard.
+
+    Read from the ``embed_parent_port`` claim of the request's signed token: the
+    multi-instance connect flow mints the remote token carrying the *parent*
+    (embedding) dashboard's port — its ``KIROCREW_PORT`` — so the embedded remote
+    authorizes exactly that loopback parent origin as a CSP frame-ancestor. The
+    claim is carried through the link→session token exchange into the session
+    cookie (see token_auth_middleware), which also stashes the validated port on
+    the request BEFORE it revokes the link nonce. This reader prefers that stashed
+    value, then the query token, then the ``mc_token_<port>`` cookie — so it works
+    for the first ``?token=`` framed document (whose link nonce is revoked by the
+    exchange) AND every subsequent cookie-authenticated framed load. The port is
+    expanded to the loopback hosts (the desktop app may load on any of them).
+    Exact origins only — **never a wildcard, never a hardcoded port** — and gated
+    on a validly-signed token, so a random local page (which has no token) can
+    never get its origin into ``frame-ancestors`` (clickjacking, CSE SEC-016).
+    Empty (default ``'self'`` + ``X-Frame-Options`` posture) for any request
+    without such a token. See docs/system-specs/modules/security.md.
+    """
+    if request is None:
+        return []
+    # Prefer the claim the auth middleware validated and stashed on the request:
+    # it is set BEFORE the link→session exchange revokes the link nonce, so the
+    # first ``?token=`` framed document (whose header the browser enforces) still
+    # carries the parent origin. Fall back to the query token, then the
+    # ``mc_token_<port>`` session cookie (steady-state cookie-authenticated
+    # framed loads), mirroring token_auth_middleware's own extraction.
+    port: int | None = None
+    stashed = request.get("embed_parent_port")
+    if isinstance(stashed, str) and stashed.isdigit():
+        _p = int(stashed)
+        if 1 <= _p <= 65535:
+            port = _p
+    if port is None:
+        token = request.query.get("token") or ""
+        if not token:
+            port_fallback = app.get("port", _DEFAULT_PORT) if app is not None else _DEFAULT_PORT
+            cookie_port = _cookie_port_from_host(request, port_fallback)
+            token = request.cookies.get(f"mc_token_{cookie_port}", "")
+        port = token_embed_parent_port(token)
+    if port is None:
+        return []
+    return [
+        f"http://{host}:{port}"
+        for host in ("127.0.0.1", "localhost", "[::1]", "kirocrew.localhost")
+    ]
+
+
+def _apply_security_headers(
+    resp: web.StreamResponse,
+    app: web.Application,
+    path: str = "",
+    request: "web.Request | None" = None,
+) -> None:
     """Apply cache-control and security headers to a dashboard response.
 
     Sets four groups of headers (all via ``setdefault`` so handlers keep
@@ -326,24 +384,34 @@ def _apply_security_headers(resp: web.StreamResponse, app: web.Application, path
     state = app.get("state")
     instances_mgr = getattr(state, "instances_manager", None) if state else None
     frame_src_extra = _INSTANCES_FRAME_SRC_EXTRA if instances_mgr is not None else ""
+    # frame-ancestors: ``'self'`` plus the EXACT parent origin carried in the
+    # request token's embed_parent_port claim (see _extra_frame_ancestors) — never
+    # a wildcard, never a hardcoded port. Lets the desktop app frame an embedded
+    # instance dashboard across loopback ports, while any local page without a
+    # validly-signed token stays blocked (clickjacking).
+    extra_ancestors = _extra_frame_ancestors(request, app)
+    frame_ancestors = " ".join(["'self'", *extra_ancestors])
     resp.headers.setdefault(
         "Content-Security-Policy",
-        _BASE_CSP.format(frame_src_extra=frame_src_extra),
+        _BASE_CSP.format(frame_src_extra=frame_src_extra, frame_ancestors=frame_ancestors),
     )
     resp.headers.setdefault("Permissions-Policy", _PERMISSIONS_POLICY)
-    # Defense-in-depth browser headers (CWE-1021/693/200/319). All via
-    # setdefault so a handler can override. frame-ancestors 'self' (in the
-    # CSP above) is the modern clickjacking control; X-Frame-Options SAMEORIGIN
-    # is kept for older browsers. nosniff blocks MIME-confusion; Referrer-Policy
-    # avoids leaking the (token-bearing) dashboard URL cross-origin. HSTS is
-    # inert over the default loopback HTTP bind but protects HTTPS tunnel/desktop
-    # access, so it is set unconditionally (browsers ignore it on plain HTTP).
-    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    # Defense-in-depth browser headers (CWE-1021/693/200/319). All via setdefault
+    # so a handler can override. The clickjacking control is CSP ``frame-ancestors``
+    # above. X-Frame-Options is origin-exact (SAMEORIGIN) and cannot express the
+    # allowlist, so we keep it as the legacy backstop ONLY in the default posture
+    # (no extra ancestor trusted); when an operator has configured a cross-port
+    # embed origin we omit it, otherwise SAMEORIGIN would contradict the CSP and
+    # refuse the embed. Browsers honor frame-ancestors over X-Frame-Options when
+    # both are present. nosniff blocks MIME-confusion; Referrer-Policy avoids
+    # leaking the (token-bearing) dashboard URL cross-origin. HSTS is inert over
+    # the default loopback HTTP bind but protects HTTPS tunnel/desktop access, so
+    # it is set unconditionally (browsers ignore it on plain HTTP).
+    if not extra_ancestors:
+        resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    resp.headers.setdefault(
-        "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
-    )
+    resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 
 
 def _register_dist_static_routes(app: web.Application, dist_dir: Path) -> None:
@@ -533,6 +601,7 @@ def _register_mcp_routes(app: web.Application) -> None:
     # "session-docs" / "materialize" / "publish-providers" would be captured as
     # a slug (aiohttp matches routes in registration order).
     from kiro_crew.dashboard.handlers.webapp_preview import register_webapp_preview_routes
+
     register_webapp_preview_routes(app)
     app.router.add_get("/api/artifacts/session-docs", api_artifact_session_docs)
     app.router.add_post("/api/artifacts/materialize", api_artifact_materialize)
@@ -1159,6 +1228,8 @@ async def start_dashboard(
     app.router.add_get("/api/slack/config", handlers.api_slack_config_get)
     app.router.add_put("/api/slack/config", handlers.api_slack_config_save)
     app.router.add_get("/api/slack/manifest", handlers.api_slack_manifest)
+    app.router.add_get("/api/discord/config", handlers.api_discord_config_get)
+    app.router.add_put("/api/discord/config", handlers.api_discord_config_save)
 
     # Script Hooks
     app.router.add_get("/api/hooks", handlers.api_hooks)
@@ -1283,7 +1354,6 @@ async def start_dashboard(
     app.router.add_delete("/api/workspaces/{name}", handlers.api_workspaces_delete)
     # Agents
     app.router.add_get("/api/agents/installed", handlers.api_agents_installed)
-    app.router.add_post("/api/agents/rescan", handlers.api_agents_rescan)
     app.router.add_get("/api/models", handlers.api_models)
     app.router.add_get("/api/effort-levels", handlers.api_effort_levels)
     app.router.add_get("/api/slash-commands", handlers.api_slash_commands)
@@ -1425,6 +1495,7 @@ async def start_dashboard(
     app.router.add_get("/api/ws/terminal/{session_id}", handlers.api_terminal_ws)
     app.router.add_post("/api/terminal/sessions", handlers.api_terminal_create)
     app.router.add_get("/api/terminal/sessions", handlers.api_terminal_list)
+    app.router.add_post("/api/terminal/redact", handlers.api_terminal_redact)
     app.router.add_delete("/api/terminal/sessions/{session_id}", handlers.api_terminal_delete)
     app.router.add_get("/api/taskrunner/refine", handlers.api_taskrunner_refine_status)
     app.router.add_post("/api/taskrunner/refine", handlers.api_taskrunner_refine)
@@ -1560,9 +1631,7 @@ async def start_dashboard(
     # Register built-in apps (idempotent — surfaces baked-in features in App Store).
     # Runs on the executor: escalation cleanup can traverse/delete legacy app
     # dirs, which must not block the event loop during startup.
-    await asyncio.get_running_loop().run_in_executor(
-        subprocess_executor(), register_builtin_apps
-    )
+    await asyncio.get_running_loop().run_in_executor(subprocess_executor(), register_builtin_apps)
 
     # One-time migration: disable stale deploy_web builtin installs (now core module).
     # Idempotent — logs once and silently succeeds if already gone.
@@ -1575,7 +1644,9 @@ async def start_dashboard(
             try:
                 _result = cleanup_migrated_builtin(_migrated)
                 if not _result.ok:
-                    logger.warning("migrated builtin cleanup failed for %s: %s", _migrated, _result.error)
+                    logger.warning(
+                        "migrated builtin cleanup failed for %s: %s", _migrated, _result.error
+                    )
                 elif _result.message and "cleaned up" in _result.message:
                     logger.info("migrated builtin cleanup: %s — %s", _migrated, _result.message)
             except Exception:  # noqa: BLE001
@@ -1702,7 +1773,7 @@ async def start_dashboard(
     ) -> web.StreamResponse:
         resp = await handler(request)  # type: ignore[operator]
         if hasattr(resp, "headers"):
-            _apply_security_headers(resp, request.app, request.path)
+            _apply_security_headers(resp, request.app, request.path, request)
         return resp  # type: ignore[return-value]
 
     # SPA fallback: serve index.html for client-side React Router paths.
@@ -2057,6 +2128,12 @@ async def start_dashboard(
     )
     if restored:
         logger.info("Restored %d session(s)", restored)
+
+    # Both restore paths above rehydrate tabs under their original
+    # "chat-<N>-<ts>" keys but leave _slot_counter at its boot value of 0.
+    # Reseed it past the highest restored index so the next new chat can't
+    # re-mint a colliding low index (which scrambles the tab -> session map).
+    state.reseed_slot_counter()
 
     # Relaunch agents in non-archived channels
     from kiro_crew.channel import ChannelManager, run_channel_agent

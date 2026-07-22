@@ -73,6 +73,28 @@ export interface SlackConfigSave {
   show_thinking: boolean
 }
 
+/** Discord config as returned by GET /api/discord/config (secret masked). */
+export interface DiscordConfigData {
+  connected: boolean
+  connect_error: string
+  configured: boolean
+  read_only: boolean
+  bot_token_set: boolean
+  bot_token_preview: string
+  enabled: boolean
+  allowed_user_ids: string[]
+  soft_threshold_pct: number
+}
+
+/** Writable Discord config fields sent to PUT /api/discord/config. */
+export interface DiscordConfigSave {
+  bot_token: string
+  bot_token_clear: boolean
+  enabled: boolean
+  allowed_user_ids: string[]
+  soft_threshold_pct: number
+}
+
 let _sessionExpiredShown = false
 
 /**
@@ -250,10 +272,21 @@ export class ApiError extends Error {
  * message only ever shows after the QueryClient's 429 retry ladder
  * (api/queryClient.ts) is exhausted.
  */
-const friendlyErrText = (status: number, body: string): string => {
+export const friendlyErrText = (status: number, body: string): string => {
   if (status === 429) {
     return 'Rate limited by the tunnel edge (HTTP 429) — too many requests in a burst. '
       + 'The dashboard retries automatically; if this persists, wait a few seconds and reload.'
+  }
+  // Backends return errors as {"error": "…"} (or detail/message). Unwrap the
+  // field so the UI shows the human message with its real newlines, not the
+  // raw JSON envelope with escaped \n and \".
+  const trimmed = body.trim()
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      const msg = parsed?.error ?? parsed?.detail ?? parsed?.message
+      if (typeof msg === 'string' && msg.trim()) return msg
+    } catch { /* not JSON — fall through to raw body */ }
   }
   return body
 }
@@ -421,8 +454,7 @@ export const api = {
   mcpProbeCache: () => fetch('/api/mcp/probe').then(j),
   // Agents
   agentsInstalled: () => fetch('/api/agents/installed').then(j),
-  agentDetail: (name: string, projectPath?: string) => fetch('/api/agents/detail/' + encodeURIComponent(name) + (projectPath ? '?project_path=' + encodeURIComponent(projectPath) : '')).then(j),
-  agentsRescan: (paths?: string[]) => post('/api/agents/rescan', paths ? { paths } : {}).then(j) as Promise<{ discovered: number; agents: unknown[] }>,
+  agentDetail: (name: string) => fetch('/api/agents/detail/' + encodeURIComponent(name)).then(j),
   agentPatch: (name: string, body: object) => fetch('/api/agents/detail/' + encodeURIComponent(name), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j),
   agentDelete: (name: string) => fetch('/api/agents/detail/' + encodeURIComponent(name), { method: 'DELETE' }).then(j),
   agentMetadata: (name: string) => fetch('/api/agent-metadata/' + encodeURIComponent(name)).then(j),
@@ -439,8 +471,8 @@ export const api = {
   effortLevels: (slot?: string) =>
     fetch('/api/effort-levels' + (slot ? '?slot=' + encodeURIComponent(slot) : '')).then(j) as Promise<string[]>,
   slashCommands: () => fetch('/api/slash-commands').then(j),
-  chatSlotAgent: (slot: string, agent: string, projectPath?: string) =>
-    post('/api/chat/slots/' + encodeURIComponent(slot) + '/agent', { agent, ...(projectPath ? { project_path: projectPath } : {}) }).then(j),
+  chatSlotAgent: (slot: string, agent: string) =>
+    post('/api/chat/slots/' + encodeURIComponent(slot) + '/agent', { agent }).then(j),
   chatSlotModel: (slot: string, model: string) =>
     post('/api/chat/slots/' + encodeURIComponent(slot) + '/model', { model }).then(j),
   chatSlotsModel: (model: string, skip_running: boolean) =>
@@ -965,6 +997,9 @@ export const api = {
   getSlackConfig: () => get('/api/slack/config').then(j) as Promise<SlackConfigData>,
   getSlackManifest: () => get('/api/slack/manifest').then(j) as Promise<{ alias: string; manifest: string; create_url: string }>,
   saveSlackConfig: (body: Partial<SlackConfigSave>) => put('/api/slack/config', body).then(j) as Promise<{ ok: boolean; restart_required: boolean; verify_warning: string }>,
+  // Discord integration config
+  getDiscordConfig: () => get('/api/discord/config').then(j) as Promise<DiscordConfigData>,
+  saveDiscordConfig: (body: Partial<DiscordConfigSave>) => put('/api/discord/config', body).then(j) as Promise<{ ok: boolean; restart_required: boolean; verify_warning: string }>,
 
   // Auto-research
   researchValidate: (body: object) => post("/api/apps/auto-research/validate", body).then(j),

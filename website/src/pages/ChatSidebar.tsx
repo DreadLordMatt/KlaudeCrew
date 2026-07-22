@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect, memo, useMemo, useCallback, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutGroup, AnimatePresence, motion } from 'framer-motion'
-import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquare, MessageSquarePlus, Folder, FolderOpen, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns2, Columns3, GripVertical, Zap, Check, Copy, ListFilter, List, Loader2, Smile, RotateCcw, Bot, ExternalLink, Cpu, GitPullRequest } from 'lucide-react'
+import { Plus, X, Pin, Monitor, EyeOff, VenetianMask, Droplet, FolderPlus, MessageSquare, MessageSquarePlus, Folder, FolderOpen, ChevronRight, ChevronDown, Clock, Pencil, BrushCleaning, Link, Circle, MoreVertical, Tag as TagIcon, Columns2, Columns3, GripVertical, Zap, Check, Copy, ListFilter, List, Loader2, Smile, RotateCcw, Bot, ExternalLink, Cpu, GitMerge } from 'lucide-react'
+import GithubLogo from '../components/icons/GithubLogo'
+import GitlabLogo from '../components/icons/GitlabLogo'
 import { DndContext, closestCenter, pointerWithin, KeyboardSensor, PointerSensor, useSensor, useSensors, useDroppable, DragOverlay, MeasuringStrategy, type DragEndEvent, type DragStartEvent, type DragOverEvent, type CollisionDetection } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, useSortable, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -1579,7 +1581,7 @@ function ChatSidebar({
     const agentMeta = installedAgents.find(a => a.name === agentName)
     const isAim = agentMeta?.source === 'aim'
     const isBuiltin = agentMeta?.source === 'builtin'
-    const agentColor = isAim ? 'text-[var(--aim)]' : isBuiltin ? 'text-muted' : 'text-accent'
+    const agentColor = isAim ? 'text-[var(--aim)]' : isBuiltin ? 'text-muted' : 'text-muted'
     const isActive = activeSlot === s.key
     const isOut = poppedOut.has(s.key)
     const recent = recentRank.get(s.key)
@@ -1671,7 +1673,7 @@ function ChatSidebar({
             <span className="absolute right-1.5 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full pointer-events-none" style={{ background: 'var(--info)' }} title="Agent finished — your turn" />
           )}
           <div className="flex-1 min-w-0 overflow-hidden">
-            <div className={`text-[11px] font-semibold truncate leading-tight flex items-center gap-1 ${agentColor}`}>
+            <div className={`session-agent-label text-[11px] font-semibold truncate leading-tight flex items-center gap-1 ${agentColor}`}>
               {pinned.has(s.key) && <span className="shrink-0" title="Pinned"><Pin size={10} className="text-accent" /></span>}
               <AnimatePresence mode="wait">
                 <motion.span key={agentName || 'empty'} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="truncate">{agentName || '\u00A0'}</motion.span>
@@ -1736,11 +1738,14 @@ function ChatSidebar({
               <div className="flex flex-wrap gap-1.5 mt-1">
                 {s.source_links.map(link => (
                   <span key={link.url} className="inline-flex items-center gap-1 px-1.5 py-[1px] rounded-[4px] text-[10px] leading-none font-medium text-muted border border-border bg-bg-elevated/60" title={link.url}>
-                    <GitPullRequest className="lucide-inline shrink-0" />
+                    {link.provider === 'github' ? <GithubLogo size={10} className="shrink-0" /> : <GitlabLogo size={10} className="shrink-0" />}
                     {link.provider === 'github' ? `#${link.number}` : `!${link.number}`}
-                    {(link.state === 'merged' || link.state === 'closed') && (
-                      <span className={`capitalize ${link.state === 'merged' ? 'text-aim' : 'text-danger'}`}>{link.state}</span>
+                    {link.state === 'merged' && (
+                      <span className="inline-flex shrink-0 text-aim" aria-label="Merged" title="Merged">
+                        <GitMerge className="lucide-inline" aria-hidden="true" />
+                      </span>
                     )}
+                    {link.state === 'closed' && <span className="capitalize text-danger">{link.state}</span>}
                     {link.ci === 'running' && <Loader2 className="lucide-inline shrink-0 animate-spin" aria-label="Checks running" />}
                     {link.ci === 'passed' && <Check className="lucide-inline shrink-0 text-ok" aria-label="Checks passed" />}
                     {link.ci === 'failed' && <X className="lucide-inline shrink-0 text-danger" aria-label="Checks failed" />}
@@ -1994,7 +1999,7 @@ function ChatSidebar({
       {/* Header */}
       <div className="flex justify-between items-center px-2 h-12">
         <div className={`flex items-center gap-1.5 min-w-0 flex-1 ${collapsible && !isMobile ? 'pl-8' : ''}`}>
-          {!tinyHeader && <span className="text-[13px] font-medium text-muted uppercase tracking-[.04em] truncate">Sessions</span>}
+          {!tinyHeader && <span className="sessions-panel-title text-[13px] font-medium text-muted uppercase tracking-[.04em] truncate">Sessions</span>}
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
           <DropdownMenu>
@@ -2811,7 +2816,7 @@ function ChatSidebar({
                   const meta = installedAgents.find(a => a.name === agentName)
                   if (meta?.source === 'aim') return 'text-[var(--aim)]'
                   if (meta?.source === 'builtin') return 'text-muted'
-                  return 'text-accent'
+                  return 'text-muted'
                 }
                 const historyRow = (s: (typeof sortedHistory)[number]) => {
                   const displayDate = fmtRelativeTime(s.modified ?? s.created)
@@ -2848,7 +2853,7 @@ function ChatSidebar({
                         }
                       </span>
                       <div className="flex-1 min-w-0 overflow-hidden">
-                        <div className={`text-[11px] font-semibold truncate leading-tight flex items-center gap-1 ${agentColor}`}>
+                        <div className={`session-agent-label text-[11px] font-semibold truncate leading-tight flex items-center gap-1 ${agentColor}`}>
                           <span className="truncate">{agentName || '\u00A0'}</span>
                           {s.clean_mode
                             ? <span className="text-accent" title="Clean — agent-only, no KiroCrew context or MCP"><Droplet size={10} /></span>

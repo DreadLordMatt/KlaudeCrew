@@ -88,6 +88,7 @@ from kiro_crew.acp.types import (
     JsonRpcRequest,
     TurnUsage,
 )
+from kiro_crew.constants import KIROCREW_SPAWNED_ENV, KIROCREW_SPAWNED_VALUE
 from kiro_crew.env import augmented_path, resolve_krb5_ccname
 from kiro_crew.executors import subprocess_executor
 from kiro_crew.hooks import (
@@ -1632,6 +1633,10 @@ class AcpClient:
         # (e.g. amazon-quick-mcp) fail without it. Covers the session agent and
         # all ACP-provider subagents, which spawn through this same path.
         resolve_krb5_ccname(env)
+        # Positive-identity marker for the orphan sweep: kiro-cli and every MCP
+        # server it spawns inherit this, so escaped launcher trees (``npx
+        # @playwright/mcp`` -> node) are identifiable as ours.
+        env[KIROCREW_SPAWNED_ENV] = KIROCREW_SPAWNED_VALUE
 
         # Process-group isolation for clean tree-kill. Pass both flags explicitly
         # (NOT via **dict unpack — that breaks mypy's Popen overload resolution on
@@ -1771,6 +1776,8 @@ class AcpClient:
         if not self._process or self._process.returncode is not None:
             return
         pid = self._pid
+        if pid is None:  # narrow for mypy — set at _spawn time under the process guard
+            return
         # Close pipes first to unblock any pending reads/writes
         for pipe in (self._process.stdin, self._process.stdout, self._process.stderr):
             if pipe:
@@ -1801,8 +1808,13 @@ class AcpClient:
             try:
                 # POSIX: killpg(getpgid) tears down the whole group (setsid at
                 # spawn). Windows: taskkill /T /F walks the child tree instead
-                # (no process groups) — platform_compat dispatches both.
-                platform_compat.kill_process_tree(pid, platform_compat.SIGTERM)  # type: ignore[arg-type]
+                # (no process groups) — platform_compat dispatches both. Async
+                # variant offloads the Windows taskkill spawn to
+                # subprocess_executor so the event loop keeps ticking while
+                # taskkill.exe runs (Mesh-2801).
+                await platform_compat.kill_process_tree_async(
+                    pid, platform_compat.SIGTERM
+                )
             except (ProcessLookupError, OSError):
                 pass
             try:
@@ -1815,9 +1827,11 @@ class AcpClient:
                 return
             except asyncio.TimeoutError:
                 pass
-        # Force kill
+        # Force kill (async variant offloads Windows taskkill — Mesh-2801).
         try:
-            platform_compat.kill_process_tree(pid, platform_compat.SIGKILL)  # type: ignore[arg-type]
+            await platform_compat.kill_process_tree_async(
+                pid, platform_compat.SIGKILL
+            )
         except (ProcessLookupError, OSError):
             try:
                 self._process.kill()

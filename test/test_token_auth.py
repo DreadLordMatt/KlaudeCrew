@@ -27,6 +27,7 @@ from kiro_crew.dashboard.token_auth import (
     revoke_access_cookie,
     revoke_all_sessions,
     token_auth_middleware,
+    token_embed_parent_port,
     try_consume,
     validate_token,
     validate_token_with_app,
@@ -283,6 +284,35 @@ async def test_cookie_set_on_query_param_auth() -> None:
     assert cookie_header["httponly"] is True or "httponly" in str(cookie_header).lower()
     assert cookie_header["samesite"] == "Lax"
     assert cookie_header["path"] == "/"
+
+
+@pytest.mark.asyncio
+async def test_embed_parent_port_claim_survives_session_exchange() -> None:
+    """PR #118 follow-up: the connect link token carries an embed_parent_port
+    claim, but token_auth_middleware exchanges the link token for a fresh
+    session cookie (CWE-613, never reuse the URL token). That exchange MUST
+    carry the claim across, or the cookie the framed document actually presents
+    drops it and server._extra_frame_ancestors falls back to bare
+    frame-ancestors 'self' — the blank embedded-pane bug."""
+    mw = token_auth_middleware()
+    token = generate_token("embeduser", ttl_seconds=300, extra={"embed_parent_port": "5476"})
+    req = _make_request(query={"token": token}, remote="10.0.0.1")
+
+    resp = await mw(req, _ok_handler)
+    assert resp.status == 200
+
+    cookie_header = resp.cookies.get("mc_token_5476")
+    assert cookie_header is not None
+    # Distinct re-minted session token (CWE-613 exchange) …
+    assert cookie_header.value != token
+    # … that nonetheless preserves the frame-ancestors parent-port claim, so the
+    # cookie-authenticated framed document still authorizes the parent origin.
+    assert token_embed_parent_port(cookie_header.value) == 5476
+    # And the middleware stashed the validated parent port on the request BEFORE
+    # revoking the link nonce, so the first ?token= framed document's header
+    # (server._extra_frame_ancestors) sees it even though the link token is now
+    # revoked (PR #129 follow-up — the first-hit blank-pane fix).
+    req.__setitem__.assert_any_call("embed_parent_port", "5476")
 
 
 # -- Property 7: Cookie not re-set when already matching --
@@ -1920,3 +1950,23 @@ async def test_deploy_path_prefix_matching() -> None:
         req = _make_request(path=path, headers={"X-Internal-Secret": secret})
         resp = await mw(req, _ok_handler)
         assert resp.status == 200, f"expected 200 for {path}, got {resp.status}"
+
+
+def test_token_embed_parent_port_roundtrip() -> None:
+    """A token minted with the embed_parent_port claim reads back as that int —
+    the signed carrier for the multi-instance CSP frame-ancestor parent origin."""
+    tok = generate_token("local-app", extra={"embed_parent_port": "5476"})
+    assert token_embed_parent_port(tok) == 5476
+
+
+def test_token_embed_parent_port_absent_forged_or_oob() -> None:
+    """No claim, a forged signature, an empty token, and an out-of-range port all
+    yield None so a random local page can never inject a frame-ancestor."""
+    assert token_embed_parent_port(generate_token("local-app")) is None
+    assert token_embed_parent_port("") is None
+    # Forged: appending to a valid token breaks the HMAC signature.
+    forged = generate_token("local-app", extra={"embed_parent_port": "5476"}) + "x"
+    assert token_embed_parent_port(forged) is None
+    # Out-of-range port claim is rejected.
+    oob = generate_token("local-app", extra={"embed_parent_port": "70000"})
+    assert token_embed_parent_port(oob) is None

@@ -2,9 +2,10 @@
 
 The browser sends a GitHub pull-request or GitLab merge-request URL. This
 module validates the parsed host and path, then delegates authentication to a
-trusted absolute provider CLI. Credentials stay inside ``gh``/``glab`` and are
-never returned to the browser. Every credential-backed read or mutation is
-restricted to the configured dashboard owner.
+validated absolute provider CLI. Credentials stay inside ``gh``/``glab`` and are
+never returned to the browser. Credential-backed access is restricted to the
+configured dashboard owner. Standalone local dashboards use their signed
+bootstrap identity as the implicit owner when no channel owner is configured.
 """
 
 from __future__ import annotations
@@ -242,11 +243,22 @@ def _resolve_provider_executable(executable: str) -> str:
         except ValueError:
             continue
     provider = "GitHub" if executable == "gh" else "GitLab"
+    managed_dir = os.path.dirname(_PROVIDER_EXECUTABLE_CANDIDATES[executable][0])
     raise SourceProviderError(
-        f"The {provider} CLI ({executable}) was not found in an agent-unwritable "
-        "system location. Install a root-owned, canonical copy whose entire path "
-        f"is not writable by the gateway user, authenticate it with `{executable} "
-        f"auth login`, or set {override_name} to that trusted absolute path."
+        f"The {provider} CLI ({executable}) could not be found in a location this "
+        f"panel trusts. This panel runs {executable} unattended with your "
+        f"{provider} credentials, so -- unlike chat or your terminal -- it only "
+        f"accepts a root-owned {executable} whose full path your user cannot write "
+        "(a Homebrew or otherwise user-owned copy is intentionally refused here, "
+        "even though it works elsewhere). If it is already installed, promote it "
+        "to a trusted location (needs sudo), then reload this panel:\n"
+        f"  sudo mkdir -p {managed_dir}\n"
+        f'  sudo cp "$(command -v {executable})" {managed_dir}/{executable}\n'
+        f"  sudo chown -R root {managed_dir}\n"
+        f"  sudo chmod 755 {managed_dir}/{executable}\n"
+        f"Your existing `{executable} auth login` credentials are reused "
+        f"automatically. Alternatively, set {override_name} to an already-trusted "
+        "absolute path."
     )
 
 
@@ -1162,7 +1174,9 @@ async def fetch_pull_request(raw_url: str, *, refresh: bool = False) -> dict[str
 
 async def api_pull_request_source(request: web.Request) -> web.Response:
     """Owner-only POST ``/api/source/pull-request`` with ``{url, refresh?}``."""
-    denied = _authorize_owner_request(request, "source.pull_request.read")
+    denied = _authorize_owner_request(
+        request, "source.pull_request.read", allow_local_no_owner=True
+    )
     if denied is not None:
         return denied
     try:
@@ -1193,7 +1207,9 @@ async def api_pull_request_source(request: web.Request) -> web.Response:
 
 async def api_pull_request_checks(request: web.Request) -> web.Response:
     """Owner-only POST ``/api/source/pull-request/checks`` with ``{url}``."""
-    denied = _authorize_owner_request(request, "source.pull_request.checks")
+    denied = _authorize_owner_request(
+        request, "source.pull_request.checks", allow_local_no_owner=True
+    )
     if denied is not None:
         return denied
     try:
@@ -1289,14 +1305,19 @@ async def resolve_pull_request_thread(raw_url: str, thread_id: str) -> None:
         )
 
 
+_LOCAL_DASHBOARD_OWNER_SUBJECTS = frozenset({"local-app", "local-startup"})
+
+
 def is_owner_dashboard_request(request: web.Request) -> bool:
-    """Return whether request has an explicit dashboard-owner identity."""
+    """Return whether request has a configured or implicit local owner identity."""
     state = request.app["state"]
     owner_id = str(getattr(state, "owner_id", "") or "")
     caller = str(request.get("user") or "")
-    return bool(
-        owner_id and "app" in request and request["app"] == "" and caller and caller == owner_id
-    )
+    if "app" not in request or request["app"] != "" or not caller:
+        return False
+    if owner_id:
+        return caller == owner_id
+    return caller in _LOCAL_DASHBOARD_OWNER_SUBJECTS
 
 
 def _audit_source_api(
@@ -1319,18 +1340,34 @@ def _audit_source_api(
         logger.debug("SEL source API audit failed", exc_info=True)
 
 
-def _authorize_owner_request(request: web.Request, operation: str) -> web.Response | None:
-    """Require an explicit dashboard-user claim matching the configured owner."""
+def _authorize_owner_request(
+    request: web.Request, operation: str, *, allow_local_no_owner: bool = False
+) -> web.Response | None:
+    """Require an explicit dashboard-user claim matching the configured owner.
+
+    When no owner is configured, read-only operations may allow either signed
+    standalone-local bootstrap identity. Mutations remain owner-only. Once an
+    owner is configured, every operation requires an exact owner match.
+    """
     state = request.app["state"]
     owner_id = str(getattr(state, "owner_id", "") or "")
     caller = str(request.get("user") or "")
     if not owner_id:
+        if (
+            allow_local_no_owner
+            and request.get("app") == ""
+            and caller in _LOCAL_DASHBOARD_OWNER_SUBJECTS
+        ):
+            return None
         _audit_source_api(request, operation, "denied", "owner_not_configured")
         return web.json_response({"error": "forbidden"}, status=403)
     if "app" not in request or request["app"] != "":
         _audit_source_api(request, operation, "denied", "app_token_not_allowed")
         return web.json_response({"error": "forbidden"}, status=403)
-    if not caller or caller != owner_id:
+    if not caller:
+        _audit_source_api(request, operation, "denied", "non_owner")
+        return web.json_response({"error": "forbidden"}, status=403)
+    if caller != owner_id:
         _audit_source_api(request, operation, "denied", "non_owner")
         return web.json_response({"error": "forbidden"}, status=403)
     return None
@@ -1339,8 +1376,9 @@ def _authorize_owner_request(request: web.Request, operation: str) -> web.Respon
 async def api_pull_request_resolve(request: web.Request) -> web.Response:
     """Owner-only POST ``/api/source/pull-request/resolve`` mutation.
 
-    Credential-backed provider access requires an explicit dashboard-user claim
-    and an exact match with the non-empty configured owner id; app tokens and
+    Credential-backed provider access requires an explicit dashboard-user claim.
+    Configured installations require an exact owner match. Standalone local
+    installations accept only signed local bootstrap subjects. App tokens and
     missing auth claims fail closed.
     """
     denied = _authorize_owner_request(request, "source.pull_request.resolve")

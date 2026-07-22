@@ -89,6 +89,7 @@ CRED_OWNER_ID = "KIROCREW_OWNER_ID"
 CRED_WECOM_BOT_ID = "WECOM_BOT_ID"
 CRED_WECOM_SECRET = "WECOM_SECRET"
 CRED_TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
+CRED_DISCORD_BOT_TOKEN = "DISCORD_BOT_TOKEN"
 _CREDENTIAL_KEYS = (
     CRED_SLACK_APP_TOKEN,
     CRED_SLACK_BOT_TOKEN,
@@ -96,11 +97,14 @@ _CREDENTIAL_KEYS = (
     CRED_WECOM_BOT_ID,
     CRED_WECOM_SECRET,
     CRED_TELEGRAM_BOT_TOKEN,
+    CRED_DISCORD_BOT_TOKEN,
 )
 
 DEFAULT_MODEL = "auto"
 DEFAULT_SESSION_TIMEOUT = 3600  # 60 min
-DEFAULT_MAX_PARALLEL_STEPS = 0  # 0 = auto: derive from agent.subagent_auto_max via compute_max_subagents
+DEFAULT_MAX_PARALLEL_STEPS = (
+    0  # 0 = auto: derive from agent.subagent_auto_max via compute_max_subagents
+)
 
 _DEFAULT_PORT = 5476
 
@@ -734,7 +738,10 @@ class SessionConfig:
 class TaskRunnerConfig:
     max_parallel_steps: int = field(
         default=DEFAULT_MAX_PARALLEL_STEPS,
-        metadata=_meta("Max Parallel Steps", "Maximum task steps to run in parallel. 0 = auto (the host-safe cap from agent.subagent_auto_max, clamped to memory/CPU). A positive value only *lowers* concurrency — it is capped at the auto maximum and can never exceed the host-safe limit."),
+        metadata=_meta(
+            "Max Parallel Steps",
+            "Maximum task steps to run in parallel. 0 = auto (the host-safe cap from agent.subagent_auto_max, clamped to memory/CPU). A positive value only *lowers* concurrency — it is capped at the auto maximum and can never exceed the host-safe limit.",
+        ),
     )
     workspace_dir: str = field(
         default="",
@@ -1726,13 +1733,6 @@ class ChannelConfig:
         default="",
         metadata=_meta("Agent", "Agent override for this channel (empty = default)."),
     )
-    project_path: str = field(
-        default="",
-        metadata=_meta(
-            "Project Path",
-            "Project directory for project-scoped agent (empty = global agent).",
-        ),
-    )
     thread_follow: bool = field(
         default=True,
         metadata=_meta(
@@ -1749,7 +1749,6 @@ class ChannelConfig:
         return cls(
             activation=activation,
             agent=data.get("agent", ""),
-            project_path=data.get("project_path", ""),
             thread_follow=data.get("thread_follow", True),
         )
 
@@ -2347,6 +2346,23 @@ def _coerce_int_ids(raw: object) -> list[int]:
     return ids
 
 
+def _coerce_str_ids(raw: object) -> list[str]:
+    """Coerce a config value to a clean, deduped ``list[str]`` of digit IDs.
+
+    Used for Discord snowflakes, which exceed 2^53 and therefore stay strings
+    (JSON round-trip safe). Fails closed like :func:`_coerce_int_ids`: a
+    non-list yields ``[]`` and non-digit entries are dropped.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for u in raw:
+        s = str(u).strip()
+        if s.isdigit() and s not in out:
+            out.append(s)
+    return out
+
+
 def _coerce_int(raw: object, default: int) -> int:
     """Return ``int(raw)`` or *default* if *raw* isn't a clean base-10 integer.
 
@@ -2395,6 +2411,46 @@ class TelegramConfig:
             "Soft Context Threshold %",
             "Prompt the user to /compact or /new when context passes this percentage.",
             tags=["telegram"],
+        ),
+    )
+
+
+@dataclass
+class DiscordConfig:
+    enabled: bool = field(
+        default=False,
+        metadata=_meta(
+            "Enabled",
+            "Enable the Discord channel (Gateway WebSocket, DM-only). Requires "
+            "DISCORD_BOT_TOKEN (env/.env) or discord.bot_token.",
+            tags=["discord"],
+        ),
+    )
+    bot_token: str = field(
+        default="",
+        metadata=_meta(
+            "Bot Token",
+            "Discord bot token from the Developer Portal (Bot page). Prefer the "
+            "DISCORD_BOT_TOKEN credential (env/.env) over storing it here.",
+            tags=["discord"],
+            sensitive=True,
+        ),
+    )
+    allowed_user_ids: list[str] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Allowed User IDs",
+            "Discord user IDs (snowflakes) permitted to DM the bot. Empty = deny "
+            "all (fail closed): anyone sharing a server with the bot can DM it.",
+            tags=["discord"],
+        ),
+    )
+    soft_threshold_pct: int = field(
+        default=80,
+        metadata=_meta(
+            "Soft Context Threshold %",
+            "Prompt the user to !compact or !new when context passes this percentage.",
+            tags=["discord"],
         ),
     )
 
@@ -2484,6 +2540,10 @@ class KiroCrewConfig:
     telegram: TelegramConfig = field(
         default_factory=TelegramConfig,
         metadata=_meta("Telegram", "Telegram Bot API integration settings.", tags=["telegram"]),
+    )
+    discord: DiscordConfig = field(
+        default_factory=DiscordConfig,
+        metadata=_meta("Discord", "Discord bot integration settings.", tags=["discord"]),
     )
     dashboard: DashboardConfig = field(
         default_factory=DashboardConfig,
@@ -2695,6 +2755,9 @@ class KiroCrewConfig:
         telegram_data = data.get("telegram", {})
         if not isinstance(telegram_data, dict):
             telegram_data = {}
+        discord_data = data.get("discord", {})
+        if not isinstance(discord_data, dict):
+            discord_data = {}
         slack_data = data.get("slack", {})
         if not isinstance(slack_data, dict):
             slack_data = {}
@@ -2878,12 +2941,8 @@ class KiroCrewConfig:
                 ),
             ),
             watchdog=WatchdogConfig(
-                check_after_secs=_safe_float(
-                    watchdog_data.get("check_after_secs", 60.0), 60.0
-                ),
-                stale_window_secs=_safe_float(
-                    watchdog_data.get("stale_window_secs", 300.0), 300.0
-                ),
+                check_after_secs=_safe_float(watchdog_data.get("check_after_secs", 60.0), 60.0),
+                stale_window_secs=_safe_float(watchdog_data.get("stale_window_secs", 300.0), 300.0),
                 tool_stall_suspect_secs=_safe_float(
                     watchdog_data.get("tool_stall_suspect_secs", 600.0), 600.0
                 ),
@@ -2941,9 +3000,7 @@ class KiroCrewConfig:
                 embed_content_budget=int(knowledge_data.get("embed_content_budget", 0)),
                 pool_idle_ttl_secs=(
                     ttl
-                    if isinstance(
-                        (ttl := knowledge_data.get("pool_idle_ttl_secs", 300)), int
-                    )
+                    if isinstance((ttl := knowledge_data.get("pool_idle_ttl_secs", 300)), int)
                     and not isinstance(ttl, bool)
                     and ttl >= 0
                     else 300
@@ -2955,6 +3012,17 @@ class KiroCrewConfig:
                 allowed_user_ids=_coerce_int_ids(telegram_data.get("allowed_user_ids")),
                 soft_threshold_pct=max(
                     1, min(100, _coerce_int(telegram_data.get("soft_threshold_pct"), 80))
+                ),
+            ),
+            discord=DiscordConfig(
+                enabled=bool(discord_data.get("enabled", False)),
+                bot_token=str(discord_data.get("bot_token", "")),
+                # Discord user IDs are numeric snowflakes that exceed 2^53 —
+                # keep them as strings (JSON round-trip safe, matches the
+                # transport's string comparison).
+                allowed_user_ids=_coerce_str_ids(discord_data.get("allowed_user_ids")),
+                soft_threshold_pct=max(
+                    1, min(100, _coerce_int(discord_data.get("soft_threshold_pct"), 80))
                 ),
             ),
             slack=SlackConfig(
@@ -3033,11 +3101,19 @@ class KiroCrewConfig:
                 recent_tint_count=_safe_int(dashboard_data.get("recent_tint_count", 0), 0),
                 onboarded=bool(dashboard_data.get("onboarded", False)),
                 tips_enabled=bool(dashboard_data.get("tips_enabled", True)),
-                tips_cadence_hours=_safe_float(dashboard_data.get("tips_cadence_hours", 6.0), 6.0, lo=0.0),
-                tips_snooze_hours=_safe_float(dashboard_data.get("tips_snooze_hours", 48.0), 48.0, lo=0.0),
-                tips_recency_decay=_safe_float(dashboard_data.get("tips_recency_decay", 0.6), 0.6, lo=0.0, hi=1.0),
+                tips_cadence_hours=_safe_float(
+                    dashboard_data.get("tips_cadence_hours", 6.0), 6.0, lo=0.0
+                ),
+                tips_snooze_hours=_safe_float(
+                    dashboard_data.get("tips_snooze_hours", 48.0), 48.0, lo=0.0
+                ),
+                tips_recency_decay=_safe_float(
+                    dashboard_data.get("tips_recency_decay", 0.6), 0.6, lo=0.0, hi=1.0
+                ),
                 tips_model=str(dashboard_data.get("tips_model", "claude-haiku-4.5")),
-                tips_explore_ratio=_safe_float(dashboard_data.get("tips_explore_ratio", 0.2), 0.2, lo=0.0, hi=1.0),
+                tips_explore_ratio=_safe_float(
+                    dashboard_data.get("tips_explore_ratio", 0.2), 0.2, lo=0.0, hi=1.0
+                ),
             ),
             tunnel=TunnelConfig(
                 enabled=bool(tunnel_data.get("enabled", False)),
@@ -3088,8 +3164,12 @@ class KiroCrewConfig:
                     s for s in mcp_gateway_data.get("poolable_servers", []) if isinstance(s, str)
                 ],
                 prewarm_count=max(0, int(mcp_gateway_data.get("prewarm_count", 0))),
-                read_buffer_limit_bytes=max(1024, int(mcp_gateway_data.get("read_buffer_limit_bytes", 64 * 1024 * 1024))),
-                response_spill_threshold_bytes=max(0, int(mcp_gateway_data.get("response_spill_threshold_bytes", 256 * 1024))),
+                read_buffer_limit_bytes=max(
+                    1024, int(mcp_gateway_data.get("read_buffer_limit_bytes", 64 * 1024 * 1024))
+                ),
+                response_spill_threshold_bytes=max(
+                    0, int(mcp_gateway_data.get("response_spill_threshold_bytes", 256 * 1024))
+                ),
             ),
             instances=InstancesConfig(
                 enabled=bool(instances_data.get("enabled", False)),
@@ -3401,15 +3481,19 @@ class KiroCrewConfig:
             **_kwargs: object,
         ) -> AcpProvider:
             wdir = Path(cwd) if cwd else _session_work_dir(session_key)
-            # Custom agents use their own model from their agent config;
-            # only override model for the default kirocrew agent.
-            # If model_override is provided (from slot.model), use it.
+            # Resolve the model: slot override, else the default kirocrew model,
+            # else the custom agent's own model. Custom agents MUST resolve here
+            # because the ACP session/set_mode path switches prompt/tools but not
+            # the model, so an unset model makes kiro fall back to cli.json's
+            # chat.defaultModel. Use _resolve_named_agent_model (the kiro model
+            # slot) to match this backend. Returns "" when none is declared;
+            # AcpClient normalizes "" to DEFAULT_MODEL, same as None.
             if model_override:
                 m = model_override
             elif not agent or agent == "kirocrew":
                 m = model
             else:
-                m = None
+                m = self._resolve_named_agent_model(agent)
             # Thread the slot's effort into a per-model override so the kiro
             # cli.json overlay is written from it at spawn — without this, a
             # kiro cold start (or the handler's reset-then-respawn) would only
