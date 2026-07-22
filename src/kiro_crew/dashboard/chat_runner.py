@@ -77,6 +77,7 @@ from kiro_crew.dashboard.handlers import (
 )
 from kiro_crew.dashboard.handlers.usage import persist_token_record_async
 from kiro_crew.dashboard.state import (
+    CANCEL_RECOVERY_PREFIX,
     CRON_NOTIFY_PREFIX,
     CRON_NOTIFY_RE,
     REFUSAL_RECOVERY_PREFIX,
@@ -87,6 +88,7 @@ from kiro_crew.dashboard.state import (
     TOOL_STALL_RECOVERY_PREFIX,
     DashboardState,
     _ChatSlot,
+    build_cancel_recovery_prompt,
     build_refusal_recovery_prompt,
     build_stale_recovery_prompt,
     build_tool_stall_recovery_prompt,
@@ -1759,6 +1761,15 @@ async def _run_chat(
     # this reset is a no-op for them and a later real turn can still recover.
     if message != _POSTTOKEN_RECOVER_MSG:
         slot._posttoken_retry_used = False
+    # Refresh the one-shot unexpected-cancel recovery allowance at the START of a
+    # GENUINE new user turn (mirrors _posttoken_retry_used above). The synthetic
+    # cancel-recovery continuation — detected by the CANCEL_RECOVERY_PREFIX — must
+    # NOT refresh the allowance: if that continuation is itself cancelled, the
+    # inherited True flag makes the re-cancel marker-only, so recovery can never
+    # loop. Suppressed/nested cancels never set the flag, so this reset is a
+    # no-op for them and a later real turn can still recover once.
+    if not message.startswith(CANCEL_RECOVERY_PREFIX):
+        slot._cancel_recover_used = False
     _pending_tools: dict[str, str] = {}  # tool_call_id -> tool_name
     # session_id -> {started, done, agent, task} for native kiro-cli subagents,
     # reconciled from `_kiro.dev/subagent/list_update` (one card per sub-agent).
@@ -1786,7 +1797,9 @@ async def _run_chat(
     _refusal_reasons: list[tuple[str, str]] = []
     # True when this turn IS an automatic refusal-recovery continuation. Used to
     # keep the synthetic prompt out of the linked-Slack user-message mirror.
-    _is_recovery = message.startswith(REFUSAL_RECOVERY_PREFIX)
+    _is_recovery = message.startswith(REFUSAL_RECOVERY_PREFIX) or message.startswith(
+        CANCEL_RECOVERY_PREFIX
+    )
     # The post-fan-out synthesis prompt is a synthetic continuation too: never
     # mirror it to linked surfaces (Slack/Telegram) as if the user typed it —
     # only its assistant reply is delivered.
@@ -2119,6 +2132,25 @@ async def _run_chat(
         # context_builder would hit UnboundLocalError at the mirror legs.
         _user_msg_for_mirror = message
 
+        # Consume the one-shot cancelled-turn flag at the start of every real
+        # (non-slash) turn, regardless of context_builder — a stale flag would
+        # otherwise leak into the cancel-attribution race guard at this turn's
+        # completion and misclassify an unexpected cancel as a user Stop.
+        # Preamble injection below still requires a conversation log; slash
+        # turns never reach the LLM, so they leave the flag for the next real
+        # turn.
+        _prev_turn_cancelled = False
+        if not is_slash:
+            try:
+                _ptc_session = getattr(state.sessions, "_sessions", {}).get(session_key)
+                if _ptc_session is not None and (
+                    getattr(_ptc_session, "prev_turn_cancelled", False) is True
+                ):
+                    _prev_turn_cancelled = True
+                    _ptc_session.prev_turn_cancelled = False
+            except Exception:
+                pass
+
         if is_slash:
             full_message = message
             sel().log_tool_invocation(
@@ -2173,11 +2205,9 @@ async def _run_chat(
             # Re-inject just the cancelled turn (user prompt + partial assistant)
             # as a preamble so the LLM remembers what was interrupted, without
             # duplicating older history. Flag lives on the session (set by
-            # SessionManager.stop_turn), consumed one-shot here. Use getattr
-            # for prev_turn_cancelled so test doubles don't raise on access.
-            _session = getattr(state.sessions, "_sessions", {}).get(session_key)
-            if _session is not None and getattr(_session, "prev_turn_cancelled", False):
-                _session.prev_turn_cancelled = False
+            # SessionManager.stop_turn), consumed one-shot ABOVE (before the
+            # context_builder gate, so it can never go stale).
+            if _prev_turn_cancelled:
                 if state.context_builder and state.context_builder.conversation_log:
                     from kiro_crew.context import (
                         build_cancelled_turn_preamble,  # circular: context -> dashboard.chat -> chat_runner (can't top-level: context imports chat at module load); circular: context -> chat -> chat_runner; circular: context -> chat
@@ -3809,7 +3839,74 @@ async def _run_chat(
             # post-token 5xx during recovery re-queue forever (finding #3).
 
         if _stop_reason == STOP_REASON_CANCELLED:
-            logger.info("Turn cancelled by user for slot %s", slot.key)
+            # Two flavors of cancel arrive here:
+            #  • USER Stop — intentional; ``_should_suppress_requeue(slot)`` is
+            #    True (slot._stop_state != "idle"). Stay silent (log only), never
+            #    re-queue — the user asked for it.
+            #  • UNEXPECTED cancel — an internal/task-layer cancellation
+            #    interrupted the turn while the slot was idle. Left as-is it is
+            #    silent and the turn dangles half-finished with no explanation.
+            #    Surface a visible marker and (one-shot, top-level only)
+            #    auto-continue on the SAME live session with a CONTINUE nudge so
+            #    the turn finishes in place. Modeled on the STALE_RECOVER path.
+            logger.info("Turn cancelled for slot %s", slot.key)
+            # RACE GUARD: a dashboard Stop's soft-ack callback (_on_soft) resets
+            # slot._stop_state to "idle" as soon as kiro-cli ACKs session/cancel
+            # — which can happen BEFORE this completion is consumed, so
+            # _should_suppress_requeue alone can misclassify a user Stop as an
+            # unexpected cancel and resume a task the user killed. stop_turn()
+            # sets session.prev_turn_cancelled = True synchronously BEFORE
+            # invoking on_soft, so a True flag here means "a user soft-stop was
+            # ACKed for this session" regardless of _stop_state timing. Treat
+            # either signal as a user cancellation.
+            _user_cancelled = _should_suppress_requeue(slot)
+            if not _user_cancelled:
+                try:
+                    _sess = getattr(state.sessions, "_sessions", {}).get(session_key)
+                    # Strict identity check: the flag is a real bool in
+                    # production; duck-typed stores/mocks must not classify.
+                    _user_cancelled = (
+                        getattr(_sess, "prev_turn_cancelled", False) is True
+                    )
+                except Exception:
+                    pass
+            if not _user_cancelled and _prompt_depth == 0:
+                def _emit_cancel(msg: str) -> None:
+                    slot.append("error", msg, "msg msg-err")
+                    state.broadcast_ws(
+                        "chat_message",
+                        {"slot": slot.key, "role": "error", "content": msg},
+                    )
+
+                if not slot._cancel_recover_used:
+                    # Consume the one-shot allowance ONLY on an actual enqueue
+                    # (mirrors the post-token finding #3 accounting), then
+                    # re-queue the CONTINUE nudge (NOT the original prompt) onto
+                    # the same live session — the finally-block dequeue
+                    # re-dispatches it against the still-loaded context.
+                    # kiro-cli discards cancelled turns from its own log, so
+                    # also flag prev_turn_cancelled: the recovery turn then
+                    # re-injects the interrupted user prompt + partial reply
+                    # via build_cancelled_turn_preamble (consumed one-shot at
+                    # turn start), giving the CONTINUE nudge its context.
+                    slot._cancel_recover_used = True
+                    try:
+                        _sess = getattr(state.sessions, "_sessions", {}).get(session_key)
+                        if _sess is not None:
+                            _sess.prev_turn_cancelled = True
+                    except Exception:
+                        logger.debug(
+                            "Could not flag prev_turn_cancelled for recovery", exc_info=True
+                        )
+                    slot.queue_insert(
+                        0, f"{CANCEL_RECOVERY_PREFIX}\n{build_cancel_recovery_prompt()}"
+                    )
+                    _emit_cancel("⟳ Interrupted — resuming…")
+                else:
+                    # Allowance already spent this user turn: marker only, no
+                    # re-queue — loop-proof (a cancelled recovery can't recover
+                    # again until a genuine new user turn refreshes the flag).
+                    _emit_cancel("⟳ Interrupted — please retry.")
         elif not _retrying_empty:
             _maybe_consolidate(state, slot)
         state.sessions.check_context_usage(session_key, client)
@@ -3901,6 +3998,20 @@ async def _run_chat(
                 redact_credentials(redact_exfiltration_urls(assistant_text)[0])[0],
                 "msg msg-a",
             )
+        # Hard cancel (task cancelled at the asyncio layer — e.g. a gateway
+        # shutdown/restart kills the in-flight turn). Best-effort flag the
+        # session so the NEXT turn after restart re-injects the interrupted
+        # context via build_cancelled_turn_preamble (consumed one-shot in the
+        # session-load path). Do NOT re-queue here — the process is going down;
+        # the queue would not survive, and on restart the preamble is the
+        # recovery signal. Guarded: session_key/_sessions may be unbound if the
+        # cancel fired before session acquisition.
+        try:
+            _sess = getattr(state.sessions, "_sessions", {}).get(session_key)
+            if _sess is not None:
+                _sess.prev_turn_cancelled = True
+        except Exception:
+            logger.debug("Could not flag prev_turn_cancelled on cancel", exc_info=True)
     except AcpProcessDied as exc:
         logger.warning("ACP process died in slot %s: %s — resetting session", slot.key, exc)
         needs_session_reset = True
@@ -4290,6 +4401,7 @@ async def _run_chat(
                 next_msg.startswith(REFUSAL_RECOVERY_PREFIX)
                 or next_msg.startswith(STALE_RECOVERY_PREFIX)
                 or next_msg.startswith(TOOL_STALL_RECOVERY_PREFIX)
+                or next_msg.startswith(CANCEL_RECOVERY_PREFIX)
             )
             # User took over: a plain user message draining cancels any armed
             # post-fan-out synthesis (the user has redirected the conversation).

@@ -8259,6 +8259,226 @@ class TestStopReasonCancelled:
         assert any("partial output here" in m["content"] for m in assistant_msgs)
 
 
+class TestUnexpectedCancelRecovery:
+    """Auto-continue + visibility for an UNEXPECTED (unattributed) cancel.
+
+    A ``cancelled`` stop reason arriving while the slot is idle (``_stop_state``
+    == "idle") is NOT a user Stop — it is an internal/task-layer cancellation
+    that left the turn dangling. The CANCELLED branch surfaces a visible marker
+    and, one-shot at top level, re-queues a CONTINUE nudge so the turn finishes
+    in place. A user Stop (``_stop_state`` != "idle") stays silent and never
+    re-queues. Mirrors the STALE_RECOVER + post-token one-shot precedents.
+    """
+
+    @staticmethod
+    def _make_state(tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        state.push_slots_update = MagicMock()
+        state.push_refresh = MagicMock()
+        state.context_builder = None
+        state.consolidator = None
+        state._hook_store = None
+        state._yolo = False
+        return state
+
+    @staticmethod
+    def _wire_sessions(state, client):
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+        state.sessions.get_pid = MagicMock(return_value=None)
+        state.sessions.check_context_usage = MagicMock()
+        state.sessions.record_success = MagicMock()
+        state.sessions.record_failure = AsyncMock()
+        state.sessions.release = MagicMock()
+        state.sessions.reset = AsyncMock()
+        state.sessions.get_slack_link = MagicMock(return_value=(None, None))
+
+    @staticmethod
+    def _client(stream):
+        client = AsyncMock()
+        client.context_usage_pct = MagicMock(return_value=0.0)
+        client.stream = stream
+        client.stream_command = stream
+        return client
+
+    @staticmethod
+    async def _drain_bg(state, limit=30):
+        for _ in range(limit):
+            pending = [t for t in list(state._background_tasks) if not t.done()]
+            if not pending:
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _err_texts(self, slot):
+        return [m["content"] for m in slot.messages if m.get("role") == "error"]
+
+    @pytest.mark.asyncio
+    async def test_user_stop_cancel_no_requeue_no_marker(self, tmp_path, monkeypatch):
+        """(a) A user Stop (slot._stop_state != 'idle') + cancelled → log only:
+        no continue-nudge re-queued, no '⟳ Interrupted' marker, allowance intact."""
+        from kiro_crew.acp.types import STOP_REASON_CANCELLED
+        from kiro_crew.dashboard.chat import _run_chat
+        from kiro_crew.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
+
+        calls: list = []
+
+        async def _stream(msg):
+            calls.append(msg)
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="partial")
+            yield LLMEvent(kind=EVENT_COMPLETE, stop_reason=STOP_REASON_CANCELLED)
+
+        state = self._make_state(tmp_path, monkeypatch)
+        client = self._client(_stream)
+        self._wire_sessions(state, client)
+        slot = state.get_or_create_slot("s1")
+        slot._titled = True
+        slot._stopping = True  # user Stop in progress → _stop_state != "idle"
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await _run_chat(state, slot, "hello")
+            await self._drain_bg(state)
+
+        assert calls == ["hello"]  # no recovery re-dispatch
+        assert not any("Interrupted" in t for t in self._err_texts(slot))
+        assert slot._cancel_recover_used is False
+
+    @pytest.mark.asyncio
+    async def test_soft_ack_race_treated_as_user_stop(self, tmp_path, monkeypatch):
+        """RACE GUARD (Codex #1): the dashboard Stop's soft-ack callback resets
+        slot._stop_state to 'idle' BEFORE the cancelled completion is consumed.
+        stop_turn() sets session.prev_turn_cancelled synchronously before that
+        reset, so a True flag must classify the cancel as a USER stop: no
+        marker, no re-queue, allowance intact."""
+        from types import SimpleNamespace
+
+        from kiro_crew.acp.types import STOP_REASON_CANCELLED
+        from kiro_crew.dashboard.chat import _run_chat
+        from kiro_crew.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
+
+        calls: list = []
+        sess = SimpleNamespace(prev_turn_cancelled=False)
+
+        async def _stream(msg):
+            calls.append(msg)
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="partial")
+            # Mid-turn: user presses Stop → stop_turn() sets the flag
+            # synchronously, THEN _on_soft resets slot._stop_state to "idle" —
+            # both before this cancelled completion is consumed below.
+            sess.prev_turn_cancelled = True
+            yield LLMEvent(kind=EVENT_COMPLETE, stop_reason=STOP_REASON_CANCELLED)
+
+        state = self._make_state(tmp_path, monkeypatch)
+        client = self._client(_stream)
+        self._wire_sessions(state, client)
+        slot = state.get_or_create_slot("s1")
+        slot._titled = True
+        # _stop_state stays "idle" (soft-ack already fired) but the session
+        # carries the synchronous user-stop flag set by stop_turn().
+        state.sessions._sessions = {"dashboard:s1": sess}
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await _run_chat(state, slot, "hello")
+            await self._drain_bg(state)
+
+        assert calls == ["hello"]  # classified as user stop → no re-dispatch
+        assert not any("Interrupted" in t for t in self._err_texts(slot))
+        assert slot._cancel_recover_used is False
+
+    @pytest.mark.asyncio
+    async def test_unattributed_cancel_marker_and_single_requeue(self, tmp_path, monkeypatch):
+        """(b) An idle-slot cancelled → visible marker + EXACTLY ONE continue
+        re-queue. A second cancel during that recovery (no intervening real user
+        turn) → marker only, no further re-queue (loop-proof)."""
+        from kiro_crew.acp.types import STOP_REASON_CANCELLED
+        from kiro_crew.dashboard.chat import _run_chat
+        from kiro_crew.dashboard.state import CANCEL_RECOVERY_PREFIX
+        from kiro_crew.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
+
+        calls: list = []
+
+        async def _stream(msg):
+            calls.append(msg)
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="partial")
+            yield LLMEvent(kind=EVENT_COMPLETE, stop_reason=STOP_REASON_CANCELLED)
+
+        state = self._make_state(tmp_path, monkeypatch)
+        client = self._client(_stream)
+        self._wire_sessions(state, client)
+        slot = state.get_or_create_slot("s1")
+        slot._titled = True
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await _run_chat(state, slot, "hello")
+            await self._drain_bg(state)
+
+        # Exactly two stream calls: the original + ONE continue re-dispatch.
+        assert len(calls) == 2
+        assert calls[0] == "hello"
+        # The re-dispatched message carries the continue nudge (it may be wrapped
+        # with a reset-history preamble, so match on substring not prefix).
+        assert CANCEL_RECOVERY_PREFIX in calls[1]
+        # One "resuming" marker (first turn) + one "please retry" marker (second).
+        errs = self._err_texts(slot)
+        assert sum("⟳ Interrupted — resuming…" in t for t in errs) == 1
+        assert sum("⟳ Interrupted — please retry." in t for t in errs) == 1
+        assert slot._cancel_recover_used is True
+
+    @pytest.mark.asyncio
+    async def test_allowance_refreshes_after_genuine_user_turn(self, tmp_path, monkeypatch):
+        """(c) A genuine new user turn resets the one-shot allowance so a later
+        unexpected cancel can recover again."""
+        from kiro_crew.acp.types import STOP_REASON_END_TURN
+        from kiro_crew.dashboard.chat import _run_chat
+        from kiro_crew.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
+
+        async def _stream(msg):
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="done")
+            yield LLMEvent(kind=EVENT_COMPLETE, stop_reason=STOP_REASON_END_TURN)
+
+        state = self._make_state(tmp_path, monkeypatch)
+        client = self._client(_stream)
+        self._wire_sessions(state, client)
+        slot = state.get_or_create_slot("s1")
+        slot._titled = True
+        slot._cancel_recover_used = True  # spent on a prior turn
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await _run_chat(state, slot, "a genuine new question")
+            await self._drain_bg(state)
+
+        assert slot._cancel_recover_used is False
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_sets_prev_turn_cancelled(self, tmp_path, monkeypatch):
+        """(d) A hard asyncio.CancelledError best-effort flags the session's
+        prev_turn_cancelled so the next post-restart turn re-injects context."""
+        from kiro_crew.dashboard.chat import _run_chat
+        from kiro_crew.providers.base import EVENT_TEXT_CHUNK, LLMEvent
+
+        async def _stream(msg):
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="partial")
+            raise asyncio.CancelledError()
+
+        state = self._make_state(tmp_path, monkeypatch)
+        client = self._client(_stream)
+        self._wire_sessions(state, client)
+
+        class _FakeSession:
+            prev_turn_cancelled = False
+
+        fake = _FakeSession()
+        # session_key for slot 's1' == 'dashboard:s1' (see _history_key_for).
+        state.sessions._sessions = {"dashboard:s1": fake}
+        slot = state.get_or_create_slot("s1")
+        slot._titled = True
+
+        # The handler swallows CancelledError (runs finally, returns normally).
+        await _run_chat(state, slot, "hello")
+
+        assert fake.prev_turn_cancelled is True
+
+
 # ── Phase 5: Soft-stop dashboard backend tests ──
 
 

@@ -380,6 +380,15 @@ STALE_RECOVERY_PREFIX = "[Stalled turn — automatic recovery]"
 # partial results and continue. Rendered as an "inject" message (not a user
 # bubble) and never mirrored to a linked Slack thread as user input.
 TOOL_STALL_RECOVERY_PREFIX = "[Tool stall — automatic recovery]"
+# Synthetic continuation injected after a turn was cancelled WITHOUT the user
+# asking for it (an unattributed/unexpected cancel — e.g. an internal task
+# cancellation that left ``slot._stop_state`` idle). Unlike a user Stop (which
+# is intentional and must stay silent), an unexpected cancel would otherwise
+# leave the turn half-finished with no explanation. This nudge tells the model
+# its previous turn was interrupted by the system — NOT the user — and to
+# resume from its last committed step. Rendered as an "inject" message (not a
+# user bubble) and never mirrored to a linked Slack thread as user input.
+CANCEL_RECOVERY_PREFIX = "[Interrupted turn — automatic recovery]"
 
 
 def should_queue_refusal_recovery(
@@ -531,6 +540,28 @@ def build_tool_stall_recovery_prompt(
     return "\n".join(lines)
 
 
+def build_cancel_recovery_prompt() -> str:
+    """Body of the continuation injected after an UNEXPECTED (unattributed) cancel.
+
+    A previous turn was cancelled but NOT by the user pressing Stop
+    (``slot._stop_state`` was idle when the ``cancelled`` stop reason arrived) —
+    e.g. an internal/task-layer cancellation interrupted the turn mid-flight.
+    The work already committed to the conversation is preserved on the same live
+    session; this nudge tells the model to CONTINUE from that last committed step
+    rather than restart. The caller prepends :data:`CANCEL_RECOVERY_PREFIX`.
+    Framed as a system interruption — NOT a user cancellation — so the agent
+    doesn't stop. Modeled on ``chat_runner._POSTTOKEN_RECOVER_MSG``.
+    """
+    return (
+        "Your previous response was interrupted partway through — this was NOT a "
+        "user action, so do not treat it as a cancellation or a request to stop. "
+        "The work already done above (including any completed tool results) is "
+        "preserved in the conversation. Continue from where it stopped to finish "
+        "the original request — do NOT restart from scratch and do NOT re-run "
+        "steps or tools that already completed successfully."
+    )
+
+
 # Anchor the closing ']' to end-of-line so the non-greedy body expands past a
 # literal ']' inside option text (e.g. "Fix [x] logging") instead of truncating
 # at the first inner bracket. Mirrors slack/format.py's _OPTIONS_RE so both the
@@ -671,6 +702,7 @@ class _ChatSlot:
         "_tool_stall_retries",
         "_transient_5xx_retries",
         "_posttoken_retry_used",
+        "_cancel_recover_used",
         "_empty_response_retries",
         "_batch_rejected",
         "_compaction_fail_streak",
@@ -808,6 +840,13 @@ class _ChatSlot:
         # ONCE on a transient 5xx (and only when no tool call fired). Reset on a
         # completed turn alongside _transient_5xx_retries (Mesh-2150).
         self._posttoken_retry_used: bool = False
+        # One-shot guard for unexpected-cancel auto-continue: a turn ended by an
+        # unattributed ``cancelled`` stop reason (NOT a user Stop) may be
+        # auto-continued at most ONCE. Consumed only when a continue-nudge is
+        # actually enqueued; refreshed at the start of a genuine new user turn
+        # (mirrors ``_posttoken_retry_used`` semantics) so a recovery that
+        # itself gets cancelled cannot loop forever.
+        self._cancel_recover_used: bool = False
         self._empty_response_retries: int = 0
         self._batch_rejected: bool = False
         # Per-turn compaction-status failure tracking (Mesh compaction-spam
