@@ -15,7 +15,8 @@ from kiro_crew.slack.handler import set_owner_id
 @pytest.fixture(autouse=True)
 def _mock_sel():
     _sel = MagicMock()
-    with patch("kiro_crew.slack.events.sel", return_value=_sel):
+    with patch("kiro_crew.slack.events_slash.sel", return_value=_sel), \
+         patch("kiro_crew.slack.events_message.sel", return_value=_sel):
         yield _sel
 
 
@@ -123,7 +124,7 @@ class TestRestartSlashCommand:
         with (
             patch.dict("os.environ", {"INVOCATION_ID": "abc"}),
             patch("os._exit") as mock_exit,
-            patch("kiro_crew.slack.events.asyncio.wait_for", _timeout_first),
+            patch("kiro_crew.slack.events_slash.asyncio.wait_for", _timeout_first),
         ):
             await _handle_restart(orch, "U_OWNER", "", respond)
         # Despite the hang, the process still exits and the audit is flushed.
@@ -193,9 +194,9 @@ class TestRestartBangAlias:
             "ts": "10.0", "team": "TTEST",
         }
         with (
-            patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm,
-            patch("kiro_crew.slack.events._handle_restart", new_callable=AsyncMock) as mock_restart,
-            patch("kiro_crew.slack.events.is_allowed_user", return_value=True),
+            patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm,
+            patch("kiro_crew.slack.events_slash._handle_restart", new_callable=AsyncMock) as mock_restart,
+            patch("kiro_crew.slack.events_message.is_allowed_user", return_value=True),
             patch("kiro_crew.slack.enterprise.check_message_origin", return_value=True),
         ):
             await _route_message(orch, event, seen, is_mention=False)
@@ -221,8 +222,8 @@ class TestRestartBangAlias:
             "ts": "10.0", "team": "TTEST",
         }
         with (
-            patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm,
-            patch("kiro_crew.slack.events.is_allowed_user", return_value=True),
+            patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm,
+            patch("kiro_crew.slack.events_message.is_allowed_user", return_value=True),
             patch("kiro_crew.slack.enterprise.check_message_origin", return_value=True),
             patch("os._exit") as mock_exit,
         ):

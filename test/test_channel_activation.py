@@ -57,8 +57,8 @@ class TestChannelActivationRouting:
         seen = SeenCache()
         event = {"user": "U1", "channel": "D1234", "text": "hello", "ts": "1.0", "team": "TTEST"}
 
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm:
-            with patch("kiro_crew.slack.events.is_allowed_user", return_value=True):
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm:
+            with patch("kiro_crew.slack.events_message.is_allowed_user", return_value=True):
                 await _route_message(orch, event, seen, is_mention=False)
                 # handle_message is dispatched via asyncio.create_task, give it a tick
                 await asyncio.sleep(0)
@@ -75,8 +75,8 @@ class TestChannelActivationRouting:
         seen = SeenCache()
         event = {"user": "U1", "channel": "C1234", "text": "hello", "ts": "2.0", "team": "TTEST"}
 
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm:
-            with patch("kiro_crew.slack.events.is_allowed_user", return_value=True):
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm:
+            with patch("kiro_crew.slack.events_message.is_allowed_user", return_value=True):
                 await _route_message(orch, event, seen, is_mention=False)
                 await asyncio.sleep(0)
                 mock_hm.assert_not_called()
@@ -94,8 +94,8 @@ class TestChannelActivationRouting:
             "team": "TTEST",
         }
 
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm:
-            with patch("kiro_crew.slack.events.is_allowed_user", return_value=True):
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm:
+            with patch("kiro_crew.slack.events_message.is_allowed_user", return_value=True):
                 await _route_message(orch, event, seen, is_mention=True)
                 await asyncio.sleep(0)
                 tasks = list(orch._handler_tasks)
@@ -128,8 +128,8 @@ class TestChannelActivationRouting:
             "thread_ts": "3.0",
         }
 
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm:
-            with patch("kiro_crew.slack.events.is_allowed_user", return_value=True):
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm:
+            with patch("kiro_crew.slack.events_message.is_allowed_user", return_value=True):
                 await _route_message(orch, event, seen, is_mention=False)
                 await asyncio.sleep(0)
                 tasks = list(orch._handler_tasks)
@@ -156,7 +156,7 @@ class TestChannelActivationRouting:
             "thread_ts": "3.0",
         }
 
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm:
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm:
             await _route_message(orch, event, seen, is_mention=False)
             # Drain any tasks _route_message may have scheduled — relying on
             # `asyncio.sleep(0)` is too tight on the build farm where worker
@@ -177,7 +177,7 @@ class TestChannelActivationRouting:
         seen = SeenCache()
         event = {"user": "U1", "channel": "C1234", "text": "hello", "ts": "4.0", "team": "TTEST"}
 
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm:
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm:
             await _route_message(orch, event, seen, is_mention=True)
             await asyncio.sleep(0)
             mock_hm.assert_not_called()
@@ -189,7 +189,7 @@ class TestChannelActivationRouting:
         seen = SeenCache()
         event = {"user": "U1", "channel": "C1234", "text": "hello", "ts": "5.0", "team": "TTEST"}
 
-        with patch("kiro_crew.slack.events.sel") as mock_sel:
+        with patch("kiro_crew.slack.events_message.sel") as mock_sel:
             mock_sel.return_value.log_api_access = MagicMock()
             await _route_message(orch, event, seen, is_mention=False)
             orch.channel_history.push.assert_not_called()
@@ -201,8 +201,8 @@ class TestChannelActivationRouting:
         seen = SeenCache()
         event = {"user": "U1", "channel": "C1234", "text": "hello", "ts": "6.0", "team": "TTEST"}
 
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm:
-            with patch("kiro_crew.slack.events.is_allowed_user", return_value=True):
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm:
+            with patch("kiro_crew.slack.events_message.is_allowed_user", return_value=True):
                 await _route_message(orch, event, seen, is_mention=False)
                 await asyncio.sleep(0)
                 tasks = list(orch._handler_tasks)
@@ -226,8 +226,8 @@ class TestChannelActivationRouting:
             "team": "TTEST",
         }
 
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm:
-            with patch("kiro_crew.slack.events.is_allowed_user", return_value=True):
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm:
+            with patch("kiro_crew.slack.events_message.is_allowed_user", return_value=True):
                 await _route_message(orch, event, seen, is_mention=False)
                 await asyncio.sleep(0)
                 tasks = list(orch._handler_tasks)
@@ -250,9 +250,9 @@ class TestTransportGateReviewMode:
         # Review mode requires a mention to be processed at all.
         event = {"user": "U1", "channel": "C1234", "text": "hi", "ts": "9.0", "team": "TTEST"}
 
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm, \
-             patch("kiro_crew.slack.events.handle_message_transport", new_callable=AsyncMock) as mock_tr, \
-             patch("kiro_crew.slack.events.is_allowed_user", return_value=True):
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm, \
+             patch("kiro_crew.slack.events_message.handle_message_transport", new_callable=AsyncMock) as mock_tr, \
+             patch("kiro_crew.slack.events_message.is_allowed_user", return_value=True):
             await _route_message(orch, event, seen, is_mention=True)
             await asyncio.sleep(0)
             await asyncio.gather(*list(orch._handler_tasks), return_exceptions=True)
@@ -269,9 +269,9 @@ class TestTransportGateReviewMode:
         seen = SeenCache()
         event = {"user": "U1", "channel": "C1234", "text": "hi", "ts": "9.1", "team": "TTEST"}
 
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm, \
-             patch("kiro_crew.slack.events.handle_message_transport", new_callable=AsyncMock) as mock_tr, \
-             patch("kiro_crew.slack.events.is_allowed_user", return_value=True):
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm, \
+             patch("kiro_crew.slack.events_message.handle_message_transport", new_callable=AsyncMock) as mock_tr, \
+             patch("kiro_crew.slack.events_message.is_allowed_user", return_value=True):
             await _route_message(orch, event, seen, is_mention=False)
             await asyncio.sleep(0)
             await asyncio.gather(*list(orch._handler_tasks), return_exceptions=True)
@@ -377,8 +377,8 @@ class TestRouteMessageStop:
             "team": "TTEST",
         }
 
-        with patch("kiro_crew.slack.events.is_owner", return_value=True), patch(
-            "kiro_crew.slack.events.is_allowed_user", return_value=True
+        with patch("kiro_crew.slack.events_message.is_owner", return_value=True), patch(
+            "kiro_crew.slack.events_message.is_allowed_user", return_value=True
         ), patch("kiro_crew.slack.enterprise.check_message_origin", return_value=True):
             await _route_message(orch, event, seen, is_mention=False)
 
@@ -419,9 +419,9 @@ class TestRouteMessageStop:
         }
 
         with patch(
-            "kiro_crew.slack.events.handle_message", new_callable=AsyncMock
-        ) as mock_hm, patch("kiro_crew.slack.events.is_owner", return_value=True), patch(
-            "kiro_crew.slack.events.is_allowed_user", return_value=True
+            "kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock
+        ) as mock_hm, patch("kiro_crew.slack.events_message.is_owner", return_value=True), patch(
+            "kiro_crew.slack.events_message.is_allowed_user", return_value=True
         ), patch(
             "kiro_crew.slack.enterprise.check_message_origin", return_value=True
         ):
@@ -443,8 +443,8 @@ class TestDispatchQueuedRouting:
     async def test_queued_drains_to_transport_when_on(self):
         orch = _make_orch(channels={"C1234": ChannelConfig(activation=ACTIVATION_ALWAYS)})
         orch._cfg.messaging = MessagingConfig(use_transport=True)
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm, \
-             patch("kiro_crew.slack.events.handle_message_transport", new_callable=AsyncMock) as mock_tr:
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm, \
+             patch("kiro_crew.slack.events_message.handle_message_transport", new_callable=AsyncMock) as mock_tr:
             await _dispatch_queued(orch, "9.0", "9.0", "follow up", self._kwargs())
             mock_tr.assert_awaited_once()
             mock_hm.assert_not_called()
@@ -453,8 +453,8 @@ class TestDispatchQueuedRouting:
     async def test_queued_review_channel_drains_to_native(self):
         orch = _make_orch(channels={"C1234": ChannelConfig(activation=ACTIVATION_REVIEW)})
         orch._cfg.messaging = MessagingConfig(use_transport=True)
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm, \
-             patch("kiro_crew.slack.events.handle_message_transport", new_callable=AsyncMock) as mock_tr:
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm, \
+             patch("kiro_crew.slack.events_message.handle_message_transport", new_callable=AsyncMock) as mock_tr:
             await _dispatch_queued(orch, "9.0", "9.0", "follow up", self._kwargs())
             mock_hm.assert_awaited_once()
             mock_tr.assert_not_called()
@@ -463,8 +463,8 @@ class TestDispatchQueuedRouting:
     async def test_queued_drains_to_native_when_transport_off(self):
         orch = _make_orch(channels={"C1234": ChannelConfig(activation=ACTIVATION_ALWAYS)})
         orch._cfg.messaging = MessagingConfig(use_transport=False)
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm, \
-             patch("kiro_crew.slack.events.handle_message_transport", new_callable=AsyncMock) as mock_tr:
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm, \
+             patch("kiro_crew.slack.events_message.handle_message_transport", new_callable=AsyncMock) as mock_tr:
             await _dispatch_queued(orch, "9.0", "9.0", "follow up", self._kwargs())
             mock_hm.assert_awaited_once()
             mock_tr.assert_not_called()

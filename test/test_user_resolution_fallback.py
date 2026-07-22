@@ -57,8 +57,8 @@ class TestUserResolutionFallback:
             "team": "TTEST",
         }
 
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm:
-            with patch("kiro_crew.slack.events.is_allowed_user", return_value=True):
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm:
+            with patch("kiro_crew.slack.events_message.is_allowed_user", return_value=True):
                 await _route_message(orch, event, seen, is_mention=False)
                 await asyncio.sleep(0)
                 tasks = list(orch._handler_tasks)
@@ -89,8 +89,8 @@ class TestUserResolutionFallback:
             "team": "TTEST",
         }
 
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm:
-            with patch("kiro_crew.slack.events.is_allowed_user", return_value=True):
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm:
+            with patch("kiro_crew.slack.events_message.is_allowed_user", return_value=True):
                 await _route_message(orch, event, seen, is_mention=False)
                 await asyncio.sleep(0)
                 tasks = list(orch._handler_tasks)
@@ -116,8 +116,8 @@ class TestUserResolutionFallback:
             "team": "TTEST",
         }
 
-        with patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock) as mock_hm:
-            with patch("kiro_crew.slack.events.is_allowed_user", return_value=True):
+        with patch("kiro_crew.slack.events_message.handle_message", new_callable=AsyncMock) as mock_hm:
+            with patch("kiro_crew.slack.events_message.is_allowed_user", return_value=True):
                 await _route_message(orch, event, seen, is_mention=False)
                 await asyncio.sleep(0)
                 tasks = list(orch._handler_tasks)

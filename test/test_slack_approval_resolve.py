@@ -45,11 +45,11 @@ class TestResolveApprovalMode:
     def test_runtime_yolo_active_resolves_auto(self, monkeypatch) -> None:
         # Runtime /meshclaw yolo (safety_override) must auto-approve on BOTH
         # native and transport paths — folded in at this chokepoint.
-        monkeypatch.setattr("kiro_crew.slack.events.is_yolo_mode", lambda: True)
+        monkeypatch.setattr("kiro_crew.slack.events_message.is_yolo_mode", lambda: True)
         assert _resolve_approval_mode(_orch(None, "interactive")) == APPROVAL_AUTO
         assert _resolve_approval_mode(_orch("interactive", "interactive")) == APPROVAL_AUTO
 
     def test_runtime_yolo_inactive_keeps_config(self, monkeypatch) -> None:
-        monkeypatch.setattr("kiro_crew.slack.events.is_yolo_mode", lambda: False)
+        monkeypatch.setattr("kiro_crew.slack.events_message.is_yolo_mode", lambda: False)
         assert _resolve_approval_mode(_orch(None, "interactive")) == APPROVAL_INTERACTIVE
         assert _resolve_approval_mode(_orch(None, "auto")) == APPROVAL_AUTO

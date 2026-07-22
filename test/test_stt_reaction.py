@@ -19,7 +19,7 @@ class TestSttReactionIndicator:
         orch = AsyncMock()
 
         with patch(
-            "kiro_crew.slack.events._transcribe_files",
+            "kiro_crew.slack.events_message._transcribe_files",
             new_callable=AsyncMock,
             return_value=["hello world"],
         ):
@@ -47,7 +47,7 @@ class TestSttReactionIndicator:
         orch = AsyncMock()
 
         with patch(
-            "kiro_crew.slack.events._transcribe_files",
+            "kiro_crew.slack.events_message._transcribe_files",
             new_callable=AsyncMock,
             side_effect=RuntimeError("crash"),
         ):
@@ -72,7 +72,7 @@ class TestSttReactionIndicator:
         orch = AsyncMock()
 
         with patch(
-            "kiro_crew.slack.events._transcribe_files",
+            "kiro_crew.slack.events_message._transcribe_files",
             new_callable=AsyncMock,
             return_value=[],
         ):

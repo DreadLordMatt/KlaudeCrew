@@ -351,7 +351,7 @@ class TestTranscribeFiles:
         ]
 
         with patch(
-            "kiro_crew.slack.events.transcribe_audio", new_callable=AsyncMock, return_value="Hello"
+            "kiro_crew.slack.events_message.transcribe_audio", new_callable=AsyncMock, return_value="Hello"
         ):
             result = await _transcribe_files(mock_orch, files)
         assert result == ["Hello"]

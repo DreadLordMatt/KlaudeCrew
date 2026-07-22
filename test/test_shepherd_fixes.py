@@ -459,7 +459,7 @@ class TestYoloFromConfigSlackGuards:
 
         from kiro_crew.slack.events import _handle_yolo
 
-        with patch("kiro_crew.slack.events.sel") as mock_sel, patch("kiro_crew.slack.events.is_owner", return_value=True):
+        with patch("kiro_crew.slack.events_slash.sel") as mock_sel, patch("kiro_crew.slack.events_slash.is_owner", return_value=True):
             await _handle_yolo(orch, "UOWNER", "on", respond)
 
         respond.assert_awaited_once()

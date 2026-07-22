@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import kiro_crew.slack.events as events
+import kiro_crew.slack.events_slash as events_slash
 from kiro_crew.slack.events import _handle_slash, register_slash_command
 
 
@@ -31,8 +32,8 @@ def _make_orch() -> MagicMock:
 @pytest.mark.asyncio
 async def test_slash_handler_task_is_retained(tmp_path, monkeypatch) -> None:
     # Allow the caller through the authorization gate.
-    monkeypatch.setattr(events, "is_allowed_user", lambda _cid: True)
-    monkeypatch.setattr(events, "sel", lambda: MagicMock())
+    monkeypatch.setattr(events_slash, "is_allowed_user", lambda _cid: True)
+    monkeypatch.setattr(events_slash, "sel", lambda: MagicMock())
 
     gate = asyncio.Event()  # keep the handler pending so the task stays in _bg_tasks
     ran = asyncio.Event()
@@ -67,8 +68,8 @@ async def test_slash_handler_task_is_retained(tmp_path, monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_unauthorized_reply_task_is_retained(tmp_path, monkeypatch) -> None:
     # Denied caller → the "not authorized" reply is also a tracked task.
-    monkeypatch.setattr(events, "is_allowed_user", lambda _cid: False)
-    monkeypatch.setattr(events, "sel", lambda: MagicMock())
+    monkeypatch.setattr(events_slash, "is_allowed_user", lambda _cid: False)
+    monkeypatch.setattr(events_slash, "sel", lambda: MagicMock())
 
     events._bg_tasks.clear()
     orch = _make_orch()
@@ -83,8 +84,8 @@ async def test_unauthorized_reply_task_is_retained(tmp_path, monkeypatch) -> Non
 @pytest.mark.asyncio
 async def test_owner_not_configured_reply_retained(tmp_path, monkeypatch) -> None:
     # Allowed caller but no owner/slack configured → "owner not configured" reply path.
-    monkeypatch.setattr(events, "is_allowed_user", lambda _cid: True)
-    monkeypatch.setattr(events, "sel", lambda: MagicMock())
+    monkeypatch.setattr(events_slash, "is_allowed_user", lambda _cid: True)
+    monkeypatch.setattr(events_slash, "sel", lambda: MagicMock())
     orch = _make_orch()
     orch._owner_id = ""  # falsy → triggers the owner-not-configured branch
     events._bg_tasks.clear()
@@ -98,9 +99,9 @@ async def test_owner_not_configured_reply_retained(tmp_path, monkeypatch) -> Non
 @pytest.mark.asyncio
 async def test_unknown_subcommand_help_reply_retained(tmp_path, monkeypatch) -> None:
     # Unknown sub-command → help-text reply is dispatched as a tracked task.
-    monkeypatch.setattr(events, "is_allowed_user", lambda _cid: True)
-    monkeypatch.setattr(events, "sel", lambda: MagicMock())
-    monkeypatch.setattr(events, "_build_help_text", lambda _cmd: "help")
+    monkeypatch.setattr(events_slash, "is_allowed_user", lambda _cid: True)
+    monkeypatch.setattr(events_slash, "sel", lambda: MagicMock())
+    monkeypatch.setattr(events_slash, "_build_help_text", lambda _cmd: "help")
     orch = _make_orch()
     events._bg_tasks.clear()
     await _handle_slash(orch, {"command": "/kirocrew", "user_id": "U1", "text": "no_such_subcmd_xyz", "response_url": "https://example.test/r"})
@@ -113,8 +114,8 @@ async def test_unknown_subcommand_help_reply_retained(tmp_path, monkeypatch) -> 
 @pytest.mark.asyncio
 async def test_user_mention_disabled_reply_retained(tmp_path, monkeypatch) -> None:
     # "<@user>" mention → multi-user-disabled reply is dispatched as a tracked task.
-    monkeypatch.setattr(events, "is_allowed_user", lambda _cid: True)
-    monkeypatch.setattr(events, "sel", lambda: MagicMock())
+    monkeypatch.setattr(events_slash, "is_allowed_user", lambda _cid: True)
+    monkeypatch.setattr(events_slash, "sel", lambda: MagicMock())
     orch = _make_orch()
     events._bg_tasks.clear()
     await _handle_slash(
@@ -130,13 +131,13 @@ async def test_user_mention_disabled_reply_retained(tmp_path, monkeypatch) -> No
 @pytest.mark.asyncio
 async def test_channel_mention_track_tasks_retained(tmp_path, monkeypatch) -> None:
     # "#<channel>" mention → prompt_track_channel + ack reply, both tracked tasks.
-    monkeypatch.setattr(events, "is_allowed_user", lambda _cid: True)
-    monkeypatch.setattr(events, "sel", lambda: MagicMock())
+    monkeypatch.setattr(events_slash, "is_allowed_user", lambda _cid: True)
+    monkeypatch.setattr(events_slash, "sel", lambda: MagicMock())
 
     async def _noop(*a, **k):
         return None
 
-    monkeypatch.setattr(events, "prompt_track_channel", _noop)
+    monkeypatch.setattr(events_slash, "prompt_track_channel", _noop)
     orch = _make_orch()
     events._bg_tasks.clear()
     await _handle_slash(
@@ -154,8 +155,8 @@ async def test_raising_handler_task_still_self_cleans(tmp_path, monkeypatch) -> 
     # A slash handler that raises must NOT leak in _bg_tasks — the done-callback
     # discards regardless of outcome and consumes the exception (so it isn't surfaced
     # as an unretrieved-task-exception warning). Covers the done-callback contract.
-    monkeypatch.setattr(events, "is_allowed_user", lambda _cid: True)
-    monkeypatch.setattr(events, "sel", lambda: MagicMock())
+    monkeypatch.setattr(events_slash, "is_allowed_user", lambda _cid: True)
+    monkeypatch.setattr(events_slash, "sel", lambda: MagicMock())
 
     async def _boom(orch, caller_id, args, respond):  # noqa: ANN001
         raise RuntimeError("handler exploded")

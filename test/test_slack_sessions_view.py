@@ -683,9 +683,9 @@ class TestSlashSessionsAudit:
             respond(*a, **kw)
 
         with (
-            patch("kiro_crew.slack.events.sel") as mock_sel,
-            patch("kiro_crew.slack.events.is_owner", return_value=True),
-            patch("kiro_crew.slack.events.is_allowed_user", return_value=False),
+            patch("kiro_crew.slack.events_slash.sel") as mock_sel,
+            patch("kiro_crew.slack.events_slash.is_owner", return_value=True),
+            patch("kiro_crew.slack.events_slash.is_allowed_user", return_value=False),
         ):
             mock_sel.return_value.log_api_access = MagicMock()
             await _handle_sessions(orch, "UCALLER", "", _arespond)
@@ -718,9 +718,9 @@ class TestSlashSessionsAudit:
             respond(*a, **kw)
 
         with (
-            patch("kiro_crew.slack.events.sel") as mock_sel,
-            patch("kiro_crew.slack.events.is_owner", return_value=True),
-            patch("kiro_crew.slack.events.is_allowed_user", return_value=False),
+            patch("kiro_crew.slack.events_slash.sel") as mock_sel,
+            patch("kiro_crew.slack.events_slash.is_owner", return_value=True),
+            patch("kiro_crew.slack.events_slash.is_allowed_user", return_value=False),
         ):
             mock_sel.return_value.log_api_access = MagicMock()
             await _handle_sessions(orch, "UCALLER", "", _arespond)
@@ -767,9 +767,9 @@ class TestSlashSessionsAudit:
             respond(*a, **kw)
 
         with (
-            patch("kiro_crew.slack.events.sel") as mock_sel,
-            patch("kiro_crew.slack.events.is_owner", return_value=False),
-            patch("kiro_crew.slack.events.is_allowed_user", return_value=False),
+            patch("kiro_crew.slack.events_slash.sel") as mock_sel,
+            patch("kiro_crew.slack.events_slash.is_owner", return_value=False),
+            patch("kiro_crew.slack.events_slash.is_allowed_user", return_value=False),
         ):
             mock_sel.return_value.log_api_access = MagicMock()
             await _handle_sessions(orch, "UATTACKER", "skim", _arespond)
@@ -822,9 +822,9 @@ class TestSlashSessionsAudit:
             respond(*a, **kw)
 
         with (
-            patch("kiro_crew.slack.events.sel") as mock_sel,
-            patch("kiro_crew.slack.events.is_owner", return_value=False),
-            patch("kiro_crew.slack.events.is_allowed_user", return_value=True),
+            patch("kiro_crew.slack.events_slash.sel") as mock_sel,
+            patch("kiro_crew.slack.events_slash.is_owner", return_value=False),
+            patch("kiro_crew.slack.events_slash.is_allowed_user", return_value=True),
         ):
             mock_sel.return_value.log_api_access = MagicMock()
             await _handle_sessions(orch, "UALLOWED", "", _arespond)
@@ -850,11 +850,11 @@ class TestSlashSessionsAudit:
             respond(*a, **kw)
 
         with (
-            patch("kiro_crew.slack.events.sel") as mock_sel,
-            patch("kiro_crew.slack.events.is_owner", return_value=True),
-            patch("kiro_crew.slack.events.is_allowed_user", return_value=False),
+            patch("kiro_crew.slack.events_slash.sel") as mock_sel,
+            patch("kiro_crew.slack.events_slash.is_owner", return_value=True),
+            patch("kiro_crew.slack.events_slash.is_allowed_user", return_value=False),
             patch(
-                "kiro_crew.slack.events._collect_recent_sessions",
+                "kiro_crew.slack.events_slash._collect_recent_sessions",
                 side_effect=OSError("disk error"),
             ),
         ):
@@ -895,11 +895,11 @@ class TestSlashSessionsAudit:
 
         leaked_key = "AKIAIOSFODNN7EXAMPLE"
         with (
-            patch("kiro_crew.slack.events.sel") as mock_sel,
-            patch("kiro_crew.slack.events.is_owner", return_value=True),
-            patch("kiro_crew.slack.events.is_allowed_user", return_value=False),
+            patch("kiro_crew.slack.events_slash.sel") as mock_sel,
+            patch("kiro_crew.slack.events_slash.is_owner", return_value=True),
+            patch("kiro_crew.slack.events_slash.is_allowed_user", return_value=False),
             patch(
-                "kiro_crew.slack.events._collect_recent_sessions",
+                "kiro_crew.slack.events_slash._collect_recent_sessions",
                 side_effect=OSError(f"failed reading {leaked_key} from path"),
             ),
         ):
