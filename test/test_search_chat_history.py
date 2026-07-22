@@ -209,7 +209,7 @@ class TestWorkspaceScope:
         monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
         self._seed_two_workspaces(tmp_path)
         # Resolve caller identity to the alpha-workspace session.
-        monkeypatch.setattr(mcp_core, "_resolve_session_key", lambda: "dashboard_chat-self")
+        monkeypatch.setattr("kiro_crew.mcp_core.handlers.knowledge_chat._resolve_session_key", lambda: "dashboard_chat-self")
         out = mcp_core._call_tool_inner("search_chat_history", {"query": "widget bug"})
         assert "dashboard_chat-alpha" in out  # EB-cc3: same workspace surfaces
         assert "dashboard_chat-beta" not in out  # other workspace hidden
@@ -217,7 +217,7 @@ class TestWorkspaceScope:
     def test_all_workspaces_opt_in(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
         self._seed_two_workspaces(tmp_path)
-        monkeypatch.setattr(mcp_core, "_resolve_session_key", lambda: "dashboard_chat-self")
+        monkeypatch.setattr("kiro_crew.mcp_core.handlers.knowledge_chat._resolve_session_key", lambda: "dashboard_chat-self")
         out = mcp_core._call_tool_inner(
             "search_chat_history", {"query": "widget bug", "all_workspaces": True}
         )
@@ -232,7 +232,7 @@ class TestWorkspaceScope:
         # Add an unset-workspace ("default" bucket) match.
         cl = ConversationLog(base_dir=tmp_path / "sessions")
         cl.append("dashboard_chat-default", "user", "the widget bug in default ws")
-        monkeypatch.setattr(mcp_core, "_resolve_session_key", lambda: "")
+        monkeypatch.setattr("kiro_crew.mcp_core.handlers.knowledge_chat._resolve_session_key", lambda: "")
         out = mcp_core._call_tool_inner("search_chat_history", {"query": "widget bug"})
         assert "dashboard_chat-default" in out  # default bucket included
         assert "dashboard_chat-alpha" not in out  # named workspaces excluded
@@ -273,14 +273,14 @@ class TestGetChatSessionWorkspaceGate:
     def test_same_workspace_allowed(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
         self._seed(tmp_path)
-        monkeypatch.setattr(mcp_core, "_resolve_session_key", lambda: "dashboard_chat-self")
+        monkeypatch.setattr("kiro_crew.mcp_core.handlers.knowledge_chat._resolve_session_key", lambda: "dashboard_chat-self")
         out = mcp_core._call_tool_inner("get_chat_session", {"session_key": "dashboard_chat-alpha"})
         assert "secret alpha content" in out
 
     def test_cross_workspace_denied(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
         self._seed(tmp_path)
-        monkeypatch.setattr(mcp_core, "_resolve_session_key", lambda: "dashboard_chat-self")
+        monkeypatch.setattr("kiro_crew.mcp_core.handlers.knowledge_chat._resolve_session_key", lambda: "dashboard_chat-self")
         out = mcp_core._call_tool_inner("get_chat_session", {"session_key": "dashboard_chat-beta"})
         assert "Access denied" in out
         assert "secret beta content" not in out
@@ -288,7 +288,7 @@ class TestGetChatSessionWorkspaceGate:
     def test_cross_workspace_all_workspaces_opt_in(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
         self._seed(tmp_path)
-        monkeypatch.setattr(mcp_core, "_resolve_session_key", lambda: "dashboard_chat-self")
+        monkeypatch.setattr("kiro_crew.mcp_core.handlers.knowledge_chat._resolve_session_key", lambda: "dashboard_chat-self")
         out = mcp_core._call_tool_inner(
             "get_chat_session", {"session_key": "dashboard_chat-beta", "all_workspaces": True}
         )
@@ -374,7 +374,7 @@ class TestPostMergeHardening:
             cl.update_metadata(f"decoy-{i}", {"workspace": "alpha"})
         # one real default-bucket match
         cl.append("real", "user", "the widget bug we discussed")
-        monkeypatch.setattr(mcp_core, "_resolve_session_key", lambda: "")
+        monkeypatch.setattr("kiro_crew.mcp_core.handlers.knowledge_chat._resolve_session_key", lambda: "")
         out = mcp_core._call_tool_inner("search_chat_history", {"query": "widget", "limit": 5})
         assert "real" in out
         assert "decoy-" not in out

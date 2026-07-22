@@ -107,13 +107,13 @@ def mock_dashboard(tmp_path, monkeypatch):
 
     # The tool reads the local secret from config_dir()/.local_secret.
     (tmp_path / ".local_secret").write_text(_MockAutonudgeHandler.secret)
-    monkeypatch.setattr(mcp_core, "config_dir", lambda: tmp_path)
+    monkeypatch.setattr("kiro_crew.mcp_core.identity.config_dir", lambda: tmp_path)
     # Point the tool's API base at the mock server, and give it a dashboard
     # session key so autonudge_stop proceeds past its "dashboard-only" guard.
-    monkeypatch.setattr(mcp_core, "_API", f"http://127.0.0.1:{port}")
+    monkeypatch.setattr("kiro_crew.mcp_core.transport._API", f"http://127.0.0.1:{port}")
     monkeypatch.setenv("KIROCREW_SESSION_KEY", "dashboard:chat-3-1700000000")
     # Reset the in-process user-token cache so each test bootstraps fresh.
-    monkeypatch.setattr(mcp_core, "_USER_TOKEN_CACHE", ("", 0.0))
+    monkeypatch.setattr("kiro_crew.mcp_core.identity._USER_TOKEN_CACHE", ("", 0.0))
 
     yield port
     server.shutdown()

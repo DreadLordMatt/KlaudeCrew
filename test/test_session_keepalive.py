@@ -66,7 +66,7 @@ def test_wait_tool_posts_keepalive_periodically():
 
     from kiro_crew.mcp_core import _call_tool
 
-    with patch("kiro_crew.mcp_core._post") as mock_post, patch.object(
+    with patch("kiro_crew.mcp_core.handlers.misc._post") as mock_post, patch.object(
         _time, "sleep", return_value=None
     ):
         mock_post.return_value = {}

@@ -29,12 +29,12 @@ class TestFU1ReaperRemediation:
 class TestFU3EmptyCostHint:
     def test_save_response_warns_on_empty_estimates(self):
         from kiro_crew import mcp_core
-        src = Path(mcp_core.__file__.replace(".pyc", ".py")).read_text()
+        src = "\n".join(f.read_text() for f in sorted(Path(mcp_core.__file__).parent.rglob("*.py")))
         assert "webapp_metadata.cost.estimates is empty" in src
 
     def test_hint_condition_requires_webapp_kind(self):
         from kiro_crew import mcp_core
-        src = Path(mcp_core.__file__.replace(".pyc", ".py")).read_text()
+        src = "\n".join(f.read_text() for f in sorted(Path(mcp_core.__file__).parent.rglob("*.py")))
         gate = src.split("cost_hint = \"\"")[1].split("cost_hint = (")[0]
         assert 'kind == "webapp"' in gate
 

@@ -25,7 +25,7 @@ class TestResolveSessionKey:
         on sandboxed macOS) even when the env answer is already present."""
         with patch.dict(
             "os.environ", {"KIROCREW_SESSION_KEY": "dashboard:chat-9-999"}
-        ), patch("kiro_crew.mcp_core._get_ppid") as mock_ppid:
+        ), patch("kiro_crew.mcp_core.governance._get_ppid") as mock_ppid:
             assert _resolve_session_key() == "dashboard:chat-9-999"
             mock_ppid.assert_not_called()
 
@@ -38,7 +38,7 @@ class TestResolveSessionKey:
         (tmp_path / f"session_pid_{ppid}.txt").write_text("dashboard:chat-warm-7")
         env = {k: v for k, v in os.environ.items() if k != "KIROCREW_SESSION_KEY"}
         with patch.dict("os.environ", env, clear=True), patch(
-            "kiro_crew.mcp_core.config_dir", return_value=tmp_path
+            "kiro_crew.mcp_core.governance.config_dir", return_value=tmp_path
         ):
             assert _resolve_session_key() == "dashboard:chat-warm-7"
 
@@ -49,7 +49,7 @@ class TestResolveSessionKey:
 
         env = {k: v for k, v in os.environ.items() if k != "KIROCREW_SESSION_KEY"}
         with patch.dict("os.environ", env, clear=True), patch(
-            "kiro_crew.mcp_core.config_dir", return_value=tmp_path
+            "kiro_crew.mcp_core.governance.config_dir", return_value=tmp_path
         ):
             assert _resolve_session_key() == "dashboard:chat-2-456"
 
@@ -63,9 +63,9 @@ class TestResolveSessionKey:
 
         env = {k: v for k, v in os.environ.items() if k != "KIROCREW_SESSION_KEY"}
         with patch.dict("os.environ", env, clear=True), patch(
-            "kiro_crew.mcp_core.config_dir", return_value=tmp_path
+            "kiro_crew.mcp_core.governance.config_dir", return_value=tmp_path
         ), patch("os.getppid", return_value=100), patch(
-            "kiro_crew.mcp_core._get_ppid", side_effect=fake_get_ppid
+            "kiro_crew.mcp_core.governance._get_ppid", side_effect=fake_get_ppid
         ):
             assert _resolve_session_key() == "dashboard:chat-3-789"
 
@@ -77,9 +77,9 @@ class TestResolveSessionKey:
 
         env = {k: v for k, v in os.environ.items() if k != "KIROCREW_SESSION_KEY"}
         with patch.dict("os.environ", env, clear=True), patch(
-            "kiro_crew.mcp_core.config_dir", return_value=tmp_path
+            "kiro_crew.mcp_core.governance.config_dir", return_value=tmp_path
         ), patch("os.getppid", return_value=100), patch(
-            "kiro_crew.mcp_core._get_ppid", side_effect=fake_get_ppid
+            "kiro_crew.mcp_core.governance._get_ppid", side_effect=fake_get_ppid
         ):
             assert _resolve_session_key() == ""
 
@@ -87,9 +87,9 @@ class TestResolveSessionKey:
         """Stops walking when _get_ppid returns 0 (failure)."""
         env = {k: v for k, v in os.environ.items() if k != "KIROCREW_SESSION_KEY"}
         with patch.dict("os.environ", env, clear=True), patch(
-            "kiro_crew.mcp_core.config_dir", return_value=tmp_path
+            "kiro_crew.mcp_core.governance.config_dir", return_value=tmp_path
         ), patch("os.getppid", return_value=99999), patch(
-            "kiro_crew.mcp_core._get_ppid", return_value=0
+            "kiro_crew.mcp_core.governance._get_ppid", return_value=0
         ):
             assert _resolve_session_key() == ""
 
@@ -101,9 +101,9 @@ class TestResolveSessionKey:
 
         env = {k: v for k, v in os.environ.items() if k != "KIROCREW_SESSION_KEY"}
         with patch.dict("os.environ", env, clear=True), patch(
-            "kiro_crew.mcp_core.config_dir", return_value=tmp_path
+            "kiro_crew.mcp_core.governance.config_dir", return_value=tmp_path
         ), patch("os.getppid", return_value=100), patch(
-            "kiro_crew.mcp_core._get_ppid", side_effect=fake_get_ppid
+            "kiro_crew.mcp_core.governance._get_ppid", side_effect=fake_get_ppid
         ):
             assert _resolve_session_key() == ""
 
@@ -147,7 +147,7 @@ class TestGetPpid:
         resolution. libproc must win and ps must not be invoked.
         """
         with patch("platform.system", return_value="Darwin"), patch(
-            "kiro_crew.mcp_core._ppid_via_libproc", return_value=42
+            "kiro_crew.mcp_core.identity._ppid_via_libproc", return_value=42
         ) as mock_libproc, patch("subprocess.check_output") as mock_ps:
             assert _get_ppid(100) == 42
             mock_libproc.assert_called_once_with(100)
@@ -156,14 +156,14 @@ class TestGetPpid:
     def test_macos_falls_back_to_ps_when_libproc_yields_zero(self):
         """On macOS, if libproc can't resolve the ppid, fall back to ps."""
         with patch("platform.system", return_value="Darwin"), patch(
-            "kiro_crew.mcp_core._ppid_via_libproc", return_value=0
+            "kiro_crew.mcp_core.identity._ppid_via_libproc", return_value=0
         ), patch("subprocess.check_output", return_value="  42\n"):
             assert _get_ppid(100) == 42
 
     def test_macos_returns_0_when_libproc_and_ps_both_fail(self):
         """On macOS, returns 0 when neither libproc nor ps can resolve."""
         with patch("platform.system", return_value="Darwin"), patch(
-            "kiro_crew.mcp_core._ppid_via_libproc", return_value=0
+            "kiro_crew.mcp_core.identity._ppid_via_libproc", return_value=0
         ), patch("subprocess.check_output", side_effect=Exception("no such process")):
             assert _get_ppid(99999) == 0
 

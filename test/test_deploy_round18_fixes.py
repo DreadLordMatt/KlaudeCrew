@@ -14,7 +14,7 @@ from pathlib import Path
 
 SRC = Path(__file__).parent.parent / "src" / "kiro_crew"
 HANDLERS = (SRC / "deploy" / "handlers.py").read_text()
-MCP_CORE = (SRC / "mcp_core.py").read_text()
+MCP_CORE = "\n".join(f.read_text() for f in sorted((SRC / "mcp_core").rglob("*.py")))
 SCRIPTS = SRC / "deploy" / "skills" / "artifact-deploy" / "scripts"
 DEPLOY_SH = (SCRIPTS / "deploy.sh").read_text()
 DEPLOY_BACKEND_SH = (SCRIPTS / "deploy-backend.sh").read_text()

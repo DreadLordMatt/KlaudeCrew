@@ -32,7 +32,7 @@ class TestSpawnRunModelParam:
     """Model param is threaded through to the POST body."""
 
     def test_model_passed_in_post_body(self):
-        with patch("kiro_crew.mcp_core._post") as mock_post, patch.dict(
+        with patch("kiro_crew.mcp_core.handlers.subagent._post") as mock_post, patch.dict(
             "os.environ", {"KIROCREW_SESSION_KEY": "sess"}
         ):
             mock_post.return_value = {"id": "agent1"}
@@ -41,7 +41,7 @@ class TestSpawnRunModelParam:
             assert body["model"] == "deepseek-3.2"
 
     def test_no_model_omits_from_body(self):
-        with patch("kiro_crew.mcp_core._post") as mock_post, patch.dict(
+        with patch("kiro_crew.mcp_core.handlers.subagent._post") as mock_post, patch.dict(
             "os.environ", {"KIROCREW_SESSION_KEY": "sess"}
         ):
             mock_post.return_value = {"id": "agent1"}

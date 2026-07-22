@@ -206,8 +206,8 @@ def test_mcp_core_resolves_session_key(topo, monkeypatch, view) -> None:
     from kiro_crew import mcp_core
 
     _wire_common(monkeypatch, topo, view)
-    monkeypatch.setattr(mcp_core, "_get_ppid", topo.parent_lookup(view))
-    monkeypatch.setattr(mcp_core, "config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.mcp_core.governance._get_ppid", topo.parent_lookup(view))
+    monkeypatch.setattr("kiro_crew.mcp_core.governance.config_dir", lambda: topo.cfg_dir)
 
     assert mcp_core._resolve_session_key() == SESSION_KEY
 
@@ -333,8 +333,8 @@ def test_mcp_core_host_pid_env_resolves_in_any_view(topo, monkeypatch, view) -> 
     from kiro_crew import mcp_core
 
     _wire_common(monkeypatch, topo, view)
-    monkeypatch.setattr(mcp_core, "_get_ppid", topo.parent_lookup(view))
-    monkeypatch.setattr(mcp_core, "config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.mcp_core.governance._get_ppid", topo.parent_lookup(view))
+    monkeypatch.setattr("kiro_crew.mcp_core.governance.config_dir", lambda: topo.cfg_dir)
     monkeypatch.setenv("KIROCREW_HOST_PID", str(SESSION_HOST))
 
     assert mcp_core._resolve_session_key() == SESSION_KEY
@@ -378,7 +378,8 @@ _REGISTERED_CALL_SITES: dict[str, str] = {
     "dashboard/chat_runner.py": "writer: keys the file by the HOST pid of the spawned session process",
     "slack/handler.py": "writer: keys the file by the HOST pid of the spawned session process",
     "mcp_caller.py": "reader: client-side /proc ancestry walk — assumes caller sees HOST pids",
-    "mcp_core.py": "reader: /proc ancestry walk + stale-file cleanup glob — assumes HOST pids",
+    "mcp_core/governance.py": "reader: /proc ancestry walk — assumes HOST pids",
+    "mcp_core/handlers/messaging.py": "reader: stale session_pid_*.txt cleanup glob — assumes HOST pids",
     "mcp_shared.py": (
         "reader: policy session-key /proc ancestry walk inline in "
         "_resolve_excluded_tools — assumes HOST pids"

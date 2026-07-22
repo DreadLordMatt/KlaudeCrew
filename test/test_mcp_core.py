@@ -12,7 +12,7 @@ from kiro_crew.mcp_core import _call_tool
 class TestSpawnRunSessionKeyRouting:
     def test_uses_env_var_when_set(self):
         """KIROCREW_SESSION_KEY env var is used as parent_session."""
-        with patch("kiro_crew.mcp_core._post") as mock_post, patch.dict(
+        with patch("kiro_crew.mcp_core.handlers.subagent._post") as mock_post, patch.dict(
             "os.environ", {"KIROCREW_SESSION_KEY": "sess-from-env"}
         ):
             mock_post.return_value = {"id": "agent1"}
@@ -25,7 +25,7 @@ class TestSpawnRunSessionKeyRouting:
     def test_falls_back_to_pid_file(self, tmp_path):
         import os
 
-        with patch("kiro_crew.mcp_core._post") as mock_post, patch(
+        with patch("kiro_crew.mcp_core.handlers.subagent._post") as mock_post, patch(
             "pathlib.Path.home", return_value=tmp_path / "fake_home"
         ):
             env = os.environ.copy()
@@ -45,7 +45,7 @@ class TestSpawnRunSessionKeyRouting:
 class TestSendMessageUnfurlForwarding:
     def test_unfurl_params_forwarded_in_payload(self):
         """unfurl_links and unfurl_media are forwarded to /api/send-message."""
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.messaging._post") as mock_post:
             mock_post.return_value = {"ok": True}
 
             _call_tool(
@@ -63,7 +63,7 @@ class TestSendMessageUnfurlForwarding:
 
     def test_unfurl_params_omitted_when_absent(self):
         """unfurl params are not in payload when not provided."""
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.messaging._post") as mock_post:
             mock_post.return_value = {"ok": True}
 
             _call_tool("send_message", {"text": "test"})
@@ -82,12 +82,12 @@ class TestSendMessageCronSession:
     def _permit_messaging(self, monkeypatch):
         """Stub governance vets so a real ~/.kirocrew/profiles/cron.json that
         disables messaging doesn't block these payload-routing tests."""
-        monkeypatch.setattr("kiro_crew.mcp_core._vet_messaging_governance", lambda _sk: None)
-        monkeypatch.setattr("kiro_crew.mcp_core._vet_channel_governance", lambda _sk, _t: None)
+        monkeypatch.setattr("kiro_crew.mcp_core.handlers.messaging._vet_messaging_governance", lambda _sk: None)
+        monkeypatch.setattr("kiro_crew.mcp_core.handlers.messaging._vet_channel_governance", lambda _sk, _t: None)
 
     def test_default_notification_only(self):
         """Non-cron bare send_message(text=...) → no session in payload, notification only."""
-        with patch("kiro_crew.mcp_core._post") as mock_post, patch.dict(
+        with patch("kiro_crew.mcp_core.handlers.messaging._post") as mock_post, patch.dict(
             "os.environ", {"KIROCREW_SESSION_KEY": "dashboard:chat-1"}
         ):
             mock_post.return_value = {"ok": True}
@@ -101,7 +101,7 @@ class TestSendMessageCronSession:
     def test_cron_bare_send_attaches_caller_session(self):
         """A cron bare send attaches caller_session so the gateway can apply
         the cron→Slack default, and reports the Slack landing site."""
-        with patch("kiro_crew.mcp_core._post") as mock_post, patch.dict(
+        with patch("kiro_crew.mcp_core.handlers.messaging._post") as mock_post, patch.dict(
             "os.environ", {"KIROCREW_SESSION_KEY": "cron:abc123"}
         ):
             mock_post.return_value = {"ok": True, "slack": True, "delivered_to": "slack", "ts": "9.9"}
@@ -115,7 +115,7 @@ class TestSendMessageCronSession:
     def test_cron_send_notification_only_warns(self):
         """When a cron send only reaches the dashboard (no Slack), surface a
         loud warning instead of a success string."""
-        with patch("kiro_crew.mcp_core._post") as mock_post, patch.dict(
+        with patch("kiro_crew.mcp_core.handlers.messaging._post") as mock_post, patch.dict(
             "os.environ", {"KIROCREW_SESSION_KEY": "cron:abc123"}
         ):
             mock_post.return_value = {"ok": True, "delivered_to": "notification"}
@@ -126,7 +126,7 @@ class TestSendMessageCronSession:
 
     def test_explicit_session_origin_passes_through(self):
         """LLM explicitly passes session=origin → origin in payload."""
-        with patch("kiro_crew.mcp_core._post") as mock_post, patch.dict(
+        with patch("kiro_crew.mcp_core.handlers.messaging._post") as mock_post, patch.dict(
             "os.environ", {"KIROCREW_SESSION_KEY": "cron:abc123"}
         ):
             mock_post.return_value = {"ok": True}
@@ -137,7 +137,7 @@ class TestSendMessageCronSession:
 
     def test_explicit_session_slack(self):
         """session='slack' routes to Slack DM + notification."""
-        with patch("kiro_crew.mcp_core._post") as mock_post, patch.dict(
+        with patch("kiro_crew.mcp_core.handlers.messaging._post") as mock_post, patch.dict(
             "os.environ", {"KIROCREW_SESSION_KEY": "cron:abc123"}
         ):
             mock_post.return_value = {"ok": True, "slack": True, "ts": "123.456"}
@@ -149,7 +149,7 @@ class TestSendMessageCronSession:
 
     def test_invalid_session_value_rejected(self):
         """session must be 'origin' or 'slack'; other values rejected."""
-        with patch("kiro_crew.mcp_core._post") as mock_post, patch.dict(
+        with patch("kiro_crew.mcp_core.handlers.messaging._post") as mock_post, patch.dict(
             "os.environ", {"KIROCREW_SESSION_KEY": "cron:abc123"}
         ):
             result = _call_tool("send_message", {"text": "hi", "session": "bogus"})
@@ -235,7 +235,7 @@ class TestKnowledgeSearchCache:
         def _boom(*a, **k):
             raise RuntimeError("db locked")
 
-        monkeypatch.setattr(mc, "KnowledgeStore", _boom)
+        monkeypatch.setattr("kiro_crew.mcp_core.handlers.knowledge_chat.KnowledgeStore", _boom)
         with pytest.raises(RuntimeError):
             _get_knowledge_search(db_path, cfg_path)
         # The old cached store's connection must still be open (not closed before
@@ -274,7 +274,7 @@ class TestSessionKeyHeaderError:
         # The actual user-facing fix path: a non-latin-1 resolved key makes
         # _post early-return the error dict WITHOUT issuing the HTTP request.
         with (
-            patch.object(mcp_core, "_resolve_session_key", return_value="dashboard:A — B"),
+            patch("kiro_crew.mcp_core.transport._resolve_session_key", return_value="dashboard:A — B"),
             patch.object(mcp_core, "_internal_secret", return_value="secret"),
             patch("urllib.request.urlopen") as mock_urlopen,
         ):
@@ -291,7 +291,7 @@ class TestDeployArtifactMCPTool:
 
     def test_deploy_artifact_preview_only(self):
         """deploy_artifact is preview-only: never passes confirm or override_scan."""
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.misc._post") as mock_post:
             mock_post.return_value = {
                 "requires_confirm": True,
                 "public": True,
@@ -338,7 +338,7 @@ class TestDeployArtifactMCPTool:
 
     def test_deploy_artifact_restricted_denial(self):
         """deploy_artifact returns error when restricted-session denies."""
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.misc._post") as mock_post:
             mock_post.return_value = {
                 "error": "restricted session cannot perform this operation"
             }
@@ -357,7 +357,7 @@ class TestDeployArtifactMCPTool:
         R24: credential findings are a HARD block; non-credential findings
         persist a pending entry flagged for human override.
         """
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.misc._post") as mock_post:
             # Credential-class: hard block, no pending.
             mock_post.return_value = {
                 "blocked": True,
@@ -372,7 +372,7 @@ class TestDeployArtifactMCPTool:
             assert "BLOCKED" in result
             assert "2" in result
 
-        with patch("kiro_crew.mcp_core._post") as mock_post, \
+        with patch("kiro_crew.mcp_core.handlers.misc._post") as mock_post, \
                 patch("kiro_crew.deploy.pending.add_pending") as mock_pending:
             # Non-credential: overridable — pending entry with the flag.
             mock_post.return_value = {
@@ -391,7 +391,7 @@ class TestDeployArtifactMCPTool:
 
     def test_deploy_artifact_ttl_in_preview(self):
         """ttl_hours is forwarded to the API and shown in preview."""
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.misc._post") as mock_post:
             mock_post.return_value = {
                 "requires_confirm": True,
                 "public": True,

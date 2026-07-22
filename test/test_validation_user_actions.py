@@ -24,7 +24,7 @@ class TestMcpCoreUserActions:
     # -- spawn_run: user says "search docs for X in parallel" --
 
     def test_spawn_fire_and_forget(self):
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.subagent._post") as mock_post:
             mock_post.return_value = {"id": "abc12345"}
             result = self._simulate_tool_call(
                 "spawn_run",
@@ -34,7 +34,7 @@ class TestMcpCoreUserActions:
         assert "Spawned" in result
 
     def test_spawn_batch_tasks(self):
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.subagent._post") as mock_post:
             mock_post.side_effect = [{"id": "a1"}, {"id": "b2"}]
             result = self._simulate_tool_call(
                 "spawn_run",
@@ -46,7 +46,7 @@ class TestMcpCoreUserActions:
 
     def test_spawn_default_returns_immediately(self):
         """spawn_run always returns immediately — fire-and-forget."""
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.subagent._post") as mock_post:
             mock_post.return_value = {"id": "ghi789"}
             result = self._simulate_tool_call("spawn_run", {"task": "quick check"})
         assert "Spawned" in result
@@ -55,7 +55,7 @@ class TestMcpCoreUserActions:
     # -- learn_add: user says "remember to always use dark mode" --
 
     def test_learn_preference(self):
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.misc._post") as mock_post:
             mock_post.return_value = {"status": "ok"}
             result = self._simulate_tool_call(
                 "learn_add",
@@ -75,7 +75,7 @@ class TestMcpCoreUserActions:
         )
 
     def test_learn_with_negative(self):
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.misc._post") as mock_post:
             mock_post.return_value = {"status": "ok"}
             result = self._simulate_tool_call(
                 "learn_add",
@@ -89,7 +89,7 @@ class TestMcpCoreUserActions:
 
     def test_learn_category_defaults_to_knowledge(self):
         """LLM might omit category — should default to 'knowledge'."""
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.misc._post") as mock_post:
             mock_post.return_value = {"status": "ok"}
             result = self._simulate_tool_call(
                 "learn_add",
@@ -104,7 +104,7 @@ class TestMcpCoreUserActions:
     # -- learn_list: user says "what have I taught you?" --
 
     def test_learn_list(self):
-        with patch("kiro_crew.mcp_core._get") as mock_get:
+        with patch("kiro_crew.mcp_core.handlers.misc._get") as mock_get:
             mock_get.return_value = {
                 "lessons": [
                     {"rule": "use dark mode", "category": "preference"},
@@ -116,7 +116,7 @@ class TestMcpCoreUserActions:
         assert "pytest" in result
 
     def test_learn_list_empty(self):
-        with patch("kiro_crew.mcp_core._get") as mock_get:
+        with patch("kiro_crew.mcp_core.handlers.misc._get") as mock_get:
             mock_get.return_value = {"lessons": []}
             result = self._simulate_tool_call("learn_list", {})
         assert "No lessons" in result
@@ -124,7 +124,7 @@ class TestMcpCoreUserActions:
     # -- learn_remove: user says "forget the dark mode rule" --
 
     def test_learn_remove(self):
-        with patch("kiro_crew.mcp_core._delete") as mock_del:
+        with patch("kiro_crew.mcp_core.handlers.misc._delete") as mock_del:
             mock_del.return_value = {"removed": 1}
             result = self._simulate_tool_call(
                 "learn_remove",
@@ -137,7 +137,7 @@ class TestMcpCoreUserActions:
     # -- spawn_list: user says "what's running in the background?" --
 
     def test_spawn_list_empty(self):
-        with patch("kiro_crew.mcp_core._get") as mock_get:
+        with patch("kiro_crew.mcp_core.handlers.subagent._get") as mock_get:
             mock_get.return_value = {"agents": []}
             result = self._simulate_tool_call("spawn_list", {})
         assert "No subagents" in result
@@ -145,14 +145,14 @@ class TestMcpCoreUserActions:
     # -- spawn_status: user says "get the full output from that subagent" --
 
     def test_spawn_status_returns_full_result(self):
-        with patch("kiro_crew.mcp_core._get") as mock_get:
+        with patch("kiro_crew.mcp_core.handlers.subagent._get") as mock_get:
             mock_get.return_value = {"result": "A" * 5000}
             result = self._simulate_tool_call("spawn_status", {"agent_id": "abc123"})
         assert len(result) == 5000
         mock_get.assert_called_with("/api/spawn/abc123")
 
     def test_spawn_status_not_found(self):
-        with patch("kiro_crew.mcp_core._get") as mock_get:
+        with patch("kiro_crew.mcp_core.handlers.subagent._get") as mock_get:
             mock_get.return_value = {"error": "not found"}
             result = self._simulate_tool_call("spawn_status", {"agent_id": "bad"})
         assert "Error" in result
@@ -170,7 +170,7 @@ class TestMcpCoreUserActions:
         assert "invalid" in result.lower()
 
     def test_spawn_status_redacts_credentials(self):
-        with patch("kiro_crew.mcp_core._get") as mock_get:
+        with patch("kiro_crew.mcp_core.handlers.subagent._get") as mock_get:
             mock_get.return_value = {"result": "Found key AKIAIOSFODNN7EXAMPLE in output"}
             result = self._simulate_tool_call("spawn_status", {"agent_id": "abc123"})
         assert "AKIAIOSFODNN7EXAMPLE" not in result
@@ -179,7 +179,7 @@ class TestMcpCoreUserActions:
     # -- task_run: user says "run this task spec" --
 
     def test_task_run_from_file(self):
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.misc._post") as mock_post:
             mock_post.return_value = {"task_id": "my-task_123"}
             result = self._simulate_tool_call(
                 "task_run",
@@ -190,7 +190,7 @@ class TestMcpCoreUserActions:
         assert "Task runner started" in result
 
     def test_task_run_inline(self):
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.misc._post") as mock_post:
             mock_post.return_value = {"task_id": "inline_123"}
             result = self._simulate_tool_call(
                 "task_run",
@@ -524,7 +524,7 @@ class TestBadInputsCaught:
 
     def test_spawn_task_with_hidden_unicode(self):
         """Zero-width chars should be stripped, not cause errors."""
-        with patch("kiro_crew.mcp_core._post") as mock_post:
+        with patch("kiro_crew.mcp_core.handlers.subagent._post") as mock_post:
             mock_post.return_value = {"id": "clean1"}
             result = self._core_call(
                 "spawn_run",

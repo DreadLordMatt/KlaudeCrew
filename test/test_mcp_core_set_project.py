@@ -56,8 +56,8 @@ class TestSetProjectTool:
             captured["calls"].append((path, body))
             return captured.get("response", {"ok": True, "project": (body or {}).get("project", "")})
 
-        with patch.object(mcp_core, "_resolve_session_key_strict", return_value=session_key), \
-             patch.object(mcp_core, "_post", side_effect=fake_post):
+        with patch("kiro_crew.mcp_core.handlers.misc._resolve_session_key_strict", return_value=session_key), \
+             patch("kiro_crew.mcp_core.handlers.misc._post", side_effect=fake_post):
             captured["response"] = getattr(self, "_post_response", None) or {
                 "ok": True,
                 "project": args.get("path", ""),

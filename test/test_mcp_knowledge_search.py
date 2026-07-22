@@ -19,7 +19,7 @@ def mock_db_exists(tmp_path):
 
 
 class TestKnowledgeSearchDBMissing:
-    @patch("kiro_crew.mcp_core.config_dir")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.config_dir")
     def test_returns_not_configured_when_db_missing(self, mock_config_dir, tmp_path):
         mock_config_dir.return_value = tmp_path  # no knowledge.db here
         from kiro_crew.mcp_core import _call_tool_inner
@@ -49,10 +49,10 @@ class TestKnowledgeSearchValidation:
 
 
 class TestKnowledgeSearchResults:
-    @patch("kiro_crew.mcp_core.config_dir")
-    @patch("kiro_crew.mcp_core.HybridRetriever")
-    @patch("kiro_crew.mcp_core.KnowledgeStore")
-    @patch("kiro_crew.mcp_core.create_embedder_from_config")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.config_dir")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.HybridRetriever")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.KnowledgeStore")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.create_embedder_from_config")
     def test_no_results_returns_message(
         self, mock_embedder, mock_store_cls, mock_retriever_cls, mock_config_dir, mock_db_exists
     ):
@@ -64,10 +64,10 @@ class TestKnowledgeSearchResults:
         result = _call_tool_inner("local_knowledge_search", {"query": "nonexistent"})
         assert "No relevant knowledge found" in result
 
-    @patch("kiro_crew.mcp_core.config_dir")
-    @patch("kiro_crew.mcp_core.HybridRetriever")
-    @patch("kiro_crew.mcp_core.KnowledgeStore")
-    @patch("kiro_crew.mcp_core.create_embedder_from_config")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.config_dir")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.HybridRetriever")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.KnowledgeStore")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.create_embedder_from_config")
     def test_low_score_filtered_out(
         self, mock_embedder, mock_store_cls, mock_retriever_cls, mock_config_dir, mock_db_exists
     ):
@@ -81,10 +81,10 @@ class TestKnowledgeSearchResults:
         result = _call_tool_inner("local_knowledge_search", {"query": "test"})
         assert "No relevant knowledge found" in result
 
-    @patch("kiro_crew.mcp_core.config_dir")
-    @patch("kiro_crew.mcp_core.HybridRetriever")
-    @patch("kiro_crew.mcp_core.KnowledgeStore")
-    @patch("kiro_crew.mcp_core.create_embedder_from_config")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.config_dir")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.HybridRetriever")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.KnowledgeStore")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.create_embedder_from_config")
     def test_formatted_output(
         self, mock_embedder, mock_store_cls, mock_retriever_cls, mock_config_dir, mock_db_exists
     ):
@@ -114,10 +114,10 @@ class TestKnowledgeSearchResults:
         # No score or relevance metadata exposed
         assert "0.035" not in result
 
-    @patch("kiro_crew.mcp_core.config_dir")
-    @patch("kiro_crew.mcp_core.HybridRetriever")
-    @patch("kiro_crew.mcp_core.KnowledgeStore")
-    @patch("kiro_crew.mcp_core.create_embedder_from_config")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.config_dir")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.HybridRetriever")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.KnowledgeStore")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.create_embedder_from_config")
     def test_default_limit_is_3(
         self, mock_embedder, mock_store_cls, mock_retriever_cls, mock_config_dir, mock_db_exists
     ):
@@ -130,10 +130,10 @@ class TestKnowledgeSearchResults:
         _call_tool_inner("local_knowledge_search", {"query": "test"})
         mock_retriever_cls.return_value.search.assert_called_once_with("test", limit=3)
 
-    @patch("kiro_crew.mcp_core.config_dir")
-    @patch("kiro_crew.mcp_core.HybridRetriever")
-    @patch("kiro_crew.mcp_core.KnowledgeStore")
-    @patch("kiro_crew.mcp_core.create_embedder_from_config")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.config_dir")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.HybridRetriever")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.KnowledgeStore")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.create_embedder_from_config")
     def test_citation_with_section_and_uri(
         self, mock_embedder, mock_store_cls, mock_retriever_cls, mock_config_dir, mock_db_exists
     ):
@@ -167,10 +167,10 @@ class TestKnowledgeSearchResults:
         # A specific file path supersedes the folder-root uri Link.
         assert "**Link:**" not in result
 
-    @patch("kiro_crew.mcp_core.config_dir")
-    @patch("kiro_crew.mcp_core.HybridRetriever")
-    @patch("kiro_crew.mcp_core.KnowledgeStore")
-    @patch("kiro_crew.mcp_core.create_embedder_from_config")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.config_dir")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.HybridRetriever")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.KnowledgeStore")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.create_embedder_from_config")
     def test_artifact_citation_uses_slug(
         self, mock_embedder, mock_store_cls, mock_retriever_cls, mock_config_dir, mock_db_exists
     ):
@@ -204,10 +204,10 @@ class TestKnowledgeSearchResults:
         assert "Artifacts \u2014" not in result
         assert "artifact://aggregate" not in result
 
-    @patch("kiro_crew.mcp_core.config_dir")
-    @patch("kiro_crew.mcp_core.HybridRetriever")
-    @patch("kiro_crew.mcp_core.KnowledgeStore")
-    @patch("kiro_crew.mcp_core.create_embedder_from_config")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.config_dir")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.HybridRetriever")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.KnowledgeStore")
+    @patch("kiro_crew.mcp_core.handlers.knowledge_chat.create_embedder_from_config")
     def test_internal_uri_survives_redaction(
         self, mock_embedder, mock_store_cls, mock_retriever_cls, mock_config_dir, mock_db_exists
     ):

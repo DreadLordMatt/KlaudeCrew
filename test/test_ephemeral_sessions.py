@@ -519,7 +519,7 @@ class TestMcpCoreSessionKeyPassthrough:
     def test_learn_add_no_session_key_header_when_unset(self):
         with (
             patch("kiro_crew.mcp_core.urllib.request.urlopen") as mock_urlopen,
-            patch("kiro_crew.mcp_core._resolve_session_key", return_value=""),
+            patch("kiro_crew.mcp_core.transport._resolve_session_key", return_value=""),
         ):
             mock_resp = MagicMock()
             mock_resp.read.return_value = b'{"ok": true}'
@@ -545,7 +545,7 @@ class TestMcpCoreSessionKeyPassthrough:
 
         with (
             patch("kiro_crew.mcp_core.urllib.request.urlopen") as mock_urlopen,
-            patch("kiro_crew.mcp_core._resolve_session_key", return_value="1781215864.487849"),
+            patch("kiro_crew.mcp_core.transport._resolve_session_key", return_value="1781215864.487849"),
         ):
             mock_urlopen.side_effect = urllib.error.HTTPError(
                 url="http://x/api/lessons", code=400, msg="Bad Request",
@@ -565,7 +565,7 @@ class TestMcpCoreSessionKeyPassthrough:
 
         with (
             patch("kiro_crew.mcp_core.urllib.request.urlopen") as mock_urlopen,
-            patch("kiro_crew.mcp_core._resolve_session_key", return_value=""),
+            patch("kiro_crew.mcp_core.transport._resolve_session_key", return_value=""),
         ):
             mock_urlopen.side_effect = urllib.error.HTTPError(
                 url="http://x/api/lessons", code=500, msg="Internal Server Error",
@@ -587,7 +587,7 @@ class TestMcpCoreSessionKeyPassthrough:
 
         with (
             patch("kiro_crew.mcp_core.urllib.request.urlopen") as mock_urlopen,
-            patch("kiro_crew.mcp_core._resolve_session_key", return_value=""),
+            patch("kiro_crew.mcp_core.transport._resolve_session_key", return_value=""),
         ):
             mock_urlopen.side_effect = urllib.error.HTTPError(
                 url="http://x/api/lessons", code=502, msg="Bad Gateway",
@@ -610,7 +610,7 @@ class TestMcpCoreSessionKeyPassthrough:
 
         with (
             patch("kiro_crew.mcp_core.urllib.request.urlopen") as mock_urlopen,
-            patch("kiro_crew.mcp_core._resolve_session_key", return_value="1781215864.487849"),
+            patch("kiro_crew.mcp_core.transport._resolve_session_key", return_value="1781215864.487849"),
         ):
             mock_urlopen.side_effect = urllib.error.HTTPError(
                 url="http://x/api/lessons", code=400, msg="Bad Request",

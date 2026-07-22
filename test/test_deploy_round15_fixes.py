@@ -17,7 +17,7 @@ import pytest
 SRC = Path(__file__).parent.parent / "src" / "kiro_crew"
 HANDLERS = (SRC / "deploy" / "handlers.py").read_text()
 VALIDATION = (SRC / "validation.py").read_text()
-MCP_CORE = (SRC / "mcp_core.py").read_text()
+MCP_CORE = "\n".join(f.read_text() for f in sorted((SRC / "mcp_core").rglob("*.py")))
 DEPLOY_INIT = (SRC / "deploy" / "__init__.py").read_text()
 
 

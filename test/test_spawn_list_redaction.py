@@ -28,7 +28,7 @@ class TestSpawnListRedactBeforeTruncate:
             ]
         }
 
-        with patch("kiro_crew.mcp_core._get", return_value=fake_response):
+        with patch("kiro_crew.mcp_core.handlers.subagent._get", return_value=fake_response):
             result = _call_tool_inner("spawn_list", {})
 
         # The raw key must not appear (even partially) in the output
@@ -47,8 +47,8 @@ class TestSpawnListAgentNames:
 
         fake_response = {"agents": []}
 
-        with patch("kiro_crew.mcp_core._get", return_value=fake_response), patch(
-            "kiro_crew.mcp_core.list_agents", return_value=[fake_agent]
+        with patch("kiro_crew.mcp_core.handlers.subagent._get", return_value=fake_response), patch(
+            "kiro_crew.mcp_core.handlers.subagent.list_agents", return_value=[fake_agent]
         ):
             result = _call_tool_inner("spawn_list", {})
 
