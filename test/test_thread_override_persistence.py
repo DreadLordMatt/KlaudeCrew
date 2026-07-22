@@ -120,13 +120,13 @@ class TestHydrateThreadOverrides:
         # Defense-in-depth: a tampered/corrupted metadata project path that
         # resolves to a sensitive credential dir must never enter the cache.
         log = FakeConversationLog({"t10": {"project": "/home/user/.aws"}})
-        with patch("kiro_crew.slack.handler.is_sensitive_path", return_value=True):
+        with patch("kiro_crew.slack.agent_resolution.is_sensitive_path", return_value=True):
             _hydrate_thread_overrides("t10", log)
         assert "t10" not in _thread_projects
 
     def test_hydrate_accepts_non_sensitive_project_path(self):
         log = FakeConversationLog({"t11": {"project": "/home/user/safe-proj"}})
-        with patch("kiro_crew.slack.handler.is_sensitive_path", return_value=False):
+        with patch("kiro_crew.slack.agent_resolution.is_sensitive_path", return_value=False):
             _hydrate_thread_overrides("t11", log)
         assert _thread_projects["t11"] == "/home/user/safe-proj"
 
@@ -367,7 +367,7 @@ class TestTaCommandPersistence:
         sessions = FakeSessionManager()
         log = FakeConversationLog()
 
-        with patch("kiro_crew.slack.handler.Path.home", return_value=tmp_path):
+        with patch("kiro_crew.slack.agent_resolution.Path.home", return_value=tmp_path):
             # Create .kiro/agents structure
             kiro_agents = tmp_path / ".kiro" / "agents"
             kiro_agents.mkdir(parents=True)
@@ -423,10 +423,10 @@ class TestProjectSensitivePathCheck:
 
         slack = MockSlackClient()
         sessions = FakeSessionManager()
-        with patch("kiro_crew.slack.handler.is_sensitive_path", return_value=True):
-            with patch("kiro_crew.slack.handler.os.path.realpath", return_value="/sensitive/dir"):
+        with patch("kiro_crew.slack.slash_commands.is_sensitive_path", return_value=True):
+            with patch("kiro_crew.slack.slash_commands.os.path.realpath", return_value="/sensitive/dir"):
                 with patch(
-                    "kiro_crew.slack.handler.os.path.expanduser", return_value="/sensitive/dir"
+                    "kiro_crew.slack.slash_commands.os.path.expanduser", return_value="/sensitive/dir"
                 ):
                     result = await _handle_slash_command(
                         "!project /sensitive/dir",
@@ -448,13 +448,13 @@ class TestProjectSensitivePathCheck:
 
         slack = MockSlackClient()
         sessions = FakeSessionManager()
-        with patch("kiro_crew.slack.handler.sel") as mock_sel:
-            with patch("kiro_crew.slack.handler.is_sensitive_path", return_value=True):
+        with patch("kiro_crew.slack.slash_commands.sel") as mock_sel:
+            with patch("kiro_crew.slack.slash_commands.is_sensitive_path", return_value=True):
                 with patch(
-                    "kiro_crew.slack.handler.os.path.realpath", return_value="/sensitive/dir"
+                    "kiro_crew.slack.slash_commands.os.path.realpath", return_value="/sensitive/dir"
                 ):
                     with patch(
-                        "kiro_crew.slack.handler.os.path.expanduser", return_value="/sensitive/dir"
+                        "kiro_crew.slack.slash_commands.os.path.expanduser", return_value="/sensitive/dir"
                     ):
                         await _handle_slash_command(
                             "!project /sensitive/dir",
@@ -476,7 +476,7 @@ class TestProjectSensitivePathCheck:
 
         slack = MockSlackClient()
         sessions = FakeSessionManager()
-        with patch("kiro_crew.slack.handler.sel") as mock_sel:
+        with patch("kiro_crew.slack.slash_commands.sel") as mock_sel:
             await _handle_slash_command(
                 "!project /nonexistent/path/xyz123",
                 slack,
@@ -524,7 +524,7 @@ class TestDiscoverProjectAgentsSensitivePath:
         kiro.mkdir()
         spec = kiro / "agent.agent-spec.json"
         spec.write_text(json.dumps({"name": "agent"}))
-        with patch("kiro_crew.slack.handler.is_sensitive_path", return_value=True):
+        with patch("kiro_crew.slack.agent_resolution.is_sensitive_path", return_value=True):
             result = _discover_project_agents(str(tmp_path))
         assert result == []
 
@@ -533,6 +533,6 @@ class TestDiscoverProjectAgentsSensitivePath:
         kiro.mkdir()
         spec = kiro / "agent.agent-spec.json"
         spec.write_text(json.dumps({"name": "agent"}))
-        with patch("kiro_crew.slack.handler.is_sensitive_path", return_value=False):
+        with patch("kiro_crew.slack.agent_resolution.is_sensitive_path", return_value=False):
             result = _discover_project_agents(str(tmp_path))
         assert len(result) == 1

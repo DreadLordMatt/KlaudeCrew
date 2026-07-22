@@ -16,7 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import kiro_crew.slack.handler as handler
+import kiro_crew.slack.approvals as handler
+import kiro_crew.slack.handler_state as handler_state
 from kiro_crew.slack.handler import (
     _ACTION_APPROVE,
     _ACTION_REJECT,
@@ -152,7 +153,7 @@ class TestLinkedInteractionRouting:
         self._arm("99")
         dstate = MagicMock()
         dstate.resolve_approval = MagicMock(return_value=True)
-        with patch.object(handler, "_dashboard_state", dstate), patch.object(
+        with patch.object(handler_state, "_dashboard_state", dstate), patch.object(
             handler, "is_allowed_user", return_value=True
         ):
             result = await handle_interaction(
@@ -168,7 +169,7 @@ class TestLinkedInteractionRouting:
         self._arm("99")
         dstate = MagicMock()
         dstate.resolve_approval = MagicMock(return_value=True)
-        with patch.object(handler, "_dashboard_state", dstate), patch.object(
+        with patch.object(handler_state, "_dashboard_state", dstate), patch.object(
             handler, "is_allowed_user", return_value=True
         ):
             result = await handle_interaction(
@@ -184,7 +185,7 @@ class TestLinkedInteractionRouting:
         self._arm("99")
         dstate = MagicMock()
         dstate.resolve_approval = MagicMock(return_value=True)
-        with patch.object(handler, "_dashboard_state", dstate), patch.object(
+        with patch.object(handler_state, "_dashboard_state", dstate), patch.object(
             handler, "is_allowed_user", return_value=False
         ):
             result = await handle_interaction(
@@ -204,7 +205,7 @@ class TestLinkedInteractionRouting:
         dstate.resolve_approval = MagicMock(return_value=True)
         # Also place a (bogus) pending approval under the same key — the linked
         # branch must win and never touch it.
-        with patch.object(handler, "_dashboard_state", dstate), patch.object(
+        with patch.object(handler_state, "_dashboard_state", dstate), patch.object(
             handler, "is_allowed_user", return_value=True
         ), patch.dict(handler._pending_approvals, {}, clear=False):
             result = await handle_interaction(

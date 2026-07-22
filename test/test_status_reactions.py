@@ -8,7 +8,7 @@ from typing import Any, Generator
 
 import pytest
 
-from kiro_crew.slack import handler as handler_mod
+from kiro_crew.slack import status_reactions as handler_mod
 from kiro_crew.slack.handler import (
     StatusReactionController,
     _tool_to_phase,

@@ -12,14 +12,14 @@ from kiro_crew.slack.handler import handle_message
 @pytest.fixture()
 def _clear_agent_cache():
     """Reset module-level agent caches between tests."""
-    from kiro_crew.slack import handler
+    from kiro_crew.slack import agent_resolution, handler
 
-    old_cached = handler._cached_default_agent
+    old_cached = agent_resolution._cached_default_agent
     old_thread = dict(handler._thread_agents)
-    handler._cached_default_agent = "kirocrew"
+    agent_resolution._cached_default_agent = "kirocrew"
     handler._thread_agents.clear()
     yield
-    handler._cached_default_agent = old_cached
+    agent_resolution._cached_default_agent = old_cached
     handler._thread_agents.clear()
     handler._thread_agents.update(old_thread)
 
@@ -86,8 +86,8 @@ class TestAgentPassthrough:
     async def test_no_agent_passes_none(self):
         slack, sessions, ctx = _make_mocks()
 
-        from kiro_crew.slack import handler
-        handler._cached_default_agent = ""
+        from kiro_crew.slack import agent_resolution, handler
+        agent_resolution._cached_default_agent = ""
 
         with patch("kiro_crew.slack.handler.config_dir", return_value=MagicMock()):
             await handle_message(

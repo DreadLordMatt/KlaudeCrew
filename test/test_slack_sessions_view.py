@@ -520,7 +520,7 @@ class TestHandleSessionsCommandDelegation:
         _write_jsonl(sess_dir / "dashboard_a.jsonl", title="t", messages=[("user", "x")])
 
         slack = MockSlackClient()
-        with patch("kiro_crew.slack.handler.sel") as mock_sel:
+        with patch("kiro_crew.slack.keyword_commands.sel") as mock_sel:
             mock_sel.return_value.log_api_access = MagicMock()
             await _handle_sessions_command(
                 "sessions",
@@ -583,10 +583,10 @@ class TestHandleSessionsCommandDelegation:
         slack = MockSlackClient()
         with (
             patch(
-                "kiro_crew.slack.handler._collect_recent_sessions",
+                "kiro_crew.slack.keyword_commands._collect_recent_sessions",
                 side_effect=OSError("disk error"),
             ),
-            patch("kiro_crew.slack.handler.sel") as mock_sel,
+            patch("kiro_crew.slack.keyword_commands.sel") as mock_sel,
         ):
             mock_sel.return_value.log_api_access = MagicMock()
             await _handle_sessions_command(
@@ -624,10 +624,10 @@ class TestHandleSessionsCommandDelegation:
         leaked_key = "AKIAIOSFODNN7EXAMPLE"
         with (
             patch(
-                "kiro_crew.slack.handler._collect_recent_sessions",
+                "kiro_crew.slack.keyword_commands._collect_recent_sessions",
                 side_effect=OSError(f"failed reading {leaked_key} from path"),
             ),
-            patch("kiro_crew.slack.handler.sel") as mock_sel,
+            patch("kiro_crew.slack.keyword_commands.sel") as mock_sel,
         ):
             mock_sel.return_value.log_api_access = MagicMock()
             await _handle_sessions_command(

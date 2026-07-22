@@ -171,6 +171,7 @@ class TestTransportBookkeepingIsolation:
 
 # ── Keyword commands on the transport path (spawn/run/cron/sessions) ──
 from kiro_crew.slack import handler as _handler  # noqa: E402
+from kiro_crew.slack import slash_commands as _slash  # noqa: E402
 
 
 class _FakeSubagentMgr:
@@ -291,8 +292,8 @@ class TestTransportKeywordCommands:
         async def _fake_sessions_cmd(*a, **k):
             called["hit"] = True
 
-        monkeypatch.setattr(_handler, "is_owner", lambda uid: True)
-        monkeypatch.setattr(_handler, "_handle_sessions_command", _fake_sessions_cmd)
+        monkeypatch.setattr(_slash, "is_owner", lambda uid: True)
+        monkeypatch.setattr(_slash, "_handle_sessions_command", _fake_sessions_cmd)
         slack, sessions = _run_transport_text(monkeypatch, "sessions")
         assert called.get("hit") is True
         assert sessions.agents == []  # sessions view, no LLM turn
