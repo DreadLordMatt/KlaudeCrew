@@ -102,10 +102,10 @@ class TestStopHandlerIdempotent:
         request.query = {}
 
         # Mock SEL logging and _reject_pending_approvals
-        with patch("kiro_crew.dashboard.chat_handlers.sel") as mock_sel:
+        with patch("kiro_crew.dashboard.chat_handlers_control.sel") as mock_sel:
             mock_sel.return_value.log_tool_invocation = MagicMock()
             mock_sel.return_value.log = MagicMock()
-            with patch("kiro_crew.dashboard.chat_handlers._reject_pending_approvals"):
+            with patch("kiro_crew.dashboard.chat_handlers_control._reject_pending_approvals"):
                 await api_chat_slot_stop(request)
 
         # After the handler, stop state should be back to idle and event_id cleared

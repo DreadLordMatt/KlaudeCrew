@@ -38,7 +38,7 @@ def _patch_sel():
     """Patch sel() to avoid SecurityEventLog initialization."""
     mock_sel = MagicMock()
     mock_sel.log_tool_invocation = MagicMock()
-    with patch("kiro_crew.dashboard.chat_handlers.sel", return_value=mock_sel):
+    with patch("kiro_crew.dashboard.chat_handlers_control.sel", return_value=mock_sel):
         yield mock_sel
 
 

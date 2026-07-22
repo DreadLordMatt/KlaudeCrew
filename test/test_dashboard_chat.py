@@ -2993,14 +2993,14 @@ class TestRuntimeWiring:
 
         monkeypatch.setattr("kiro_crew.dashboard.chat.KiroCrewConfig.load", lambda: mock_cfg)
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.KiroCrewConfig.load", lambda: mock_cfg
+            "kiro_crew.dashboard.chat_handlers_config.KiroCrewConfig.load", lambda: mock_cfg
         )
         monkeypatch.setattr(
             "kiro_crew.dashboard.chat.resolve_agent_bindings",
             lambda cfg, name: mock_bindings,
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.resolve_agent_bindings",
+            "kiro_crew.dashboard.chat_handlers_config.resolve_agent_bindings",
             lambda cfg, name: mock_bindings,
         )
         monkeypatch.setattr(
@@ -3008,7 +3008,7 @@ class TestRuntimeWiring:
             lambda cfg, ws_dir: "oncall-ws",
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers._workspace_name_for_dir",
+            "kiro_crew.dashboard.chat_handlers_config._workspace_name_for_dir",
             lambda cfg, ws_dir: "oncall-ws",
         )
 
@@ -3048,14 +3048,14 @@ class TestRuntimeWiring:
 
         monkeypatch.setattr("kiro_crew.dashboard.chat.KiroCrewConfig.load", lambda: mock_cfg)
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.KiroCrewConfig.load", lambda: mock_cfg
+            "kiro_crew.dashboard.chat_handlers_config.KiroCrewConfig.load", lambda: mock_cfg
         )
         monkeypatch.setattr(
             "kiro_crew.dashboard.chat.resolve_agent_bindings",
             lambda cfg, name: mock_bindings,
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.resolve_agent_bindings",
+            "kiro_crew.dashboard.chat_handlers_config.resolve_agent_bindings",
             lambda cfg, name: mock_bindings,
         )
         monkeypatch.setattr(
@@ -3063,11 +3063,11 @@ class TestRuntimeWiring:
             lambda cfg, ws_dir: "dev-ws",
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers._workspace_name_for_dir",
+            "kiro_crew.dashboard.chat_handlers_config._workspace_name_for_dir",
             lambda cfg, ws_dir: "dev-ws",
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.default_project_dir",
+            "kiro_crew.dashboard.chat_handlers_config.default_project_dir",
             lambda ws: "/workspace/dev",
         )
 
@@ -3086,7 +3086,7 @@ class TestRuntimeWiring:
         state.sessions.reset = AsyncMock()
 
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.default_project_dir",
+            "kiro_crew.dashboard.chat_handlers_config.default_project_dir",
             lambda ws: "/workspace/new-ws",
         )
 
@@ -3159,14 +3159,14 @@ class TestRuntimeWiring:
 
         monkeypatch.setattr("kiro_crew.dashboard.chat.KiroCrewConfig.load", lambda: mock_cfg)
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.KiroCrewConfig.load", lambda: mock_cfg
+            "kiro_crew.dashboard.chat_handlers_lifecycle.KiroCrewConfig.load", lambda: mock_cfg
         )
         monkeypatch.setattr(
             "kiro_crew.dashboard.chat.resolve_agent_bindings",
             lambda cfg, name: mock_bindings,
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.resolve_agent_bindings",
+            "kiro_crew.dashboard.chat_handlers_lifecycle.resolve_agent_bindings",
             lambda cfg, name: mock_bindings,
         )
         monkeypatch.setattr(
@@ -3174,7 +3174,7 @@ class TestRuntimeWiring:
             lambda cfg, ws_dir: "research-ws",
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers._workspace_name_for_dir",
+            "kiro_crew.dashboard.chat_handlers_lifecycle._workspace_name_for_dir",
             lambda cfg, ws_dir: "research-ws",
         )
 
@@ -5370,7 +5370,7 @@ class TestSlotTaskNoneGuard:
         slot.task = asyncio.get_running_loop().create_future()
 
         async with TestClient(TestServer(_make_app(state))) as client:
-            with patch("kiro_crew.dashboard.chat_handlers._save_slot_to_history"):
+            with patch("kiro_crew.dashboard.chat_handlers_lifecycle._save_slot_to_history"):
                 resp = await client.delete("/api/chat/slots/s1")
             assert resp.status == 200
             assert slot.task.cancelled()
@@ -5532,7 +5532,7 @@ class TestBulkCleanup:
         slot.drain()
 
         with patch(
-            "kiro_crew.dashboard.chat_handlers._save_slot_to_history",
+            "kiro_crew.dashboard.chat_handlers_lifecycle._save_slot_to_history",
             side_effect=OSError("disk full"),
         ):
             async with TestClient(TestServer(_make_app(state))) as client:
@@ -9831,7 +9831,7 @@ class TestChatSlotAgentContextualLaunch:
 
         monkeypatch.setattr("kiro_crew.dashboard.chat.KiroCrewConfig.load", lambda: mock_cfg)
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.KiroCrewConfig.load", lambda: mock_cfg
+            "kiro_crew.dashboard.chat_handlers_config.KiroCrewConfig.load", lambda: mock_cfg
         )
         # No bindings for unknown agent name
         monkeypatch.setattr(
@@ -9839,7 +9839,7 @@ class TestChatSlotAgentContextualLaunch:
             MagicMock(side_effect=Exception("not found")),
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.resolve_agent_bindings",
+            "kiro_crew.dashboard.chat_handlers_config.resolve_agent_bindings",
             MagicMock(side_effect=Exception("not found")),
         )
 
@@ -9877,18 +9877,18 @@ class TestChatSlotAgentContextualLaunch:
 
         monkeypatch.setattr("kiro_crew.dashboard.chat.KiroCrewConfig.load", lambda: mock_cfg)
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.KiroCrewConfig.load", lambda: mock_cfg
+            "kiro_crew.dashboard.chat_handlers_config.KiroCrewConfig.load", lambda: mock_cfg
         )
         monkeypatch.setattr(
             "kiro_crew.dashboard.chat.resolve_agent_bindings",
             MagicMock(side_effect=Exception("not found")),
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.resolve_agent_bindings",
+            "kiro_crew.dashboard.chat_handlers_config.resolve_agent_bindings",
             MagicMock(side_effect=Exception("not found")),
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.is_sensitive_path", lambda p: True
+            "kiro_crew.dashboard.chat_handlers_config.is_sensitive_path", lambda p: True
         )
 
         async with TestClient(TestServer(_make_app_with_agent_routes(state))) as client:
@@ -9923,14 +9923,14 @@ class TestChatSlotAgentContextualLaunch:
 
         monkeypatch.setattr("kiro_crew.dashboard.chat.KiroCrewConfig.load", lambda: mock_cfg)
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.KiroCrewConfig.load", lambda: mock_cfg
+            "kiro_crew.dashboard.chat_handlers_config.KiroCrewConfig.load", lambda: mock_cfg
         )
         monkeypatch.setattr(
             "kiro_crew.dashboard.chat.resolve_agent_bindings",
             MagicMock(side_effect=Exception("not found")),
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.resolve_agent_bindings",
+            "kiro_crew.dashboard.chat_handlers_config.resolve_agent_bindings",
             MagicMock(side_effect=Exception("not found")),
         )
 
@@ -9966,14 +9966,14 @@ class TestChatSlotAgentContextualLaunch:
 
         monkeypatch.setattr("kiro_crew.dashboard.chat.KiroCrewConfig.load", lambda: mock_cfg)
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.KiroCrewConfig.load", lambda: mock_cfg
+            "kiro_crew.dashboard.chat_handlers_config.KiroCrewConfig.load", lambda: mock_cfg
         )
         monkeypatch.setattr(
             "kiro_crew.dashboard.chat.resolve_agent_bindings",
             MagicMock(side_effect=Exception("not found")),
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.resolve_agent_bindings",
+            "kiro_crew.dashboard.chat_handlers_config.resolve_agent_bindings",
             MagicMock(side_effect=Exception("not found")),
         )
 
@@ -10004,16 +10004,16 @@ class TestChatSlotAgentContextualLaunch:
         mock_cfg.memory = MagicMock()
 
         monkeypatch.setattr("kiro_crew.dashboard.chat.KiroCrewConfig.load", lambda: mock_cfg)
-        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.KiroCrewConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers_config.KiroCrewConfig.load", lambda: mock_cfg)
         monkeypatch.setattr(
             "kiro_crew.dashboard.chat.resolve_agent_bindings",
             MagicMock(side_effect=Exception("not found")),
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.resolve_agent_bindings",
+            "kiro_crew.dashboard.chat_handlers_config.resolve_agent_bindings",
             MagicMock(side_effect=Exception("not found")),
         )
-        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.is_sensitive_path", lambda p: False)
+        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers_config.is_sensitive_path", lambda p: False)
 
         project_dir = tmp_path / "myproj"
         project_dir.mkdir()
@@ -10048,16 +10048,16 @@ class TestChatSlotAgentContextualLaunch:
         mock_cfg.memory = MagicMock()
 
         monkeypatch.setattr("kiro_crew.dashboard.chat.KiroCrewConfig.load", lambda: mock_cfg)
-        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.KiroCrewConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers_config.KiroCrewConfig.load", lambda: mock_cfg)
         monkeypatch.setattr(
             "kiro_crew.dashboard.chat.resolve_agent_bindings",
             MagicMock(side_effect=Exception("not found")),
         )
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers.resolve_agent_bindings",
+            "kiro_crew.dashboard.chat_handlers_config.resolve_agent_bindings",
             MagicMock(side_effect=Exception("not found")),
         )
-        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.is_sensitive_path", lambda p: False)
+        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers_config.is_sensitive_path", lambda p: False)
 
         # Point at a file, not a directory
         a_file = tmp_path / "notadir.txt"
@@ -10087,7 +10087,7 @@ class TestChatSlotAgentContextualLaunch:
         mock_cfg.memory = MagicMock()
 
         monkeypatch.setattr("kiro_crew.dashboard.chat.KiroCrewConfig.load", lambda: mock_cfg)
-        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.KiroCrewConfig.load", lambda: mock_cfg)
+        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers_config.KiroCrewConfig.load", lambda: mock_cfg)
 
         project_dir = tmp_path / "myproj"
         project_dir.mkdir()
@@ -10111,10 +10111,10 @@ class TestChatSlotProjectAutoRegister:
         from kiro_crew.dashboard.chat_handlers import api_chat_slot_project
 
         monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
-        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers.is_sensitive_path", lambda p: False)
+        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers_config.is_sensitive_path", lambda p: False)
         registered: list[str] = []
         monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers._auto_register_project",
+            "kiro_crew.dashboard.chat_handlers_config._auto_register_project",
             lambda p: registered.append(p),
         )
 
