@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from kiro_crew import git_coord, shutdown_event
+from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.executors import run_in_embed_pool
 from kiro_crew.llm_helpers import stream_and_collect_json
@@ -1305,16 +1306,26 @@ class TaskRunner:
                     }
                 )
         try:
-            self._runs_path().write_text(json.dumps(data), encoding="utf-8")
+            atomic_write(self._runs_path(), json.dumps(data), fsync=True)
         except Exception:
             logger.debug("Failed to persist runs", exc_info=True)
 
     def _load_runs(self) -> None:
+        path = self._runs_path()
+        if not path.exists():
+            return
         try:
-            path = self._runs_path()
-            if not path.exists():
-                return
-            for item in json.loads(path.read_text(encoding="utf-8")):
+            items = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.error(
+                "Failed to read/parse task run journal at %s — persisted runs "
+                "could not be recovered (file may be corrupt or truncated)",
+                path,
+                exc_info=True,
+            )
+            return
+        try:
+            for item in items:
                 tasks = [
                     Task(
                         index=t["index"],
@@ -1376,7 +1387,12 @@ class TaskRunner:
                             t.status = TaskStatus.CANCELLED
                     logger.info("Recovered crashed cancelling run %s — marked as cancelled", run.task_id)
         except Exception:
-            logger.debug("Failed to load runs", exc_info=True)
+            logger.error(
+                "Failed to reconstruct task runs from %s — some persisted runs "
+                "may not have been recovered",
+                path,
+                exc_info=True,
+            )
 
     def _save_progress(self, run: Project) -> None:
         save_progress(run)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -3060,3 +3061,70 @@ class TestMaxParallelStepsClamp:
             runner = TaskRunner(sessions=sessions, auto_test=False, max_parallel_steps=0)
         # Falls back to _MAX_PARALLEL_TASKS (3) when the ceiling can't be computed.
         assert runner._max_parallel_steps == 3
+
+
+# ── Runs journal persistence (atomic write + loud load failure) ──
+
+
+class TestRunsPersistence:
+    def _completed_run(self, task_id: str = "rt1") -> TaskRun:
+        run = TaskRun(
+            spec_path="/tmp/t.md",
+            spec_content="spec",
+            status="completed",
+            tasks=[Step(index=1, title="A", description="a", status=StepStatus.PASSED)],
+        )
+        run.task_id = task_id
+        return run
+
+    def test_persist_and_reload_round_trip(self, tmp_path: Path) -> None:
+        """A persisted run reloads intact and leaves no temp files behind."""
+        sessions = _make_mock_sessions()
+        runner = TaskRunner(sessions=sessions, auto_test=False, work_dir=tmp_path)
+        runner._runs["rt1"] = self._completed_run("rt1")
+        runner._persist_runs()
+
+        # Atomic write leaves valid JSON and no stray temp files.
+        assert not list(tmp_path.glob("*.tmp"))
+        json.loads(runner._runs_path().read_text(encoding="utf-8"))
+
+        # A fresh runner loads the persisted run back.
+        runner2 = TaskRunner(sessions=sessions, auto_test=False, work_dir=tmp_path)
+        assert "rt1" in runner2._runs
+        assert runner2._runs["rt1"].status == "completed"
+
+    def test_persist_is_atomic_on_write_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """A failed replace must not clobber the existing journal or leak temps."""
+        sessions = _make_mock_sessions()
+        runner = TaskRunner(sessions=sessions, auto_test=False, work_dir=tmp_path)
+        runner._runs["rt1"] = self._completed_run("rt1")
+        runner._persist_runs()
+        good = runner._runs_path().read_text(encoding="utf-8")
+
+        # Simulate a crash/failure during the final atomic rename.
+        import kiro_crew.atomic_write as aw
+
+        def _boom(*_a, **_k):
+            raise OSError("simulated crash during replace")
+
+        monkeypatch.setattr(aw.os, "replace", _boom)
+        runner._runs["rt2"] = self._completed_run("rt2")
+        runner._persist_runs()  # swallowed by the broad except in _persist_runs
+
+        # Original journal is untouched (never partially overwritten)...
+        assert runner._runs_path().read_text(encoding="utf-8") == good
+        # ...and the temp file was cleaned up rather than left behind.
+        assert not list(tmp_path.glob("*.tmp"))
+
+    def test_load_runs_logs_loudly_on_corrupt_file(self, tmp_path: Path, caplog) -> None:
+        """A corrupt/truncated journal is logged at ERROR, not silently dropped."""
+        (tmp_path / TaskRunner._RUNS_FILE).write_text("{ this is not valid json", encoding="utf-8")
+        sessions = _make_mock_sessions()
+
+        with caplog.at_level(logging.ERROR, logger="kiro_crew.taskrunner"):
+            runner = TaskRunner(sessions=sessions, auto_test=False, work_dir=tmp_path)
+
+        assert runner._runs == {}
+        assert any(
+            "task run journal" in r.getMessage() for r in caplog.records
+        ), "corrupt journal load should log a loud ERROR"
