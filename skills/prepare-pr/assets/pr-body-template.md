@@ -19,8 +19,8 @@ sufficient" only when genuinely true, with a one-line why.>
 
 ## Screenshots
 <MANDATORY for user-visible UI changes; delete this section otherwise.
-Commit images to the PR branch under docs/screenshots/<feature>/ and embed
+Commit images to the PR branch under .github/screenshots/<feature>/ and embed
 with commit-SHA-pinned URLs so they survive branch deletion on merge:
-![alt](https://github.com/<owner>/<repo>/raw/<sha>/docs/screenshots/<feature>/<name>.png)
+![alt](https://github.com/<owner>/<repo>/raw/<sha>/.github/screenshots/<feature>/<name>.png)
 Show each affected surface's meaningful variants; fold full-page context
 into a <details> block.>

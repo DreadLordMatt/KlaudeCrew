@@ -91,8 +91,8 @@ Every PR body MUST contain these (fill-in template: `$SKILL_DIR/assets/pr-body-t
 4. **Tests** — automated tests added/updated and what each locks in.
 5. **Manual verification** — steps done/needed where unit tests fall short, or "N/A — unit coverage sufficient" with a one-line why.
 6. **Screenshots — MANDATORY for any user-visible UI change** (new/changed panels, components, layouts, themes). Capture each affected surface in its meaningful variants (e.g. desktop vs browser, empty vs populated). Embedding recipe that works for private repos and survives merge:
-   - Commit the images into the PR branch under `docs/screenshots/<feature>/` and amend them into the single commit (`--force-with-lease`).
-   - Embed with **commit-SHA-pinned** same-origin URLs: `![alt](https://github.com/<owner>/<repo>/raw/<sha>/docs/screenshots/<feature>/<name>.png)`. Branch-pinned URLs break when the branch is deleted on merge; external image hosts leak content and are camo-blocked for private repos.
+   - Commit the images into the PR branch under `.github/screenshots/<feature>/` and amend them into the single commit (`--force-with-lease`). `.github/` is deliberately outside every packaging surface (wheel packages only `src/kiro_crew`, the sdist MANIFEST.in is an explicit allowlist, electron-builder bundles an explicit file list, Pages publishes `site/dist`) -- never store PR screenshots under `docs/`, which is one glob away from shipping.
+   - Embed with **commit-SHA-pinned** same-origin URLs: `![alt](https://github.com/<owner>/<repo>/raw/<sha>/.github/screenshots/<feature>/<name>.png)`. Branch-pinned URLs break when the branch is deleted on merge; external image hosts leak content and are camo-blocked for private repos.
    - After any amend that changes the images, re-pin the URLs to the new SHA.
    - Put the two or three most telling shots inline; fold full-page context into a `<details>` block.
 
