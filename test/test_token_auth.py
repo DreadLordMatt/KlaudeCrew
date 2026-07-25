@@ -36,6 +36,20 @@ from kiro_crew.dashboard.token_auth import (
 )
 
 
+def _assert_owner_only(path) -> None:
+    """Assert the file is 0o600 on POSIX; no-op on Windows.
+
+    Windows has no POSIX mode bits: NTFS reports 0o666 regardless of the mode
+    passed to open()/chmod(), and access control lives in ACLs instead. Guarding
+    only this assertion — rather than skipping the whole test on Windows — keeps
+    the surrounding coverage running there, since concurrent-init convergence
+    and incomplete-file cleanup are not POSIX-specific behaviours.
+    """
+    if os.name == "nt":
+        return
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
 @pytest.fixture(autouse=True)
 def clear_nonces(tmp_path, monkeypatch):
     """Isolate token state per test.
@@ -879,7 +893,7 @@ def test_signing_secret_persisted_across_loads(tmp_path, monkeypatch) -> None:
     assert key_file.exists()
     assert len(s1) >= 32
     # Owner-only permissions.
-    assert (key_file.stat().st_mode & 0o777) == 0o600
+    _assert_owner_only(key_file)
     # Second load returns the SAME secret (persistence).
     s2 = ta._load_or_create_secret()
     assert s1 == s2
@@ -938,7 +952,7 @@ def test_signing_secret_concurrent_first_init_converges(tmp_path, monkeypatch) -
     assert all(r == on_disk for r in results), "concurrent inits diverged from the on-disk key"
     assert len(set(results)) == 1, "more than one distinct signing key was issued"
     # Winner's create still locked the file down to owner-only.
-    assert (key_file.stat().st_mode & 0o777) == 0o600
+    _assert_owner_only(key_file)
 
 
 def test_signing_secret_existing_file_never_overwritten(tmp_path, monkeypatch) -> None:
@@ -1026,9 +1040,20 @@ def test_signing_secret_write_failure_cleans_up_incomplete_file(
     on_disk = key_file.read_bytes()
     assert len(on_disk) >= ts._MIN_KEY_BYTES, "next init wrote a short/incomplete key"
     assert secret2 == on_disk, "next init did not return the persisted key"
-    assert (key_file.stat().st_mode & 0o777) == 0o600
+    _assert_owner_only(key_file)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "The simulated race is structurally impossible on Windows: os.replace "
+        "over a path whose file is held open by this process raises a sharing "
+        "violation (no FILE_SHARE_DELETE on the create fd), so the sibling's "
+        "key can never be substituted mid-write. That same property means the "
+        "identity guard cannot mis-fire there in production — the hazard this "
+        "test locks is POSIX-only."
+    ),
+)
 def test_signing_secret_incomplete_file_not_deleted_if_replaced(
     tmp_path, monkeypatch
 ) -> None:
