@@ -131,14 +131,14 @@ def newest_dump_with_stacks(dumps_dir: Path | None = None) -> Path | None:
 
 
 def dump_age_seconds(dump_path: Path) -> float:
-    """Return age of a dump file in seconds.
+    """Return age of a dump file in seconds (never negative).
 
-    Clamped to non-negative. `time.time()` and the filesystem's `st_mtime` are
-    distinct clocks with distinct rounding, so a file written microseconds ago
-    can carry an mtime marginally AHEAD of the wall clock — observed on Windows,
-    where this returned ~-2e-07. An age is semantically non-negative, and both
-    callers compare it against a staleness threshold and format it as hours, so
-    a tiny negative value is never useful and would render as "-0.0h ago".
+    ``st_mtime`` and ``time.time()`` are both derived from the wall clock, but a
+    just-written file's mtime can round marginally AHEAD of an immediately
+    following ``time.time()`` (sub-microsecond float jitter, or higher-resolution
+    filesystem timestamps), yielding a tiny negative delta. An age is physically
+    never negative, so clamp to 0.0 — otherwise callers comparing/formatting the
+    age see a nonsensical negative right after a dump is created.
     """
     return max(0.0, time.time() - dump_path.stat().st_mtime)
 

@@ -332,46 +332,33 @@ class TestRecentFromSource:
         assert result == []
 
     def test_recent_from_source_sorted_by_ts(self, tmp_path, monkeypatch):
-        # `append` stamps `ts` from `datetime.now().isoformat()`, and
-        # `recent_from_source` merges the per-session files (ordered by mtime)
-        # and then does a STABLE sort on `ts`. If the host clock is coarser than
-        # these three back-to-back appends, all three share one `ts`: the sort
-        # becomes a no-op and the result keeps per-file grouping
-        # ("first", "third", "second") — a tie, not a sort bug. That is exactly
-        # what happens on Windows, whose system clock ticks ~15.6ms.
-        #
-        # Pin an advancing clock so the three appends get DISTINCT timestamps.
-        # Only then does the ordering assertion below actually exercise the sort
-        # on every platform, instead of passing by luck where the clock happens
-        # to be fine-grained.
-        import itertools
-        from datetime import datetime, timedelta
+        import datetime as _dt
 
-        import kiro_crew.history as history_mod
+        # history stamps ts with datetime.now().isoformat(); on a coarse clock
+        # (Windows' ~15ms tick) these rapid appends collide, so a ts-only sort
+        # across sessions is ambiguous and the merge order leaks through (the
+        # observed Windows failure: ['first', 'third', 'second']). Drive a
+        # strictly-increasing clock so the chronological order the test asserts is
+        # actually encoded in the timestamps, on every OS.
+        _base = _dt.datetime(2026, 7, 25, 0, 0, 0, tzinfo=_dt.timezone.utc)
+        _tick = {"n": 0}
 
-        base = datetime(2026, 1, 1, 0, 0, 0)
-        ticks = itertools.count()
-
-        class _AdvancingClock(datetime):
-            # Subclass so the module's other `datetime` uses (fromtimestamp,
-            # arithmetic) keep working; only `now()` is pinned.
+        class _IncDateTime:
             @classmethod
-            def now(cls, tz=None):  # type: ignore[override]
-                return base + timedelta(seconds=next(ticks))
+            def now(cls, tz=None):
+                _tick["n"] += 1
+                return _base + _dt.timedelta(seconds=_tick["n"])
 
-        monkeypatch.setattr(history_mod, "datetime", _AdvancingClock)
+        monkeypatch.setattr("kiro_crew.history.datetime", _IncDateTime)
 
         log = ConversationLog(base_dir=tmp_path)
-        # Append in different sessions — timestamps will be ordered
+        # Append in different sessions — timestamps are strictly ordered.
         log.append("dashboard:chat-1-100", "user", "first")
         log.append("dashboard:chat-2-200", "user", "second")
         log.append("dashboard:chat-1-100", "user", "third")
         result = log.recent_from_source("dashboard:")
         contents = [m["content"] for m in result]
         assert contents == ["first", "second", "third"]
-        # The merge must be ordered by `ts`, not by which file it came from.
-        stamps = [m.get("ts", "") for m in result]
-        assert stamps == sorted(stamps)
 
 
 class TestSessionManagerCompaction:
