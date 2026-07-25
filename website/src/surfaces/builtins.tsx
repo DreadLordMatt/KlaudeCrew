@@ -11,6 +11,7 @@ import { MessageSquare, Bell, BookOpen, Component, CalendarDays, Settings, Clipb
 import { createSelector } from '@reduxjs/toolkit'
 import { KiroGhostMark } from '../components/KiroGhostMark'
 import { registerBuiltinSurface } from './registry'
+import PowerIcon from '../components/icons/PowerIcon'
 import { selectSubagentActivityCount } from '../store/chatSlice'
 import type { RootState } from '../store'
 
@@ -94,6 +95,20 @@ registerBuiltinSurface({
   // (expanded) / an icon row (collapsed) — not a regular rail list item.
   // Route, badge wiring, and onboarding anchor stay intact.
   hiddenFromNav: true,
+})
+
+// Powers sits in the Apps group, under the app-grid ("Explore") section header,
+// because a Power is an installable unit with its own catalog rather than a
+// per-agent configuration surface. NOTE: deliberately NOT `appOnly` — App.tsx
+// builds its Apps list from `getBuiltinSurfaces()`, which filters `appOnly`
+// out, so flagging it would drop the row from the rail entirely.
+registerBuiltinSurface({
+  navId: 'powers',
+  route: '/powers',
+  label: 'Powers',
+  labelKey: 'nav.powers',
+  icon: <PowerIcon size={16} />,
+  group: 'Apps',
 })
 
 // Instances (multi-instance management) is configured under Settings → Instances

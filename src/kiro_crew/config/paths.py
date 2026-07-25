@@ -507,6 +507,22 @@ def kiro_agents_dir() -> Path:
     return Path.home() / ".kiro" / "agents"
 
 
+# Directory name for installed Powers (analogous to the ``skills`` subdir).
+POWERS_DIR_NAME = "powers"
+
+
+def powers_dir() -> Path:
+    """Return the installed-Powers directory (``<data home>/powers``).
+
+    Mirrors the ``skills``-subdir convention: a single per-install directory
+    under the resolved data home holding one subdirectory per installed Power
+    (each with its own ``POWER.md`` / ``mcp.json`` / ``steering/``).  Defined in
+    this stdlib-only leaf module so callers can locate it via a cheap
+    ``config_dir()`` lookup without pulling in the full config loader.
+    """
+    return config_dir() / POWERS_DIR_NAME
+
+
 def _default_workspace_base() -> Path:
     """Return the platform-specific default base for the workspace."""
     if sys.platform == "darwin":

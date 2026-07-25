@@ -1620,6 +1620,15 @@ async def start_dashboard(
     app.router.add_get("/api/theme/{slug}/overlay/{id}", handlers.api_theme_overlay)
     app.router.add_get("/api/theme/{slug}/topbar/{mode}", handlers.api_theme_topbar)
 
+    # Powers (installable capability bundles: POWER.md + optional mcp.json).
+    # Registry routes are registered before the ``{name}`` routes so the
+    # single-segment ``/api/powers/registry`` reaches its handler cleanly.
+    app.router.add_get("/api/powers", handlers.api_powers)
+    app.router.add_get("/api/powers/registry", handlers.api_powers_registry)
+    app.router.add_get("/api/powers/registry/detail", handlers.api_powers_registry_detail)
+    app.router.add_post("/api/powers/install", handlers.api_powers_install)
+    app.router.add_delete("/api/powers/{name}", handlers.api_powers_delete)
+
     # Agent config
     app.router.add_get("/api/agent/config", handlers.api_agent_config)
     app.router.add_put("/api/agent/config", handlers.api_agent_config)

@@ -24,6 +24,7 @@ Load relevant module specs before making changes to that component. Read common 
 | [messaging](modules/messaging.md) | Channel-neutral messaging transport: MessagingTransport/TurnDriver approval ladder/Renderer + ChannelLink session-key namespacing (gated via messaging.use_transport) |
 | [metrics](modules/metrics.md) | OpenTelemetry-based metrics facade: namespace/attribute guardrails, redaction/privacy contract, local-first JSONL sink, default-OFF consent model (+ `KIROCREW_TELEMETRY` env opt-in), bounded local retention (age + total-size caps), opt-in OTLP egress (off by default), privacy-safe gateway boot-to-ready + bounded-cardinality per-route latency metrics |
 | [persistent-agent-channels](modules/persistent-agent-channels.md) | Multi-agent collaboration channels |
+| [powers](modules/powers.md) | Kiro Powers: inert `POWER.md` bundle browse / install / remove, atomic stage-rollback-commit installer, provenance-only `installed.json` schema, registry mirror (official monorepo + kiro.dev marketplace), `fetch.py` bundle-download security controls. Activation — trust, enable/disable, MCP registration, generated skills — is deliberately deferred |
 | [providers](modules/providers.md) | LLM provider abstraction (KiroACP / kiro-cli — the sole provider) |
 | [security](modules/security.md) | Defense-in-depth: sandbox, XPIA hardening, auth, denied commands |
 | [sel](modules/sel.md) | Security Event Log — immutable audit trail for tool invocations |

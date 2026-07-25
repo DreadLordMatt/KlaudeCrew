@@ -70,6 +70,56 @@ export interface Skill {
   loaded_by_agents?: string[]
 }
 
+/** An installed Power — a capability bundle that packages MCP tools and/or
+ *  on-demand guidance behind a single explicit trust grant. Mirrors the fixed
+ *  `Power` shape from GET /api/powers. */
+export interface Power {
+  name: string
+  displayName: string
+  description: string
+  keywords: string[]
+  author: string | null
+  /** What the bundle DECLARES: "mcp" when it ships an mcp.json listing
+   *  servers, "knowledge" when it is steering docs only. Descriptive only —
+   *  an installed power is inert until an activation surface exists. */
+  kind: 'mcp' | 'knowledge'
+  steeringFiles: string[]
+  source: { kind: string; ref: string }
+  installedAt: string
+  path: string
+}
+
+/** A Power as listed in the registry (marketplace mirror). */
+export interface RegistryPower {
+  id: string
+  displayName: string
+  description: string
+  author: string | null
+  category: string
+  scope: 'official' | 'aws' | 'community'
+  githubUrl: string
+  keywords: string[]
+  provider: string
+  /** Publisher icon, host-validated server-side. Optional: absent on records
+   *  from the official provider and on pre-icon cache entries. */
+  iconUrl?: string
+}
+
+/** Full registry detail with README + MCP/steering manifest. */
+export interface RegistryPowerDetail extends RegistryPower {
+  readme: string
+  hasMcp: boolean
+  mcpServers: string[]
+  steeringFiles: string[]
+}
+
+/** Registry provider descriptor + availability, from the registry envelope. */
+export interface PowerProvider {
+  name: string
+  displayName: string
+  available: boolean
+}
+
 /** A single entry in a skill folder's tree listing. */
 export interface SkillTreeEntry {
   path: string  // relative to the skill root, posix-style (e.g. "references/doc.md")

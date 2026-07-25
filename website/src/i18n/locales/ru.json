@@ -2047,6 +2047,7 @@
   "nav": {
     "agent_capabilities": "Возможности агента",
     "artifacts": "Артефакты",
+    "powers": "Powers",
     "explore": "Обзор",
     "knowledge": "Знания",
     "notifications": "Уведомления",

@@ -107,6 +107,21 @@ class PostureControl:
 # Where a sink runs only ONE of the two scanners, its detail text says so.
 _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
     (
+        "Powers registry listing",
+        "powers_providers/__init__.py",
+        "Mandatory redaction of third-party registry metadata (name, description, "
+        "author, keywords, repository and icon URLs) as it is shaped for the "
+        "dashboard — the scraped marketplace and the GitHub listing are both "
+        "attacker-influenced text on their way to a human.",
+    ),
+    (
+        "Powers HTTP responses",
+        "dashboard/handlers/powers.py",
+        "Redacts every Powers API body — installed listing, registry browse, "
+        "registry detail and install result — so a bundle's own POWER.md content "
+        "cannot carry a credential into the dashboard.",
+    ),
+    (
         "Dashboard live stream",
         "dashboard/chat_runner.py",
         "Per-chunk StreamRedactor on the chat_chunk WebSocket stream — withholds a "
@@ -290,6 +305,11 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
 # catches an omission.
 NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
     {
+        # Defines the Powers redaction helpers (`redact_external` /
+        # `redact_payload`) over security.py's scanners; it is the wrapper, not a
+        # boundary. Its callers — powers_providers/__init__.py and
+        # dashboard/handlers/powers.py — are registered sinks above.
+        "powers_providers/redact.py",
         # Inbound / gate-side: redacts what comes IN or what a gate logs, not what
         # goes out to a human.
         "context.py",

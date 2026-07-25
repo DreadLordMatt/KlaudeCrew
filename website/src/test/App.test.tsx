@@ -431,7 +431,11 @@ describe('App routing', () => {
     const toggle = await screen.findByTitle(/more app/i)
     // Hover -> the portaled label mounts (collapsed rows carry no inline text).
     fireEvent.mouseEnter(toggle)
-    expect(await screen.findByText('4 more')).toBeInTheDocument()
+    // Matched by shape, not by value. The count is one plus however many rail
+    // surfaces are registered, so pinning the literal made this test fail for any
+    // change that adds a surface -- which is what a new Apps entry (Powers) did,
+    // even though nothing about the hover-label behaviour under test moved.
+    expect(await screen.findByText(/^\d+ more$/)).toBeInTheDocument()
     // Press it the way a mouse does: pointerdown -> focus -> click. Neither the
     // focus the press produces nor the surviving hover state may leave a label
     // on screen — and the dismissal must be immediate, with no fade-out: the
@@ -440,7 +444,7 @@ describe('App routing', () => {
     fireEvent.pointerDown(toggle)
     fireEvent.focus(toggle)
     act(() => { toggle.click() })
-    expect(screen.queryByText('4 more')).toBeNull()
+    expect(screen.queryByText(/^\d+ more$/)).toBeNull()
     expect(screen.queryByText('Show less')).toBeNull()
     // ...and the press still did its job: dismissing the label must not swallow
     // the toggle's own activation (the title flips once the list is expanded).

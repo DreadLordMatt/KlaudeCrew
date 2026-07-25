@@ -65,6 +65,7 @@ from kiro_crew.config.paths import (  # noqa: F401
     config_package_dir,
     ensure_data_home,
     kiro_agents_dir,
+    powers_dir,
 )
 
 # Schema validation + the validated-data cache live in ``config.validation``.

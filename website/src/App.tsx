@@ -54,6 +54,7 @@ import ProjectsPage from './pages/ProjectsPage'
 import LogsPage from './pages/LogsPage'
 import HooksPage from './pages/HooksPage'
 import CapabilitiesPage from './pages/CapabilitiesPage'
+import PowersPage from './pages/PowersPage'
 import KnowledgePage from './pages/KnowledgePage'
 import ArtifactsPage from './pages/ArtifactsPage'
 import ArtifactDetailPage from './pages/ArtifactDetailPage'
@@ -2077,6 +2078,7 @@ export default function App() {
             <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/hooks" element={<HooksPage />} />
+            <Route path="/powers" element={<ErrorBoundary><PowersPage /></ErrorBoundary>} />
             <Route path="/capabilities" element={<CapabilitiesPage />} />
             {/* Instances setup moved into Settings; switching happens via the header tab strip. */}
             <Route path="/instances" element={<Navigate to="/settings?tab=instances" replace />} />

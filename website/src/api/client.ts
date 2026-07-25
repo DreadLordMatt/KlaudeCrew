@@ -1039,6 +1039,31 @@ export const api = {
   /** Install a skill from a provider by ID. Throws ApiError(409) when already installed and overwrite is not set. */
   installDiscoveredSkill: (provider: string, skillId: string, opts?: { name?: string; overwrite?: boolean }) =>
     post('/api/skills/-/discover/install', { provider, skill_id: skillId, name: opts?.name, overwrite: opts?.overwrite }).then(j) as Promise<import('../types').DiscoverInstallResult>,
+  // Powers — installable capability bundles (MCP tools + on-demand guidance)
+  powers: () =>
+    get('/api/powers').then(j) as Promise<{ installed: import('../types').Power[] }>,
+  /** Registry (marketplace mirror). Filters are optional server-side hints;
+   *  a 503 while the provider layer lands surfaces as ApiError(503). */
+  powersRegistry: (opts?: { q?: string; category?: string; scope?: string; limit?: number }) => {
+    const p = new URLSearchParams()
+    if (opts?.q) p.set('q', opts.q)
+    if (opts?.category) p.set('category', opts.category)
+    if (opts?.scope) p.set('scope', opts.scope)
+    if (opts?.limit != null) p.set('limit', String(opts.limit))
+    const qs = p.toString()
+    return get('/api/powers/registry' + (qs ? '?' + qs : '')).then(j) as Promise<{
+      items: import('../types').RegistryPower[]
+      providers: import('../types').PowerProvider[]
+      stale?: boolean
+    }>
+  },
+  powerRegistryDetail: (id: string, provider: string) =>
+    get('/api/powers/registry/detail?id=' + encodeURIComponent(id) + '&provider=' + encodeURIComponent(provider))
+      .then(j) as Promise<{ power: import('../types').RegistryPowerDetail }>,
+  installPower: (source: { kind: 'registry' | 'github' | 'folder'; ref: string; provider?: string }) =>
+    post('/api/powers/install', { source }).then(j) as Promise<{ power: import('../types').Power }>,
+  removePower: (name: string) =>
+    del('/api/powers/' + encodeURIComponent(name)).then(j) as Promise<{ ok: true }>,
   // MCP
   mcpServers: () => fetch('/api/mcp').then(j),
   mcpGlobalScopes: () => fetch('/api/mcp/scopes').then(j),

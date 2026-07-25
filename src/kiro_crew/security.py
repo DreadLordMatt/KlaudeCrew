@@ -2579,6 +2579,39 @@ _WRITE_PROTECTED_HOME_PATHS: list[str] = [
     # governance policy + secrets. The migration code writes it directly and
     # does NOT route through this gate, so legitimate stamping still works.
     for leaf in ("config.json", "config.local.json", ".data-home-ready")
+] + [
+    # Powers install provenance and bundle contents. `.marketplace-cache.json`
+    # decides WHICH repository a marketplace id resolves to, so overwriting it
+    # remaps a familiar power name to an attacker's repo and the user installs
+    # that instead — the integrity of the install target, not of execution.
+    # `installed.json` records where each installed bundle came from, which the
+    # dashboard shows as provenance. The WHOLE subtree is covered so a bundle's
+    # own files cannot be edited in place after the vetted allowlist copy.
+    #
+    # Scope note: nothing here grants execution. This PR never reads a bundle's
+    # mcp.json specs and never materializes its docs, so a tampered bundle is
+    # inert — hence the file-edit gate is proportionate for the bundle CONTENTS.
+    # Two bash-reachable vectors are covered elsewhere rather than here, because
+    # ``powers`` is deliberately absent from ``_SENSITIVE_HOME_DIRS`` (which
+    # would also block legitimate reads):
+    #   * the two state files that nothing re-validates after write
+    #     (``installed.json``, ``.marketplace-cache.json``) are listed in the
+    #     SHARED ``_WRITE_PROTECTED_BASH_LEAVES`` tuple below, so a shell write
+    #     naming either one is refused;
+    #   * a shell ``ln -s <writable> <home>/powers`` swapping the powers ROOT
+    #     for a symlink is closed STRUCTURALLY instead of by pattern-matching:
+    #     ``PowersStore._assert_root_not_symlinked`` fails closed before any
+    #     staging/rename/rmtree, so no shell-string regex has to be correct for
+    #     the guarantee to hold.
+    # The activation change, which makes bundle contents executable and adds an
+    # authoritative `trusted` flag, is where a broader shell-level guard on the
+    # bundle CONTENTS becomes load-bearing.
+    #
+    # Reads stay allowed (the dashboard renders installed Powers). Internal
+    # writers are unaffected: the store writes these files from Python, which
+    # does not route through the agent file-edit gate.
+    f"{prefix}/powers"
+    for prefix in _CREW_HOME_PREFIXES
 ]
 
 # ── Bash-layer protection for write-protected leaves ──
@@ -2598,7 +2631,9 @@ _WRITE_PROTECTED_HOME_PATHS: list[str] = [
 # ``is_sensitive_path`` stay unaffected), and the only legitimate readers
 # (``kirocrew doctor``, the migration code) use Python ``os`` calls, not bash.
 #
-# The data-home marker is the sole entry: its mere PRESENCE is the migration
+# The data-home marker and the Powers provenance/target files are the entries.
+#
+# `.data-home-ready`: its mere PRESENCE is the migration
 # trust signal, and — unlike config.json, whose inflated values the loader
 # clamps at load time regardless of how they were written — nothing neutralizes
 # a planted marker. A prompt-injected agent that shell-plants it into a
@@ -2608,6 +2643,19 @@ _WRITE_PROTECTED_HOME_PATHS: list[str] = [
 # so legitimate stamping is unaffected. Kept as a literal to avoid a
 # config->security import cycle; a drift guard in the tests pins it to
 # ``MIGRATION_MARKER_NAME``.
+#
+# `.marketplace-cache.json` / `installed.json` (Powers): the cache decides WHICH
+# repository a marketplace id resolves to, so a planted entry makes the user
+# install an attacker's repo under a familiar name — the install TARGET, which
+# no later validation can recover because the resolved URL is exactly what the
+# user asked to install. `installed.json` is the provenance the dashboard shows.
+# Both are covered on the tool path by ``_WRITE_PROTECTED_HOME_PATHS`` above;
+# they are listed here for the same reason as the marker — nothing re-validates
+# a value that was already written. The Powers store reads and writes them from
+# Python, never bash, so legitimate use is unaffected. (The powers ROOT itself
+# being swapped for a symlink is handled separately and structurally, by
+# ``PowersStore._assert_root_not_symlinked`` failing closed before any
+# rename/rmtree, rather than by pattern-matching shell strings.)
 #
 # SCOPE NOTE (please do NOT flag incremental regex gaps as new HIGHs): this
 # bash gate is DEFENSE-IN-DEPTH, not the primary control. The primary control
@@ -2621,7 +2669,15 @@ _WRITE_PROTECTED_HOME_PATHS: list[str] = [
 # realistic residual threat (skipping a one-time session-data copy) is low and
 # already covered on the tool path. Widen this only via the SHARED matcher (so
 # credentials benefit too), not with marker-only special cases.
-_WRITE_PROTECTED_BASH_LEAVES: tuple[str, ...] = (".data-home-ready",)
+# Entries are paths RELATIVE to the crew home, not necessarily bare basenames:
+# the matcher escapes each entry and anchors it under ``<home>/<crew-prefix>/``,
+# so a nested entry like ``powers/installed.json`` is matched exactly and does
+# not accidentally protect a same-named file elsewhere in the home.
+_WRITE_PROTECTED_BASH_LEAVES: tuple[str, ...] = (
+    ".data-home-ready",
+    "powers/installed.json",
+    "powers/.marketplace-cache.json",
+)
 
 # Regex for bash commands that read sensitive paths.
 # Matches: cat, head, tail, less, more, strings, xxd, base64, cp, scp, open,

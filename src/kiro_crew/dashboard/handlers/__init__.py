@@ -557,6 +557,15 @@ from kiro_crew.dashboard.handlers.portability import (  # noqa: E402, F401
     api_portability_import,
     api_portability_preview,
 )
+
+# ── Powers (extracted to handlers/powers.py) ──
+from kiro_crew.dashboard.handlers.powers import (  # noqa: E402, F401
+    api_powers,
+    api_powers_delete,
+    api_powers_install,
+    api_powers_registry,
+    api_powers_registry_detail,
+)
 from kiro_crew.dashboard.handlers.security import (  # noqa: E402, F401
     api_denied_command_builtin_toggle,
     api_denied_command_user_add,

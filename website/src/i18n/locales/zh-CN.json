@@ -1984,6 +1984,7 @@
   "nav": {
     "agent_capabilities": "代理能力",
     "artifacts": "工件",
+    "powers": "Powers",
     "explore": "探索",
     "knowledge": "知识库",
     "notifications": "通知",
