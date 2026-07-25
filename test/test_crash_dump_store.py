@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -191,6 +192,17 @@ def test_dump_age_seconds(dumps_dir: Path) -> None:
     age = dump_age_seconds(p)
     # Should be very small since we just created it
     assert 0 <= age < 2.0
+
+
+def test_dump_age_seconds_never_negative_on_future_mtime(dumps_dir: Path) -> None:
+    """Regression: a file whose mtime is slightly AHEAD of the clock (Windows'
+    coarse clock + mtime rounding on a just-created file) must still report a
+    non-negative age, not a tiny negative delta. Clamped at 0 in production."""
+    p = _create_stacked_dump(dumps_dir, f"{DUMP_PREFIX}20260717T010000Z{DUMP_SUFFIX}")
+    # Force mtime a hair into the future relative to time.time().
+    future = time.time() + 0.5
+    os.utime(p, (future, future))
+    assert dump_age_seconds(p) == 0.0
 
 
 # ── Integration with LoopStallWatchdog dump_file param ──

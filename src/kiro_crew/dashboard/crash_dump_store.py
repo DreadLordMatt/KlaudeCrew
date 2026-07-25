@@ -131,8 +131,15 @@ def newest_dump_with_stacks(dumps_dir: Path | None = None) -> Path | None:
 
 
 def dump_age_seconds(dump_path: Path) -> float:
-    """Return age of a dump file in seconds."""
-    return time.time() - dump_path.stat().st_mtime
+    """Return age of a dump file in seconds (never negative).
+
+    Clamped at 0: on Windows the coarse (~15ms) clock plus filesystem mtime
+    rounding can leave ``st_mtime`` a hair AHEAD of a subsequent ``time.time()``
+    for a just-created file, yielding a tiny negative delta. An "age" is never
+    negative, and callers (cli_doctor staleness formatting) assume ``>= 0``, so
+    floor it.
+    """
+    return max(0.0, time.time() - dump_path.stat().st_mtime)
 
 
 def dump_first_stack_lines(dump_path: Path, max_lines: int = 5) -> list[str]:
