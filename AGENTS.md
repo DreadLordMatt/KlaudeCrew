@@ -633,12 +633,23 @@ The subagent completed but injection timed out. Result is on disk — use `read`
 
 ## File Attachments
 
-Users attach files via `@filename` syntax in chat input. The file picker searches the active project directory.
+Users attach files via `@filename` syntax in chat input. The file picker searches the active project directory and matches both files and directories.
 
 - `@relative/path` tokens resolved to full paths
 - Image files rendered inline as markdown `![image](path)`
 - Non-image files sent as `[attached_file N] /full/path`
+- Directories sent as `[attached_dir N] /full/path` — see below
 - The `[PROJECT]` context entry tells you which directory is active
+
+### Folder references
+
+A folder mention is a **path reference, not an attachment**. The marker names a
+directory you may explore; no contents are inlined.
+
+- `[attached_dir N] /full/path` means the user pointed you at that directory
+- Do NOT call a file-read tool on the path: it is a directory, and the read will fail
+- Explore it with your own tools: glob for a listing, grep to search contents, read individual files once you know their paths
+- `[attached_file N]` and `[attached_dir N]` number independently, so one message can carry both `[attached_file 1]` and `[attached_dir 1]`
 
 ## Widget Protocol
 

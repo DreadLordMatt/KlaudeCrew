@@ -4657,6 +4657,19 @@ async def _run_chat(
             cron_label = _m.group(1) if _m else "cron"
             cron_label, _ = redact_exfiltration_urls(cron_label)
             cron_label, _ = redact_credentials(cron_label)
+            # Carry a queued user message's attachment metadata onto the
+            # persisted entry. `_dequeue_next_message` never merges a
+            # metadata-bearing item, so `consumed` holds exactly it and there is
+            # no ambiguity about which lists belong to this content. Without
+            # this the drained message keeps its `[attached_dir N]` markers but
+            # loses the ordered lists, and replay truncates any path containing
+            # a space at the first space. Only plain user messages carry it —
+            # cron/subagent/recovery injections have no attachments.
+            _queued_meta = (
+                consumed[0].get("meta")
+                if (len(consumed) == 1 and not (is_cron or is_subagent or is_recovery))
+                else None
+            )
             slot.append(
                 "subagent"
                 if is_subagent
@@ -4669,6 +4682,7 @@ async def _run_chat(
                 else "msg msg-inject"
                 if is_recovery
                 else "msg msg-u",
+                meta=_queued_meta or None,
             )
 
             task = asyncio.create_task(

@@ -266,12 +266,21 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
                     # (dirty-flush picks it up on next save cycle). Store the
                     # sanitized form — raw content must never reach an external
                     # surface (security-controls).
+                    #
+                    # Carry the client's attachment metadata through, same as the
+                    # queue path at the bottom of this handler. Without it the
+                    # persisted steer keeps only `steer: True`, so on reload
+                    # `parseFiles`/`parseDirs` fall back to scanning the content
+                    # for markers and truncate any path containing a space. The
+                    # `steer` flag is set last so a client cannot spoof it.
+                    _steer_meta = dict(_redact_meta(user_meta)) if user_meta else {}
+                    _steer_meta["steer"] = True
                     slot.append(
                         "user",
                         _sanitized,
                         "msg msg-u",
                         ts=_ts,
-                        meta={"steer": True},
+                        meta=_steer_meta,
                     )
                     state.broadcast_ws(
                         "steer_push",
@@ -279,6 +288,12 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
                             "slot": slot.key,
                             "content": _redacted,
                             "ts": _ts,
+                            # Mirror the persisted metadata to every other open
+                            # client. The echo is what a second tab renders from,
+                            # so without the ordered lists that tab falls back to
+                            # the whitespace scan and shows `/repo/my` for
+                            # `/repo/my docs` until a reload re-fetches history.
+                            "meta": _steer_meta,
                         },
                     )
                     return web.json_response({"ok": True, "steered": True})
@@ -287,7 +302,10 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         # The existing SSE reader will pick up queued messages as _run_chat
         # processes the queue in its finally block.
         if message:
-            qid = slot.queue_append(message)
+            # Carry the attachment metadata into the queue entry so the drain can
+            # persist it (see queue_append / _dequeue_next_message). Redacted at
+            # the boundary, exactly like the non-queued send path below.
+            qid = slot.queue_append(message, meta=_redact_meta(user_meta) if user_meta else None)
             _c, _ = redact_exfiltration_urls(message)
             _c, _ = redact_credentials(_c)
             _redacted = _redact_for_display(_c)
@@ -319,7 +337,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         and state.subagents is not None
         and state.subagents.running_agents_for(f"dashboard:{slot.key}")
     ):
-        qid = slot.queue_append(message)
+        qid = slot.queue_append(message, meta=_redact_meta(user_meta) if user_meta else None)
         _c, _ = redact_exfiltration_urls(message)
         _c, _ = redact_credentials(_c)
         _redacted = _redact_for_display(_c)

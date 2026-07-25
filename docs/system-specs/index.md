@@ -14,6 +14,7 @@ Load relevant module specs before making changes to that component. Read common 
 | [channel-history](modules/channel-history.md) | Group conversation context buffer |
 | [config](modules/config.md) | Dataclass config schema and loader |
 | [cli](modules/cli.md) | argparse CLI commands (chat, gateway, doctor, setup, manifest) |
+| [file-search](modules/file-search.md) | `@`-mention file and folder search: `/api/file-search` with `kind`/`kinds`, FileIndex directory entries, `[attached_file N]` and `[attached_dir N]` prompt markers |
 | [heartbeat](modules/heartbeat.md) | Periodic background tasks |
 | [history](modules/history.md) | Persistent conversation history with LLM consolidation |
 | [knowledge](modules/knowledge.md) | Knowledge Library ingest (FileReader/SUPPORTED formats incl. .org), folder watcher, LLMPool workers (sweep-shielded) |

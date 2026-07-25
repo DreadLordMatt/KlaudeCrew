@@ -862,8 +862,12 @@ export const api = {
   // Mid-turn steer: inject into the RUNNING turn instead of queueing. Fire-and-forget
   // JSON response ({ok, steered}); the backend falls back to queue if steer is
   // unavailable so the text is never dropped.
-  steerChat: (message: string, slot?: string) =>
-    fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, steer: true }) }).then(j),
+  // `meta` carries the ordered attachment lists (files/dirs). The server
+  // persists them on the steered history entry, so a path containing a space
+  // still resolves after a reload instead of being truncated by the
+  // content-scan fallback.
+  steerChat: (message: string, slot?: string, meta?: Record<string, unknown>) =>
+    fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, steer: true, ...(meta ? { meta } : {}) }) }).then(j),
   sessionsHealth: () => fetch('/api/sessions/health').then(j),
   // Knowledge
   knowledgeSearch: (q: string) => get(`/api/knowledge/search-for-context?q=${encodeURIComponent(q)}`).then(j),
@@ -959,11 +963,11 @@ export const api = {
   simulateUpdate: (opts?: { delay?: number; fail_at?: string }) => post('/api/update/simulate', opts || {}).then(j),
   pickFiles: () => post('/api/upload').then(j) as Promise<{ paths: string[] }>,
   fileDiff: (path: string) => fetch('/api/file-diff?path=' + encodeURIComponent(path)).then(j) as Promise<{ diff: string; original: string; status?: 'clean' | 'modified' | 'untracked' | 'not_git' }>,
-  /** Fuzzy file search for @-mention picker */
+  /** Fuzzy file search for @-mention picker. `kind` distinguishes folder hits from files. */
   fileSearch: (q: string, project?: string, signal?: AbortSignal) => {
     const p = new URLSearchParams({ q })
     if (project) p.set('project', project)
-    return fetch(`/api/file-search?${p}`, signal ? { signal } : undefined).then(j) as Promise<{ results: Array<{ path: string; name: string; size: number; mtime: number }>; root: string }>
+    return fetch(`/api/file-search?${p}`, signal ? { signal } : undefined).then(j) as Promise<{ results: Array<{ path: string; name: string; size: number; mtime: number; kind?: 'file' | 'dir' }>; root: string }>
   },
   /** Upload files via browser File API (cross-platform) */
   uploadFiles: async (files: File[]) => {

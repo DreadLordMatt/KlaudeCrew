@@ -804,6 +804,20 @@ const chatSlice = createSlice({
     },
     removeThinking(state) { state.messages = state.messages.filter(m => m.role !== 'thinking') },
     removeByApprovalId(state, action: PayloadAction<string>) { state.messages = state.messages.filter(m => m.meta?.approval_id !== action.payload) },
+    /** Drop an optimistic user bubble whose write was rejected.
+     *
+     * Keyed on the client ts stamped at dispatch time AND `meta.optimistic`, so
+     * it can only ever remove a not-yet-confirmed bubble — never a message the
+     * server has echoed (the steer echo reconciles in place and clears the
+     * optimistic marker). Sweeps the active list and the per-slot list because
+     * a steer can be dispatched into a background slot. */
+    removeOptimisticMessage(state, action: PayloadAction<{ slot?: string; ts: string }>) {
+      const { slot, ts } = action.payload
+      const keep = (m: { ts?: string; meta?: Record<string, unknown> | null }) =>
+        !(m.ts === ts && Boolean(m.meta?.optimistic))
+      state.messages = state.messages.filter(keep)
+      if (slot && state.slotMessages[slot]) state.slotMessages[slot] = state.slotMessages[slot].filter(keep)
+    },
     resolveByApprovalId(state, action: PayloadAction<{ id: string; decision?: string }>) {
       const decision = action.payload.decision || 'approved'
       let m = state.messages.find(m => m.meta?.approval_id === action.payload.id)
@@ -1902,7 +1916,7 @@ const chatSlice = createSlice({
 
 export const {
   setActiveSlot, clearSlotState, setPendingInput, setQuestionCard, clearQuestionCard, appendMessage, appendSlotMessage, updateStreamingMessage, finalizeAssistant,
-  removeThinking, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, hydrateSlotMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage,
+  removeThinking, removeByApprovalId, removeOptimisticMessage, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, hydrateSlotMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage,
   sseContextUsage, setVoicePlaying, setVoiceAudio,
   toggleActivity, openActivityToTab, openActivityPanel, openActivityToTool, clearFocusToolCallId, clearSubagentsForSnapshot, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentStalled, sseSubagentRetrying, sseSubagentDone,
   sseSubagentBatchUpdate, sseSubagentBatchChunks, selectSubagent, clearTerminalSubagents,

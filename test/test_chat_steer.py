@@ -105,3 +105,196 @@ class TestApiChatSteer:
             assert data.get("steered") is not True
 
         client_mock.steer.assert_awaited_once()
+
+
+class TestSteerPersistsAttachmentMeta:
+    """A steered message must persist the ordered attachment lists.
+
+    Without them a reload falls back to scanning the content for markers, which
+    is bounded by whitespace and so truncates any path containing a space.
+    """
+
+    @pytest.mark.asyncio
+    async def test_steer_persists_files_and_dirs(self, tmp_path, monkeypatch, _patch_sel):
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        slot = _running_slot(state)
+        client_mock = MagicMock()
+        client_mock.supports_steer = True
+        client_mock.steer = AsyncMock(return_value=True)
+        slot._acp_client = client_mock
+
+        spaced_dir = "/repo/my docs"
+        spaced_file = "/repo/my notes.txt"
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat",
+                json={
+                    "slot": "test",
+                    "message": f"review [attached_dir 1] {spaced_dir} and [attached_file 1] {spaced_file}",
+                    "steer": True,
+                    "meta": {"files": [spaced_file], "dirs": [spaced_dir]},
+                },
+            )
+            assert resp.status == 200
+            assert (await resp.json()).get("steered") is True
+
+        persisted = [m for m in slot.messages if m.get("role") == "user"]
+        assert persisted, "the steered message was not persisted"
+        meta = persisted[-1].get("meta") or {}
+        assert meta.get("steer") is True, "the steer marker must survive"
+        assert meta.get("dirs") == [spaced_dir], "spaced folder path lost from meta.dirs"
+        assert meta.get("files") == [spaced_file], "spaced file path lost from meta.files"
+
+    @pytest.mark.asyncio
+    async def test_steer_without_meta_still_marks_steer(self, tmp_path, monkeypatch, _patch_sel):
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        slot = _running_slot(state)
+        client_mock = MagicMock()
+        client_mock.supports_steer = True
+        client_mock.steer = AsyncMock(return_value=True)
+        slot._acp_client = client_mock
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat", json={"slot": "test", "message": "plain steer", "steer": True}
+            )
+            assert resp.status == 200
+
+        persisted = [m for m in slot.messages if m.get("role") == "user"]
+        assert (persisted[-1].get("meta") or {}).get("steer") is True
+
+    @pytest.mark.asyncio
+    async def test_client_cannot_spoof_the_steer_marker(self, tmp_path, monkeypatch, _patch_sel):
+        """`steer` is set server-side last, so a client value cannot override it."""
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        slot = _running_slot(state)
+        client_mock = MagicMock()
+        client_mock.supports_steer = True
+        client_mock.steer = AsyncMock(return_value=True)
+        slot._acp_client = client_mock
+
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat",
+                json={
+                    "slot": "test",
+                    "message": "sneaky",
+                    "steer": True,
+                    "meta": {"steer": False, "dirs": ["/repo/docs"]},
+                },
+            )
+            assert resp.status == 200
+
+        meta = [m for m in slot.messages if m.get("role") == "user"][-1].get("meta") or {}
+        assert meta.get("steer") is True
+        assert meta.get("dirs") == ["/repo/docs"]
+
+    @pytest.mark.asyncio
+    async def test_steer_push_echo_carries_meta(self, tmp_path, monkeypatch, _patch_sel):
+        """The WS echo must mirror the metadata, not just the content.
+
+        A second open tab renders the steered bubble from this event. Without the
+        ordered lists it falls back to the whitespace-bounded content scan and
+        shows `/repo/my` for `/repo/my docs` until the page is reloaded.
+        """
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        slot = _running_slot(state)
+        client_mock = MagicMock()
+        client_mock.supports_steer = True
+        client_mock.steer = AsyncMock(return_value=True)
+        slot._acp_client = client_mock
+
+        spaced_dir = "/repo/my docs"
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat",
+                json={
+                    "slot": "test",
+                    "message": f"review [attached_dir 1] {spaced_dir}",
+                    "steer": True,
+                    "meta": {"dirs": [spaced_dir]},
+                },
+            )
+            assert resp.status == 200
+
+        pushes = [c for c in state.broadcast_ws.call_args_list if c.args and c.args[0] == "steer_push"]
+        assert pushes, "no steer_push event was broadcast"
+        payload = pushes[-1].args[1]
+        assert payload.get("meta", {}).get("dirs") == [spaced_dir], "steer_push dropped meta.dirs"
+        assert payload.get("meta", {}).get("steer") is True
+
+
+class TestQueuedSendPersistsAttachmentMeta:
+    """A queued (mid-turn / held) send must carry its attachment lists too.
+
+    The queue is the other path a message with attachments can take. It used to
+    store only `{id, content, kind}`, so the drain persisted the markers without
+    the ordered lists and a spaced path truncated on replay — the same defect as
+    the steer path, one layer down.
+    """
+
+    @pytest.mark.asyncio
+    async def test_queued_message_carries_meta_to_the_drain(self, tmp_path, monkeypatch, _patch_sel):
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        slot = _running_slot(state)
+        # No live ACP client -> steer is unavailable -> falls through to the queue.
+        slot._acp_client = None
+
+        spaced_dir = "/repo/my docs"
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.post(
+                "/api/chat",
+                json={
+                    "slot": "test",
+                    "message": f"review [attached_dir 1] {spaced_dir}",
+                    "meta": {"dirs": [spaced_dir]},
+                },
+            )
+            assert resp.status == 200
+            assert (await resp.json()).get("queued") is True
+
+        assert slot._queue, "the message was not queued"
+        assert slot._queue[-1].get("meta", {}).get("dirs") == [spaced_dir], (
+            "queue entry dropped meta.dirs, so the drain cannot persist it"
+        )
+
+    def test_queue_append_omits_meta_key_when_absent(self, tmp_path, monkeypatch):
+        """An unattached message keeps the original 3-key queue shape."""
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("test")
+        slot.queue_append("plain text")
+        assert set(slot._queue[-1]) == {"id", "content", "kind"}
+
+    def test_attachment_bearing_entry_is_never_merged(self, tmp_path, monkeypatch):
+        """Merging would put two marker index spaces under one metadata list.
+
+        `[attached_dir 1]` in the second message would resolve against the first
+        message's `meta.dirs`, so an attachment-bearing entry must drain alone.
+        """
+        from kiro_crew.dashboard.chat_utils import _dequeue_next_message
+
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("test")
+        slot.queue_append("plain one")
+        slot.queue_append("plain two")
+        slot.queue_append("with folder [attached_dir 1] /repo/my docs", meta={"dirs": ["/repo/my docs"]})
+
+        msg, consumed = _dequeue_next_message(slot, merge_enabled=True)
+        assert len(consumed) == 2, "the merge must stop at the attachment-bearing entry"
+        assert "with folder" not in msg
+
+        msg2, consumed2 = _dequeue_next_message(slot, merge_enabled=True)
+        assert len(consumed2) == 1
+        assert consumed2[0]["meta"]["dirs"] == ["/repo/my docs"]

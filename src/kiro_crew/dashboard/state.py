@@ -1057,7 +1057,7 @@ class _ChatSlot:
 
     # ── Queue helpers (dict-based queue items) ──
 
-    def queue_append(self, content: str, kind: str = "") -> str:
+    def queue_append(self, content: str, kind: str = "", meta: dict | None = None) -> str:
         """Append a message to the queue. Returns the generated queue ID.
 
         ``kind`` is a structural origin tag (e.g. ``"synthetic_recovery"`` for
@@ -1065,9 +1065,21 @@ class _ChatSlot:
         not by content equality — survives queue transformations and cannot
         collide with user-typed text that happens to match an internal string.
         Empty string = plain user/system content (default).
+
+        ``meta`` carries the (already-redacted) attachment metadata of a queued
+        user message — ``meta.files`` / ``meta.dirs``. It must survive the queue
+        because those ordered lists are what let a path containing a space
+        replay losslessly; without it the drain persists the message with
+        markers but no lists, and ``parseFiles``/``parseDirs`` fall back to the
+        whitespace scan that truncates ``/repo/my docs`` to ``/repo/my``.
         """
         qid = uuid.uuid4().hex[:12]
-        self._queue.append({"id": qid, "content": content, "kind": kind})
+        item: dict = {"id": qid, "content": content, "kind": kind}
+        # Only set when present so existing queue-shape assertions (which
+        # compare against the 3-key dict) stay valid for unattached messages.
+        if meta:
+            item["meta"] = meta
+        self._queue.append(item)
         return qid
 
     def queue_insert(self, index: int, content: str, kind: str = "") -> str:

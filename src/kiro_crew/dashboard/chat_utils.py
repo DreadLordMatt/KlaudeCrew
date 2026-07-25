@@ -593,6 +593,15 @@ def _dequeue_next_message(slot, merge_enabled: bool) -> tuple:
         for item in list(slot._queue):
             if is_system_injection_item(item):
                 break
+            # An attachment-bearing entry must drain ALONE. Its `meta.files` /
+            # `meta.dirs` are ordered lists indexed by the `[attached_file N]` /
+            # `[attached_dir N]` markers in its own content; concatenating two
+            # such messages would put two independent index spaces in one body
+            # with only one metadata list, so the second message's markers would
+            # resolve against the first's paths. Break the merge here and let it
+            # drain on its own turn with its metadata intact.
+            if item.get("meta"):
+                break
             to_merge.append(item)
         if len(to_merge) > 1:
             del slot._queue[:len(to_merge)]

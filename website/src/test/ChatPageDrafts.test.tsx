@@ -127,7 +127,7 @@ beforeEach(() => {
 // someone reorders the effects or moves the advance up. All three persist
 // writes are asserted (not just text) because the advance now guards all three.
 describe('ChatPage composerSlotRef effect ordering', () => {
-  it('declares all three composer-persist effects before advancing composerSlotRef', () => {
+  it('declares all four composer-persist effects before advancing composerSlotRef', () => {
     // Deliberately brittle: this matches exact code substrings from ChatPage.tsx
     // to lock a load-bearing effect-declaration order. An innocuous rename/reformat
     // will trip it. The fix is to UPDATE the substrings below to the new form,
@@ -136,19 +136,121 @@ describe('ChatPage composerSlotRef effect ordering', () => {
     const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
     const textIdx = src.indexOf('setDraft(drafts.current, s, input)')
     const fileIdx = src.indexOf('setFileDraft(fileDrafts.current, s, pendingFiles)')
+    const dirIdx = src.indexOf('setDirDraft(dirDrafts.current, s, pendingDirs)')
     const pasteIdx = src.indexOf('setPasteDraft(pasteDrafts.current, s, pasteBlocks)')
     const advanceIdx = src.indexOf('composerSlotRef.current = activeSlot')
     expect(textIdx, 'text-persist effect (setDraft off composerSlotRef) not found').toBeGreaterThan(-1)
     expect(fileIdx, 'file-persist effect (setFileDraft off composerSlotRef) not found').toBeGreaterThan(-1)
+    expect(dirIdx, 'dir-persist effect (setDirDraft off composerSlotRef) not found').toBeGreaterThan(-1)
     expect(pasteIdx, 'paste-persist effect (setPasteDraft off composerSlotRef) not found').toBeGreaterThan(-1)
     expect(advanceIdx, 'composerSlotRef advance not found').toBeGreaterThan(-1)
     const order = 'persist effect must be declared BEFORE the composerSlotRef advance (draft-smear guard). If effects moved, UPDATE the substrings; do not delete this guard.'
     expect(textIdx, order).toBeLessThan(advanceIdx)
     expect(fileIdx, order).toBeLessThan(advanceIdx)
+    expect(dirIdx, order).toBeLessThan(advanceIdx)
     expect(pasteIdx, order).toBeLessThan(advanceIdx)
   })
 
-  // Symptom B (send routing to the slot the user already left) can't be covered
+  // The folder-leak fix: the slot-change effect must RESET pendingDirs from the
+  // incoming slot's draft. Without it a folder picked in chat A rides along on
+  // the next send in chat B. Behaviorally awkward to reach (needs a real picker
+  // selection), so guard the reset line statically.
+  it('resets pendingDirs from the incoming slot draft on slot change', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
+    expect(src, 'slot change must restore pendingDirs from dirDrafts').toContain(
+      "setPendingDirs(activeSlot ? (dirDrafts.current[activeSlot] ?? []).slice() : [])",
+    )
+  })
+
+  // The replay fix: send() must persist dirPaths on meta.dirs, otherwise a
+  // folder path containing a space is truncated by the content-scan fallback.
+  it('persists folder paths on meta.dirs', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
+    expect(src, 'send() must destructure dirPaths from prepareSendPayload').toMatch(
+      /const \{[^}]*dirPaths[^}]*\} = prepareSendPayload\(/,
+    )
+    expect(src, 'send() must set meta.dirs').toContain('if (dirPaths.length) meta.dirs = dirPaths')
+  })
+
+  // steer() renders its own optimistic bubble from the tokenized text, so it
+  // needs the same ordered lists as send() or a spaced path truncates there too.
+  it('persists attachment metadata on the steered optimistic bubble', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
+    expect(src, 'steer() must set files on the bubble meta').toContain(
+      'if (filePaths.length) steerMeta.files = filePaths',
+    )
+    expect(src, 'steer() must set dirs on the bubble meta').toContain(
+      'if (dirPaths.length) steerMeta.dirs = dirPaths',
+    )
+    expect(src, 'steer() must not discard the payload lists').not.toContain(
+      'const { txt } = prepareSendPayload(raw, files, dirs)',
+    )
+  })
+
+  // The optimistic bubble alone is not enough: the SERVER must persist the
+  // ordered lists too, or the spaced path is truncated by the content-scan
+  // fallback after a reload. Guarded statically because the assertion is about
+  // what crosses the network boundary, and the mutation is fire-and-forget.
+  it('sends attachment metadata to the server on steer', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
+    expect(src, 'steer() must send the lists, not just the text').toMatch(
+      /steerMutation\.mutate\(\s*\{\s*text:\s*llmTxt,\s*meta:/,
+    )
+    expect(src, 'steer() must put files on the server meta').toContain(
+      'if (filePaths.length) serverMeta.files = filePaths',
+    )
+    expect(src, 'steer() must put dirs on the server meta').toContain(
+      'if (dirPaths.length) serverMeta.dirs = dirPaths',
+    )
+    const client = readFileSync(resolve(here, '../api/client.ts'), 'utf8')
+    expect(client, 'steerChat must forward meta in the request body').toMatch(
+      /steer:\s*true,\s*\.\.\.\(meta\s*\?\s*\{\s*meta\s*\}\s*:\s*\{\}\)/,
+    )
+  })
+
+  // Two write paths can reject AFTER the composer has been cleared, and the
+  // clears are unconditional (text + attachments must clear atomically). Both
+  // must capture the pre-clear state and put it back, or the user's staged
+  // folders/files are unrecoverable while a bubble claims they were sent.
+  // Static guards: both are rejection paths on a fire-and-forget write, so the
+  // assertion is about the code shape, not observable render output.
+  it('restores the composer when createSlot rejects mid-send', () => {
+    // Brittle by design: if these lines are renamed, UPDATE the substrings —
+    // do not delete the guard.
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
+    expect(src, 'the unwrapped createSlot must be inside a try').toMatch(
+      /try\s*\{\s*result = await dispatch\(createSlot\(/,
+    )
+    expect(src, 'a rejected createSlot must re-stage the staged files (images included)').toContain(
+      'setFileDraft(fileDrafts.current, uiSlot, stagedFiles)',
+    )
+    expect(src, 'a rejected createSlot must re-stage the staged dirs').toContain(
+      'setDirDraft(dirDrafts.current, uiSlot, dirPaths)',
+    )
+    expect(src, 'a rejected createSlot must not fall through to the send').toMatch(
+      /console\.error\('createSlot failed', e\)\s*\n\s*return/,
+    )
+  })
+
+  it('rolls back the optimistic bubble and restores drafts when steer rejects', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
+    expect(src, 'steer must pass an onError handler to the mutation').toMatch(
+      /steerMutation\.mutate\([\s\S]{0,400}onError:/,
+    )
+    expect(src, 'a failed steer must drop its optimistic bubble').toContain(
+      'dispatch(removeOptimisticMessage({ slot: restore.slot, ts: optimisticTs }))',
+    )
+    expect(src, 'a failed steer must re-stage the staged dirs').toContain(
+      'setDirDraft(dirDrafts.current, restore.slot, restore.dirs)',
+    )
+  })
+
   // behaviorally: the ref-vs-closure divergence it fixes is a same-tick race
   // between the reducer's activeSlot flip and send()'s re-memoization, and RTL
   // flushes a render between any dispatch and the Enter event, so the closure
@@ -462,6 +564,43 @@ describe('ChatPage draft persistence', { timeout: 15_000 }, () => {
       return s
     })
     expect(saved['new-slot']).toBeUndefined()
+  })
+
+  it('restores a staged image after a failed send, not just non-image files', async () => {
+    // Images are filtered out of prepareSendPayload's `filePaths` (they go into
+    // `imgPaths` and become `![image](...)` markdown), so restoring `filePaths`
+    // alone silently dropped the image: it lives only in pendingFiles, never in
+    // the raw text, so a retry would have sent the message without it.
+    const { api } = await import('../api/client')
+    vi.mocked(api.uploadFiles).mockResolvedValueOnce({ paths: ['/tmp/shot.png', '/tmp/notes.txt'] })
+    vi.mocked(api.sendChat).mockRejectedValueOnce(new Error('Network error'))
+
+    const store = makeStore('slot-a', [{ key: 'slot-a' }])
+    await renderAndWaitForInput(store)
+
+    const input = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    const dropTarget = input.closest('div') as HTMLElement
+    await act(async () => {
+      fireEvent.drop(dropTarget, {
+        dataTransfer: {
+          files: [new File(['x'], 'shot.png', { type: 'image/png' }), new File(['y'], 'notes.txt', { type: 'text/plain' })],
+          types: ['Files'],
+        },
+      })
+    })
+    await waitFor(() => {
+      const saved = JSON.parse(sessionStorage.getItem('mc-chat-file-drafts') || '{}')
+      expect(saved['slot-a']).toEqual(['/tmp/shot.png', '/tmp/notes.txt'])
+    })
+
+    await act(async () => { fireEvent.change(input, { target: { value: 'look at this' } }) })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+
+    await waitFor(() => {
+      const saved = JSON.parse(sessionStorage.getItem('mc-chat-file-drafts') || '{}')
+      expect(saved['slot-a'], 'the image must survive the send-failure restore')
+        .toEqual(['/tmp/shot.png', '/tmp/notes.txt'])
+    })
   })
 
   it('restores draft to localStorage on connection error', async () => {
