@@ -48,6 +48,40 @@ class TestQueueEditHelper:
         slot = _ChatSlot("s1")
         assert slot.queue_edit_by_id("anything", "x") is False
 
+    def test_edit_drops_attachment_meta(self):
+        """An edit discards the item's attachment metadata.
+
+        ``content`` (the ``[attached_file N]`` / ``[attached_dir N]`` markers) and
+        ``meta`` (the ordered path lists those markers index into) are generated
+        together at send time. An edit rewrites only ``content``, so keeping the
+        old ``meta`` desynchronizes the pair: replacing the auto-selected text
+        removes the marker, so the model never receives the attachment, while the
+        surviving metadata still renders an attachment card in history — an
+        attachment that was never sent.
+        """
+        slot = _ChatSlot("s1")
+        qid = slot.queue_append(
+            "look at [attached_dir 1] /repo/my docs",
+            meta={"dirs": ["/repo/my docs"]},
+        )
+        assert slot.queue_edit_by_id(qid, "never mind, just say hi") is True
+        item = slot._queue[0]
+        assert item["content"] == "never mind, just say hi"
+        assert "meta" not in item, "stale attachment metadata survived the edit"
+
+    def test_edit_without_meta_leaves_no_meta_key(self):
+        slot = _ChatSlot("s1")
+        qid = slot.queue_append("plain prompt")
+        assert slot.queue_edit_by_id(qid, "edited prompt") is True
+        assert "meta" not in slot._queue[0]
+
+    def test_failed_edit_leaves_meta_intact(self):
+        """A non-matching edit must not strip an untouched item's metadata."""
+        slot = _ChatSlot("s1")
+        slot.queue_append("x", meta={"dirs": ["/a"]})
+        assert slot.queue_edit_by_id("nope", "y") is False
+        assert slot._queue[0]["meta"] == {"dirs": ["/a"]}
+
     def test_edit_by_id_duplicate_content(self):
         """Two items with same content — only the matching ID is edited."""
         slot = _ChatSlot("s1")

@@ -413,9 +413,17 @@ export function useWebSocket() {
             // target slot's transcript. Uses appendSlotMessage so the bubble
             // appears whether or not the slot is currently active (background
             // tabs). Persisted server-side — survives page reload.
+            //
+            // Consume the server's `meta` (the redacted attachment lists plus
+            // the server-set `steer` flag) rather than hardcoding `{steer:true}`:
+            // the ordered `files`/`dirs` lists are what let a path containing a
+            // space render losslessly, so a second open tab would otherwise
+            // fall back to the whitespace scan and truncate it until reload.
+            // `steer: true` is re-asserted locally so the bubble still styles
+            // as a steer even against an older backend that sends no meta.
             dispatch(appendSlotMessage({
               slot: (data as { slot?: string }).slot || store.getState().chat.activeSlot || '',
-              message: { role: 'user', content: (data as { content?: string }).content || '', cls: 'msg msg-u', meta: { steer: true }, ts: (data as { ts?: string }).ts },
+              message: { role: 'user', content: (data as { content?: string }).content || '', cls: 'msg msg-u', meta: { ...((data as { meta?: Record<string, unknown> }).meta || {}), steer: true }, ts: (data as { ts?: string }).ts },
             }))
             break
           case 'queue_cancel':

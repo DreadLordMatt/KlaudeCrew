@@ -492,6 +492,29 @@ def _redact_for_display(text: str) -> str:
     return text
 
 
+def queue_item_for_display(item: dict) -> dict:
+    """Project one queue entry for a slot-detail payload.
+
+    Carries ``meta`` through alongside the content. The marker number in
+    ``content`` is a positional index into ``meta.files`` / ``meta.dirs``, so a
+    payload that ships the content without the lists forces the client onto its
+    whitespace-bounded fallback scan — which truncates a path containing a space.
+    Live ``queue_push`` delivery already carried the metadata; omitting it here
+    meant a queued attachment survived until the user reloaded the page and then
+    silently truncated.
+
+    ``meta`` is stored already-redacted (``queue_append``/``queue_insert`` redact
+    on the way in), so this only has to redact the display text. The key is
+    omitted entirely when absent, keeping the payload shape unchanged for
+    entries that have no attachments.
+    """
+    out: dict = {"id": item["id"], "content": _redact_for_display(item["content"])}
+    meta = item.get("meta")
+    if meta:
+        out["meta"] = meta
+    return out
+
+
 def _remove_queued_by_id(messages: list[dict], queue_id: str) -> bool:
     """Remove a 'queued' placeholder by queue_id stored in cls JSON."""
     for i, m in enumerate(messages):
@@ -586,12 +609,55 @@ def is_system_injection_item(item: dict) -> bool:
     return is_synthetic_recovery_item(item) or is_system_injection(item["content"])
 
 
+def queued_append_meta(
+    consumed: list[dict],
+    *,
+    is_cron: bool = False,
+    is_subagent: bool = False,
+    is_recovery: bool = False,
+) -> dict | None:
+    """Attachment metadata to persist for a drained queue item, or ``None``.
+
+    A queued user message carries ``meta.files`` / ``meta.dirs`` — the ordered
+    lists that let ``[attached_file N]`` / ``[attached_dir N]`` resolve a path
+    containing a space. The drain must put them back on the appended history
+    entry; without that the message keeps its markers but loses the lists, and
+    replay falls back to the whitespace-bounded scan that truncates
+    ``/repo/my docs`` to ``/repo/my``.
+
+    Returns ``None`` unless exactly one item was consumed and it is a plain user
+    message:
+
+    * A merge (``len(consumed) > 1``) has no single owning metadata list — two
+      messages' marker index spaces would collide under one list. (The dequeue
+      breaks merges on metadata-bearing entries so this should not arise; the
+      guard here is defence in depth.)
+    * cron / sub-agent / recovery injections are orchestration, never carry
+      attachments, and must not inherit a neighbour's lists.
+    """
+    if len(consumed) != 1:
+        return None
+    if is_cron or is_subagent or is_recovery:
+        return None
+    meta = consumed[0].get("meta")
+    return meta or None
+
+
 def _dequeue_next_message(slot, merge_enabled: bool) -> tuple:
     """Drain the queue: merge non-cron messages or pop the first one."""
     if merge_enabled and len(slot._queue) > 1:
         to_merge: list[dict] = []
         for item in list(slot._queue):
             if is_system_injection_item(item):
+                break
+            # An attachment-bearing entry must drain ALONE. Its `meta.files` /
+            # `meta.dirs` are ordered lists indexed by the `[attached_file N]` /
+            # `[attached_dir N]` markers in its own content; concatenating two
+            # such messages would put two independent index spaces in one body
+            # with only one metadata list, so the second message's markers would
+            # resolve against the first's paths. Break the merge here and let it
+            # drain on its own turn with its metadata intact.
+            if item.get("meta"):
                 break
             to_merge.append(item)
         if len(to_merge) > 1:

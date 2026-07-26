@@ -25,10 +25,13 @@ const chatInput = readFileSync(resolve(here, '../components/ChatInput.tsx'), 'ut
 describe('picked folders never enter the file-attachment list', () => {
   it('routes a dir selection to setPendingDirs, not setPendingFiles', () => {
     expect(chatPage, 'onFileSelect must branch on kind').toContain(
-      "onFileSelect={(path, kind) => kind === 'dir'",
+      'onFileSelect={(path, kind) =>',
     )
     expect(chatPage, 'a dir must be staged into pendingDirs').toMatch(
-      /kind === 'dir'\s*\n\s*\? setPendingDirs\(/,
+      /kind === 'dir'\)?\s*(\?|setPendingDirs\()/,
+    )
+    expect(chatPage, 'the non-dir branch must stage into pendingFiles').toMatch(
+      /(else |: )setPendingFiles\(/,
     )
   })
 

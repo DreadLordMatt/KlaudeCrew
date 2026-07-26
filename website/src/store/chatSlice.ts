@@ -35,7 +35,7 @@ const safeKey = (key: string): string => (isUnsafeKey(key) ? `unsafe-key:${key}`
 
 /** One queued-message entry as normalized by `fetchSlotDetail` from the backend
  *  slot-detail `queue` field. */
-type SlotQueueItem = { content: string; queueId: string; ts: string }
+type SlotQueueItem = { content: string; queueId: string; ts: string; meta?: Record<string, unknown> }
 
 /** SINGLE hydration path for the slot-detail `queue` field — the one place that
  *  turns backend queue entries into `queued` message bubbles. Every reducer that
@@ -55,8 +55,13 @@ function hydrateQueuedBubbles(
   queue: SlotQueueItem[] | undefined,
 ): ChatMessage[] {
   const base = list.filter((m) => m.role !== 'queued')
-  for (const { content, queueId, ts } of queue ?? []) {
-    base.push({ role: 'queued', content, cls: 'msg msg-queued', ts, meta: { queueId } })
+  for (const { content, queueId, ts, meta } of queue ?? []) {
+    // Carry the server's attachment metadata onto the rehydrated card. Marker N
+    // in `content` indexes into meta.files/meta.dirs, so rebuilding the card with
+    // only `queueId` forces the whitespace-scan fallback and truncates a path
+    // containing a space — a queued attachment looked correct until reload.
+    // `queueId` last so a server key cannot displace this card's identity.
+    base.push({ role: 'queued', content, cls: 'msg msg-queued', ts, meta: { ...(meta || {}), queueId } })
   }
   return base
 }
@@ -411,8 +416,8 @@ export const fetchHistory = createAsyncThunk(
 async function fetchSlotDetail(key: string) {
   // No limit → backend returns all chained history (across gateway restarts).
   const d = await api.chatSlotDetail(key)
-  type QueueItem = string | { content: string; id: string }
-  return { key, messages: filterMessages(d.messages || []), running: d.running || false, stopping: d.stopping || false, hasMore: d.has_more || false, total: d.total || 0, queue: ((d.queue || []) as QueueItem[]).map((q: QueueItem) => typeof q === 'string' ? { content: q, queueId: crypto.randomUUID(), ts: new Date().toISOString() } : { content: q.content, queueId: q.id, ts: new Date().toISOString() }) }
+  type QueueItem = string | { content: string; id: string; meta?: Record<string, unknown> }
+  return { key, messages: filterMessages(d.messages || []), running: d.running || false, stopping: d.stopping || false, hasMore: d.has_more || false, total: d.total || 0, queue: ((d.queue || []) as QueueItem[]).map((q: QueueItem) => typeof q === 'string' ? { content: q, queueId: crypto.randomUUID(), ts: new Date().toISOString() } : { content: q.content, queueId: q.id, ts: new Date().toISOString(), ...(q.meta ? { meta: q.meta } : {}) }) }
 }
 
 export const switchSlot = createAsyncThunk(
@@ -1537,8 +1542,22 @@ const chatSlice = createSlice({
         : msgs.findIndex(m => m.role === 'queued' && m.content === content)
       if (idx >= 0) {
         const ts = msgs[idx].ts
+        // Carry the queued card's attachment metadata onto the message it
+        // becomes. Dropping it here defeated the whole point of preserving it on
+        // the card: the ordered files/dirs lists are what let a spaced path
+        // render losslessly, so without them the turn that actually runs falls
+        // back to the whitespace scan and truncates. `queueId` is deliberately
+        // NOT carried over — the message is no longer queued, and leaving it
+        // would make a later queue lookup match a message that already drained.
+        const { queueId: _queueId, ...meta } = (msgs[idx].meta || {}) as Record<string, unknown>
         msgs.splice(idx, 1)
-        msgs.push({ role: 'user', content, cls: 'msg msg-u', ts })
+        msgs.push({
+          role: 'user',
+          content,
+          cls: 'msg msg-u',
+          ts,
+          ...(Object.keys(meta).length ? { meta } : {}),
+        })
       }
     },
     /** Cancel a queued message: remove from messages. pendingInput is set locally by the initiating client. */
@@ -1556,16 +1575,29 @@ const chatSlice = createSlice({
       const msgs = slot === state.activeSlot ? state.messages : state.slotMessages[slot]
       if (!msgs) return
       const idx = msgs.findIndex(m => m.role === 'queued' && (m.meta?.queueId as string) === queue_id)
-      if (idx >= 0) msgs[idx].content = content
+      if (idx >= 0) {
+        msgs[idx].content = content
+        // Drop attachment metadata to match the server (`queue_edit_by_id`):
+        // the edited text owns its own attachments, and keeping the old ordered
+        // path lists would render an attachment card for a marker the new
+        // content no longer contains. `queueId` is retained — it is this card's
+        // identity for later edit/cancel lookups, not attachment metadata.
+        const queueId = msgs[idx].meta?.queueId
+        msgs[idx].meta = queueId !== undefined ? { queueId } : undefined
+      }
     },
     /** Add a queued message (from backend queue_push WS event). */
     appendQueuedMessage: {
-      reducer(state, action: PayloadAction<{ slot: string; content: string; ts: string; queueId: string }>) {
-        const { slot, content, ts, queueId } = action.payload
+      reducer(state, action: PayloadAction<{ slot: string; content: string; ts: string; queueId: string; meta?: Record<string, unknown> }>) {
+        const { slot, content, ts, queueId, meta } = action.payload
         const msgs = slot === state.activeSlot ? state.messages : (state.slotMessages[safeKey(slot)] ??= [])
-        msgs.push({ role: 'queued', content, cls: 'msg msg-queued', ts, meta: { queueId } })
+        // Preserve the server's attachment metadata on the queued card. The
+        // ordered files/dirs lists are what let a path containing a space render
+        // losslessly; without them the card falls back to the whitespace-bounded
+        // content scan and shows a truncated path until the page is reloaded.
+        msgs.push({ role: 'queued', content, cls: 'msg msg-queued', ts, meta: { ...(meta || {}), queueId } })
       },
-      prepare(payload: { slot: string; content: string; ts: string; queue_id?: string }) {
+      prepare(payload: { slot: string; content: string; ts: string; queue_id?: string; meta?: Record<string, unknown> }) {
         return { payload: { ...payload, queueId: payload.queue_id || crypto.randomUUID() } }
       },
     },

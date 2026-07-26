@@ -46,6 +46,7 @@ from kiro_crew.dashboard.chat_utils import (
     _redact_for_display,
     _remove_queued_by_id,
     _sync_dashboard_slots,
+    queue_item_for_display,
 )
 from kiro_crew.dashboard.state import (
     _MAX_PENDING_CONTEXT,
@@ -241,6 +242,12 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
                 # clear() likewise races correctly: a hard kill during the
                 # await discards the entry, so a late write can't resurrect it.
                 slot._pending_steers.append(message)
+                # Park the attachment lists alongside so an unconsumed steer
+                # keeps them when it degrades into a queue card (see
+                # _requeue_unconsumed_steers). Redacted at the boundary, same as
+                # the persist and queue paths.
+                if user_meta:
+                    slot._pending_steer_meta[message] = dict(_redact_meta(user_meta))
                 try:
                     steered = await _client.steer(message)
                 except Exception as exc:  # best-effort — fall through to queue
@@ -256,6 +263,11 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
                         slot._pending_steers.remove(message)
                     except ValueError:
                         return web.json_response({"ok": True, "queued": True})
+                    # Unwound: this message no longer has a pending entry, so
+                    # drop its parked metadata unless an identical steer is still
+                    # pending (the side table is keyed by text).
+                    if message not in slot._pending_steers:
+                        slot._pending_steer_meta.pop(message, None)
                 if steered:
                     _ts = datetime.now(timezone.utc).isoformat()
                     # Sanitize: same chain as the queue path.
@@ -266,12 +278,21 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
                     # (dirty-flush picks it up on next save cycle). Store the
                     # sanitized form — raw content must never reach an external
                     # surface (security-controls).
+                    #
+                    # Carry the client's attachment metadata through, same as the
+                    # queue path at the bottom of this handler. Without it the
+                    # persisted steer keeps only `steer: True`, so on reload
+                    # `parseFiles`/`parseDirs` fall back to scanning the content
+                    # for markers and truncate any path containing a space. The
+                    # `steer` flag is set last so a client cannot spoof it.
+                    _steer_meta = dict(_redact_meta(user_meta)) if user_meta else {}
+                    _steer_meta["steer"] = True
                     slot.append(
                         "user",
                         _sanitized,
                         "msg msg-u",
                         ts=_ts,
-                        meta={"steer": True},
+                        meta=_steer_meta,
                     )
                     state.broadcast_ws(
                         "steer_push",
@@ -279,6 +300,12 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
                             "slot": slot.key,
                             "content": _redacted,
                             "ts": _ts,
+                            # Mirror the persisted metadata to every other open
+                            # client. The echo is what a second tab renders from,
+                            # so without the ordered lists that tab falls back to
+                            # the whitespace scan and shows `/repo/my` for
+                            # `/repo/my docs` until a reload re-fetches history.
+                            "meta": _steer_meta,
                         },
                     )
                     return web.json_response({"ok": True, "steered": True})
@@ -287,7 +314,11 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         # The existing SSE reader will pick up queued messages as _run_chat
         # processes the queue in its finally block.
         if message:
-            qid = slot.queue_append(message)
+            # Carry the attachment metadata into the queue entry so the drain can
+            # persist it (see queue_append / _dequeue_next_message). Redacted at
+            # the boundary, exactly like the non-queued send path below.
+            _qmeta = _redact_meta(user_meta) if user_meta else None
+            qid = slot.queue_append(message, meta=_qmeta)
             _c, _ = redact_exfiltration_urls(message)
             _c, _ = redact_credentials(_c)
             _redacted = _redact_for_display(_c)
@@ -298,6 +329,10 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
                     "content": _redacted,
                     "ts": datetime.now(timezone.utc).isoformat(),
                     "queue_id": qid,
+                    # Mirror the ordered attachment lists so an open client
+                    # renders the queued card's spaced paths correctly instead of
+                    # falling back to the truncating content scan until reload.
+                    **({"meta": _qmeta} if _qmeta else {}),
                 },
             )
         return web.json_response({"ok": True, "queued": True})
@@ -319,7 +354,8 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         and state.subagents is not None
         and state.subagents.running_agents_for(f"dashboard:{slot.key}")
     ):
-        qid = slot.queue_append(message)
+        _qmeta = _redact_meta(user_meta) if user_meta else None
+        qid = slot.queue_append(message, meta=_qmeta)
         _c, _ = redact_exfiltration_urls(message)
         _c, _ = redact_credentials(_c)
         _redacted = _redact_for_display(_c)
@@ -330,6 +366,8 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
                 "content": _redacted,
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "queue_id": qid,
+                # See the mid-turn queue_push above: the client needs the lists.
+                **({"meta": _qmeta} if _qmeta else {}),
             },
         )
         return web.json_response({"ok": True, "queued": True})
@@ -643,9 +681,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
             "running": slot.running,
             "stopping": slot._stopping,
             "messages": prepared,
-            "queue": [
-                {"id": q["id"], "content": _redact_for_display(q["content"])} for q in slot._queue
-            ],
+            "queue": [queue_item_for_display(q) for q in slot._queue],
             "total": total,
             "has_more": has_more,
         }
@@ -822,6 +858,7 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
         # end-of-turn requeue (chat_runner finally) has nothing to resurrect.
         # Mirrors the queue clear above; a soft stop preserves both.
         slot._pending_steers.clear()
+        slot._pending_steer_meta.clear()
         state.push_slots_update()
         logger.info("Stop (force): hard-killing session for slot %s", name)
 
@@ -1879,10 +1916,7 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
                 "ok": True,
                 "key": existing.key,
                 "messages": prepared,
-                "queue": [
-                    {"id": q["id"], "content": _redact_for_display(q["content"])}
-                    for q in existing._queue
-                ],
+                "queue": [queue_item_for_display(q) for q in existing._queue],
                 "total": total,
                 "has_more": total > 200,
                 "memory_mode": existing.memory_mode,
@@ -1995,9 +2029,7 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
             "ok": True,
             "key": slot.key,
             "messages": _prepare_messages(recent, slot.running),
-            "queue": [
-                {"id": q["id"], "content": _redact_for_display(q["content"])} for q in slot._queue
-            ],
+            "queue": [queue_item_for_display(q) for q in slot._queue],
             "total": total,
             "has_more": total > len(recent),
             "memory_mode": slot.memory_mode,
