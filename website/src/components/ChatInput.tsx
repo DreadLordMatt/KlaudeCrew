@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, memo } from 'react'
-import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Crop, Bot, Mic, Square, BookOpen, X, ClipboardList, CheckCircle, Ban, Sparkles, Target, Lock, Globe, FolderOpen, FileText, ChevronDown, Check } from 'lucide-react'
+import { ArrowUpFromLine, ArrowUp, Loader2, Plus, Crop, Bot, Mic, Square, BookOpen, X, ClipboardList, CheckCircle, Ban, Sparkles, Target, Lock, Globe, Folder, FolderOpen, FileText, ChevronDown, Check } from 'lucide-react'
 import { Toggle } from './ui'
 import { usePointerDrag } from '../hooks/usePointerDrag'
 import VoiceStatusBar from './VoiceStatusBar'
@@ -66,6 +66,7 @@ export {
 import { effortLabel } from '../lib/effort'
 import SlashCommandMenu from './SlashCommandMenu'
 import FilePickerMenu from './FilePickerMenu'
+import type { FileKind } from './FilePickerMenu'
 import SkillPickerMenu from './SkillPickerMenu'
 import { matchFileToken, matchSkillToken, replaceTokenAtCaret } from './composerTokens'
 import { useStopEscapeHatch } from '../hooks/useStopEscapeHatch'
@@ -186,10 +187,14 @@ interface ChatInputProps {
   uploading?: boolean
   /** Pending file paths (images + non-images) for preview strip */
   pendingFiles?: string[]
+  /** Pending directory references for the preview strip (path handed to the agent, not an upload) */
+  pendingDirs?: string[]
   /** Resize details keyed by pending-file path; renders a badge on the chip */
   resizedInfo?: Record<string, ResizeInfo>
   /** Remove a pending file by path */
   onRemoveFile?: (path: string) => void
+  /** Remove a pending directory reference by path */
+  onRemoveDir?: (path: string) => void
   /** Show macOS-only buttons (screenshot) */
   isMac?: boolean
   /** Drag-and-drop handler for the entire input bar */
@@ -230,7 +235,8 @@ interface ChatInputProps {
   reasoningEffort?: string
   onReasoningEffortClick?: (rect: DOMRect) => void
   providerId?: string
-  onFileSelect?: (path: string) => void
+  /** Invoked when an @-mention picks a file or directory. `kind` defaults to 'file'. */
+  onFileSelect?: (path: string, kind?: FileKind) => void
   onFileOpen?: (path: string) => void
   project?: string
   memoryMode?: string
@@ -315,10 +321,10 @@ function ResizeBadge({ resize }: { resize: ResizeInfo }) {
   )
 }
 
-function FilePreviewStrip({ files, resizedInfo, onRemove }: { files: string[]; resizedInfo?: Record<string, ResizeInfo>; onRemove?: (path: string) => void }) {
+function FilePreviewStrip({ files, dirs = [], resizedInfo, onRemove, onRemoveDir }: { files: string[]; dirs?: string[]; resizedInfo?: Record<string, ResizeInfo>; onRemove?: (path: string) => void; onRemoveDir?: (path: string) => void }) {
   const imgs = files.filter(p => IMG_EXT.test(p))
   const nonImgs = files.filter(p => !IMG_EXT.test(p))
-  if (!imgs.length && !nonImgs.length) return null
+  if (!imgs.length && !nonImgs.length && !dirs.length) return null
   return (
     // NOTE: rendered height must match FILE_PREVIEW_H constant, update both together
     <div className="flex gap-2 px-5 py-2 border-t border-border bg-chrome/50 overflow-x-auto items-end" data-image-scope="">
@@ -356,6 +362,22 @@ function FilePreviewStrip({ files, resizedInfo, onRemove }: { files: string[]; r
           )}
         </div>
       ))}
+      {/* Folder references: a path handed to the agent, not an upload. No
+          /api/file-raw thumbnail is fetched — there is no content to preview. */}
+      {dirs.map(path => (
+        <div
+          key={path}
+          data-dir-chip=""
+          title={path}
+          className="relative group/preview shrink-0 flex items-center gap-1.5 px-2 py-1 rounded border border-border bg-bg-hover text-[12px] text-text"
+        >
+          <Folder size={12} aria-label="Folder" className="shrink-0 lucide-inline" />
+          <span>{(path.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || path) + '/'}</span>
+          {onRemoveDir && (
+            <button aria-label="Remove folder" className="text-muted hover:text-danger cursor-pointer bg-transparent border-none p-0" onClick={() => onRemoveDir(path)} title="Remove"><X size={12} /></button>
+          )}
+        </div>
+      ))}
     </div>
   )
 }
@@ -375,8 +397,10 @@ function ChatInput({
   onUploadFiles,
   uploading = false,
   pendingFiles = [],
+  pendingDirs = [],
   resizedInfo,
   onRemoveFile,
+  onRemoveDir,
   isMac = false,
   onDrop,
   dragOver = false,
@@ -1657,7 +1681,10 @@ function ChatInput({
     e.target.value = '' // reset so same file can be re-selected
   }, [onUploadFiles])
 
-  const hasFiles = pendingFiles.length > 0
+  // The preview strip renders for folder references too, so height
+  // compensation must key off both staged families — otherwise a dirs-only
+  // strip appears with no wrapper expansion and eats into the textarea.
+  const hasFiles = pendingFiles.length > 0 || pendingDirs.length > 0
   const prevHadFiles = useRef(hasFiles)
   const dragMinH = hasFiles ? INPUT_DRAG_MIN_H + FILE_PREVIEW_H : INPUT_DRAG_MIN_H
   const dragMinHRef = useRef(dragMinH)
@@ -1676,7 +1703,7 @@ function ChatInput({
   return (
     // 'input-area' is a stable theming hook — see website/docs/theming-contract.md
     <div className={`input-area px-5 pb-1 ${hasApproval ? 'pt-0' : 'pt-1'} mx-auto w-full flex flex-col`}
-      style={{ maxWidth: 'var(--mc-input-width, 900px)', ...(manualHeight !== null ? { minHeight: (pendingFiles.length > 0 ? INPUT_DRAG_MIN_H + FILE_PREVIEW_H : INPUT_DRAG_MIN_H) + 'px' } : {}) }}>
+      style={{ maxWidth: 'var(--mc-input-width, 900px)', ...(manualHeight !== null ? { minHeight: (hasFiles ? INPUT_DRAG_MIN_H + FILE_PREVIEW_H : INPUT_DRAG_MIN_H) + 'px' } : {}) }}>
 
       {aboveComposer}
 
@@ -1855,10 +1882,13 @@ function ChatInput({
           open={filePickerOpen}
           project={project}
           onFileOpen={onFileOpen}
-          onSelect={({ path, relativePath }) => {
+          onSelect={({ path, relativePath, kind }) => {
+            // relativePath already carries a trailing slash for directories
+            // (see selectionFor in FilePickerMenu), so the inserted token reads
+            // as e.g. "@src/pages/ " and is unambiguously a folder.
             applyPickedToken(/(^|[\s])@\S*$/, `@${relativePath} `)
             setFilePickerOpen(false); setFileQuery('')
-            onFileSelect(path)
+            onFileSelect(path, kind)
           }}
           onClose={() => { setFilePickerOpen(false); setFileQuery('') }}
         />
@@ -1902,7 +1932,7 @@ function ChatInput({
         onDragLeave={onDragLeave}
         onDrop={onDrop}
       >
-        <FilePreviewStrip files={pendingFiles} resizedInfo={resizedInfo} onRemove={onRemoveFile} />
+        <FilePreviewStrip files={pendingFiles} dirs={pendingDirs} resizedInfo={resizedInfo} onRemove={onRemoveFile} onRemoveDir={onRemoveDir} />
 
         <VoiceStatusBar recording={voiceRecording} level={voiceLevel} deviceLabel={voiceDeviceLabel} error={voiceError} onDismissError={onClearVoiceError} />
 
