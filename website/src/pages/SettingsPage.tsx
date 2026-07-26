@@ -1,7 +1,10 @@
 import { Bell, Code, Globe, Info, Keyboard, MessageSquare, Mic, Palette, PanelsTopLeft, Server, ShieldCheck } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
 import { SlackIcon } from '../components/SlackIcon'
 import { useAppSelector } from '../store'
-import SidePanelLayout from '../components/SidePanelLayout'
+import { api } from '../api/client'
+import SidePanelLayout, { type SidePanelTab } from '../components/SidePanelLayout'
+import { ChannelDisabledPanel } from './settings/ChannelDisabledPanel'
 import { useSettingHighlight } from '../hooks/useSettingHighlight'
 import { BrowserPanel } from './settings/BrowserPanel'
 import { InstancesPanel } from './settings/InstancesPanel'
@@ -25,7 +28,7 @@ import { NotificationsPanel } from './settings/NotificationsPanel'
 import { ShortcutsPanel } from './settings/ShortcutsPanel'
 import { AboutPanel } from './settings/AboutPanel'
 
-const TABS = [
+const TABS: SidePanelTab[] = [
   { key: 'overview', label: 'Overview', icon: <PanelsTopLeft size={16} />, description: 'System status, memory, agent config, and usage metrics' },
   { key: 'chat', label: 'Chat', icon: <MessageSquare size={16} />, description: 'Message behavior, history, timestamps, and context' },
   { key: 'voice', label: 'Voice', icon: <Mic size={16} />, description: 'Text-to-speech and speech-to-text (dictation) settings' },
@@ -44,6 +47,10 @@ const TABS = [
   { key: 'about', label: 'About', icon: <Info size={16} />, description: 'Version, update channel, check for updates, and license' },
 ]
 
+// Channel tabs whose visibility follows the `channels` governance policy. Keys
+// match the transports' canonical channel_type ids (the endpoint's map keys).
+const CHANNEL_TAB_KEYS = ['slack', 'discord', 'telegram', 'webex', 'wecom'] as const
+
 export default function SettingsPage() {
   const version = useAppSelector(s => s.dashboard.status?.version) || '—'
   useSettingHighlight()
@@ -53,8 +60,29 @@ export default function SettingsPage() {
   // Update nudge: dot on the About entry while a desktop update is available
   // (mirrored from Electron update-state by useUpdateSubscription).
   const updateAvailable = useAppSelector(s => s.dashboard.desktopUpdateAvailable)
+
+  // Effective per-channel `channels` policy: { slack: true, discord: false, ... }
+  // (true = permitted, false = denied by policy). All-true when no policy governs
+  // channels (standard build) → nothing greyed, UI unchanged from today. While
+  // loading, `data` is undefined so channelsPolicy?.[k] === false is never true —
+  // tabs stay enabled (no flash-disable).
+  const { data: channelsPolicy } = useQuery({
+    queryKey: ['governance-channels'],
+    queryFn: api.getGovernanceChannels,
+    staleTime: 60_000,
+  })
+  // A channel is disabled only when the policy explicitly returns false. Drive
+  // purely off the policy value — no per-channel special-casing (slack included).
+  const isChannelDenied = (key: string) =>
+    (CHANNEL_TAB_KEYS as readonly string[]).includes(key) && channelsPolicy?.[key] === false
+
   const baseTabs = embedded ? TABS.filter(t => t.key !== 'instances') : TABS
-  const tabs = updateAvailable ? baseTabs.map(t => (t.key === 'about' ? { ...t, dot: true } : t)) : baseTabs
+  const tabs = baseTabs.map(t => {
+    let next = t
+    if (updateAvailable && t.key === 'about') next = { ...next, dot: true }
+    if (isChannelDenied(t.key)) next = { ...next, disabled: true, badge: 'Off by admin' }
+    return next
+  })
 
   return (
     <SidePanelLayout
@@ -63,6 +91,13 @@ export default function SettingsPage() {
       footer={<span className="text-[12px] text-muted">KiroCrew v{version}</span>}
     >
       {tab => <>
+        {/* A denied channel renders the disabled-by-policy state instead of the
+            editable panel — so deep-linking ?tab=discord under a deny (or an
+            active tab that becomes denied) shows the lock state, never the form
+            (which could otherwise save config that never takes effect). */}
+        {isChannelDenied(tab)
+          ? <ChannelDisabledPanel label={TABS.find(t => t.key === tab)?.label || tab} />
+          : <>
         {tab === 'overview' && <OverviewPanel />}
         {tab === 'chat' && <ChatPanel />}
         {tab === 'voice' && <VoicePanel />}
@@ -84,6 +119,7 @@ export default function SettingsPage() {
             {TABS.find(t => t.key === tab)?.label} settings — coming soon
           </div>
         )}
+          </>}
       </>}
     </SidePanelLayout>
   )

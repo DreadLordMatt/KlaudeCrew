@@ -9,6 +9,11 @@ export interface SidePanelTab {
   description?: string
   /** Presence dot after the label (e.g. About while an update is available). */
   dot?: boolean
+  /** Greyed / muted styling — the tab is disabled by policy (still clickable so
+   *  the user can read the disabled panel's "why", but visually de-emphasized). */
+  disabled?: boolean
+  /** Small pill after the label (e.g. "Off by admin" for a policy-denied tab). */
+  badge?: string
 }
 
 interface SidePanelLayoutProps {
@@ -48,7 +53,9 @@ export default function SidePanelLayout({ title, tabs, defaultTab, footer, heade
             {tabs.map(t => (
               <button
                 key={t.key}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[12px] font-medium cursor-pointer border-none whitespace-nowrap transition-all ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[12px] font-medium border-none whitespace-nowrap transition-all ${
+                  t.disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                } ${
                   tab === t.key
                     ? 'bg-accent-subtle text-accent'
                     : 'bg-transparent text-muted hover:text-text hover:bg-bg-hover'
@@ -57,6 +64,11 @@ export default function SidePanelLayout({ title, tabs, defaultTab, footer, heade
               >
                 <span className="w-3.5 h-3.5 shrink-0 flex items-center justify-center">{t.icon}</span>
                 {t.label}
+                {t.badge && (
+                  <span className="ml-0.5 px-1.5 py-px rounded-full text-[9px] font-semibold uppercase tracking-wide bg-bg-hover text-muted border border-border shrink-0">
+                    {t.badge}
+                  </span>
+                )}
                 {t.dot && <span className="w-1.5 h-1.5 bg-accent rounded-full shrink-0" role="status" aria-label="update available" />}
               </button>
             ))}
@@ -69,7 +81,9 @@ export default function SidePanelLayout({ title, tabs, defaultTab, footer, heade
           {tabs.map(t => (
             <button
               key={t.key}
-              className={`flex items-center gap-2.5 w-full px-2.5 py-2 rounded-md text-[13px] font-medium cursor-pointer border-none transition-all ${
+              className={`flex items-center gap-2.5 w-full px-2.5 py-2 rounded-md text-[13px] font-medium border-none transition-all ${
+                t.disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+              } ${
                 tab === t.key
                   ? 'bg-accent-subtle text-accent'
                   : 'bg-transparent text-muted hover:text-text hover:bg-bg-hover'
@@ -80,7 +94,12 @@ export default function SidePanelLayout({ title, tabs, defaultTab, footer, heade
                 {t.icon}
               </span>
               {t.label}
-              {t.dot && <span className="ml-auto w-2 h-2 bg-accent rounded-full shrink-0" role="status" aria-label="update available" />}
+              {t.badge && (
+                <span className="ml-auto px-1.5 py-px rounded-full text-[9px] font-semibold uppercase tracking-wide bg-bg-hover text-muted border border-border shrink-0">
+                  {t.badge}
+                </span>
+              )}
+              {t.dot && <span className={`${t.badge ? 'ml-1' : 'ml-auto'} w-2 h-2 bg-accent rounded-full shrink-0`} role="status" aria-label="update available" />}
             </button>
           ))}
           {footer && <div className="mt-auto pt-3 px-2.5">{footer}</div>}

@@ -1246,6 +1246,11 @@ export const api = {
   // Webex integration config
   getWebexConfig: () => get('/api/webex/config').then(j) as Promise<WebexConfigData>,
   saveWebexConfig: (body: Partial<WebexConfigSave>) => put('/api/webex/config', body).then(j) as Promise<{ ok: boolean; restart_required: boolean; verify_warning: string }>,
+  // Effective per-channel governance policy decision: { slack: true, discord: false, ... }
+  // (true = permitted, false = denied by the `channels` policy). All-true when
+  // no policy governs channels (standard build). Drives the Settings channel-tab
+  // "Off by admin" greying — the editable panel is replaced by a disabled state.
+  getGovernanceChannels: () => get('/api/governance/channels').then(j) as Promise<Record<string, boolean>>,
 
   // Auto-research
   researchValidate: (body: object) => post("/api/apps/auto-research/validate", body).then(j),

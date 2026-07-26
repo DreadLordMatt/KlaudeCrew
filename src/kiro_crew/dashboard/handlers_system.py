@@ -561,3 +561,65 @@ async def api_compliance_yolo_status(request: web.Request) -> web.Response:
     """GET /api/admin/compliance/yolo-status — safety override governance status."""
     status = safety_override().status()
     return web.json_response(asdict(status))
+
+
+def _channel_members() -> tuple[str, ...]:
+    """Canonical ``channel_type`` ids for the messaging channels, derived from
+    each transport's ``channel_type`` class attribute — the single source of
+    truth — so this list can never drift from the transports themselves.
+    Imported here (off the event loop, inside the executor worker) so the
+    transport modules' own imports don't run on the aiohttp loop.
+    """
+    from kiro_crew.discord.transport import DiscordTransport
+    from kiro_crew.slack.transport import SlackTransport
+    from kiro_crew.telegram.transport import TelegramTransport
+    from kiro_crew.webex.transport import WebexTransport
+    from kiro_crew.wechat.transport import WeComTransport
+
+    return tuple(
+        t.channel_type
+        for t in (
+            SlackTransport,
+            DiscordTransport,
+            TelegramTransport,
+            WebexTransport,
+            WeComTransport,
+        )
+    )
+
+
+def _collect_channel_governance() -> dict[str, bool]:
+    """Resolve the effective ``channels`` policy decision for every transport.
+
+    Runs in a thread-pool executor (``governance_permits`` may read profile
+    files from disk via the ProfileStore). ``session_key=HOST_SESSION_KEY``
+    binds the host surface, matching the messaging chokepoint
+    (``mcp_core._vet_channel_governance``) and the app-activation gate.
+
+    Byte-identical default: with NO policy governing ``channels`` (the standard
+    OSS build), ``governance_permits`` returns ``permitted=True`` for every
+    member, so this returns all-true and the Settings UI is unchanged.
+    """
+    from kiro_crew.platform.governance_profiles import (
+        HOST_SESSION_KEY,
+        governance_permits,
+    )
+
+    result: dict[str, bool] = {}
+    for member in _channel_members():
+        decision = governance_permits("channels", member, session_key=HOST_SESSION_KEY)
+        result[member] = bool(getattr(decision, "permitted", True))
+    return result
+
+
+async def api_governance_channels(request: web.Request) -> web.Response:
+    """GET /api/governance/channels — effective per-channel policy decision.
+
+    Returns a ``{channel_type: bool}`` map (``true`` = permitted, ``false`` =
+    denied by the ``channels`` governance policy). The Settings UI greys out and
+    disables a policy-denied channel tab ("Off by admin") rather than hiding it.
+    Read-only; behind the same dashboard token auth as the sibling GETs.
+    """
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, _collect_channel_governance)
+    return web.json_response(data)

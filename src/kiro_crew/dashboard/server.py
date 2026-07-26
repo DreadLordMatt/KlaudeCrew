@@ -1237,6 +1237,7 @@ async def start_dashboard(
     app.router.add_get("/api/ready", handlers.api_ready)
     app.router.add_get("/api/theme/boot", handlers.api_theme_boot)
     app.router.add_get("/api/admin/compliance/yolo-status", handlers.api_compliance_yolo_status)
+    app.router.add_get("/api/governance/channels", handlers.api_governance_channels)
 
     # Suggestions (pre-computed contextual prompts)
     app.router.add_get("/api/suggestions", api_suggestions)

@@ -264,6 +264,37 @@ pinned" from "id is provided" by probing the posture with a sentinel value no
 real id can equal: if the leaf is an allow-mode allowlist the sentinel is denied
 (pinned → close), otherwise it permits (unpinned → the empty id is fine).
 
+### Channels governance-status surface (read-only) + Settings greying
+
+`GET /api/governance/channels` (`handlers_system.api_governance_channels`,
+registered in `dashboard/server.py`, behind the same dashboard token auth as the
+sibling `/api/*` GETs) returns the effective per-channel `channels` policy
+decision as a `{channel_type: bool}` map (`true` = permitted, `false` = denied by
+policy), e.g. `{"slack": true, "discord": false, "telegram": false, "webex":
+false, "wecom": false}`. It calls `governance_permits("channels", <member>,
+session_key=HOST_SESSION_KEY)` per member — the SAME decision source and
+`_host` surface as the messaging chokepoint (`_vet_channel_governance`) and the
+app-activation gate — reading `Decision.permitted`. The members are derived from
+each transport's `channel_type` class attribute
+(`handlers_system._channel_members()`: Slack / Discord / Telegram / Webex /
+WeCom), never a hardcoded divergent list. The per-member evaluation runs in a
+thread-pool executor (`run_in_executor`) because `governance_permits` can read
+profile files off disk — the aiohttp event loop is never blocked.
+
+Read-only and byte-identical by default: with NO policy governing `channels`
+(the standard OSS build) `governance_permits` returns `permitted=True` for every
+member, so the endpoint returns all-true and the Settings UI is unchanged (every
+channel tab fully enabled).
+
+The dashboard Settings UI consumes this map to make the channel tabs
+governance-aware: a policy-denied channel tab is **greyed + disabled with an
+"Off by admin" badge (NOT hidden)**, and its panel body renders a
+disabled-by-policy state (lock icon + explanation) instead of the editable
+bot-token form — so a user isn't confused by a toggle that silently does nothing,
+and cannot save config that would never take effect (the backend already gates
+the transport start at `_vet_channel_governance`). The tab stays clickable so the
+user can read the "why"; the greying is purely visual.
+
 ### Audit
 
 Every new chokepoint denial emits a `governance_decision` SEL record (file-

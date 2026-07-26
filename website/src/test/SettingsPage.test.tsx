@@ -13,6 +13,13 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+
+// SettingsPage fetches the channels governance policy via useQuery; mock it so
+// the tab-roster tests don't touch the network. Default all-true = nothing greyed.
+vi.mock('../api/client', () => ({
+  api: { getGovernanceChannels: vi.fn().mockResolvedValue({}) },
+}))
 
 // Stub the heavy panels — we are testing the tab roster, not panel internals.
 vi.mock('../pages/settings/OverviewPanel', () => ({ OverviewPanel: () => <div data-testid="overview-panel" /> }))
@@ -47,9 +54,12 @@ if (!window.matchMedia) {
 import SettingsPage from '../pages/SettingsPage'
 
 function renderAt(route: string) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <MemoryRouter initialEntries={[route]}>
-      <SettingsPage />
+      <QueryClientProvider client={queryClient}>
+        <SettingsPage />
+      </QueryClientProvider>
     </MemoryRouter>
   )
 }
