@@ -1695,6 +1695,9 @@ async def start_dashboard(
     app.router.add_delete(
         "/api/security/denied-commands/user/{id}", handlers.api_denied_command_user_delete
     )
+    # Read-only governance policy viewer — effective Level-1 ∩ Level-2 ceiling
+    # across every governed scope (no write path; the ceiling is file-authored).
+    app.router.add_get("/api/governance/policy", handlers.api_governance_policy)
     app.router.add_get("/api/approvals", handlers.api_approvals)
     app.router.add_post("/api/approvals/{id}/{action}", handlers.api_approval_resolve)
 

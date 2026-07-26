@@ -578,3 +578,183 @@ async def api_denied_command_user_delete(request: web.Request) -> web.Response:
         return err
     _audit(request, operation=op, outcome="ok", resources=rule_id)
     return await _snapshot_response()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Governance policy viewer — READ-ONLY effective ceiling across every scope
+# ──────────────────────────────────────────────────────────────────────────
+# The enterprise ceiling (Level 1 ``security_policy.json``) and per-surface
+# profiles (Level 2 ``profiles/*.json``) are file-authored and deliberately
+# un-editable via the UI (the agent cannot even read them — they sit on the
+# sensitive-path keystone). This surface lets an operator SEE the resolved
+# ceiling — for every governed scope, its effective state and where it comes
+# from — without exposing any write path. It mirrors the model's own
+# scope-name-agnostic style: a single per-archetype serializer, driven by
+# ``SCOPE_CATALOG``, so the view auto-covers any scope a future release (or the
+# companion) registers with zero handler edits.
+
+
+def _serialize_ruleset(value: object) -> dict:
+    """Serialize a ``RulesetLike`` (ScopedRuleset or composed ``_AndRuleset``).
+
+    A flat ``ScopedRuleset`` renders as ``{mode, allow, deny}``. A composed
+    ``_AndRuleset`` (an allow∩allow / allow∩deny intersection that cannot flatten
+    to one glob set) renders as ``{mode: "intersect", components: [...]}`` so the
+    viewer can show "narrowed by both levels" without the serializer having to
+    re-implement the intersection algebra.
+    """
+    from kiro_crew.platform.governance import ScopedRuleset, _AndRuleset
+
+    if isinstance(value, ScopedRuleset):
+        return {"mode": value.mode, "allow": list(value.allow), "deny": list(value.deny)}
+    if isinstance(value, _AndRuleset):
+        return {
+            "mode": "intersect",
+            "components": [
+                _serialize_ruleset(value.ceiling),
+                _serialize_ruleset(value.profile),
+            ],
+        }
+    return {}
+
+
+def _serialize_control(archetype: str, value: object) -> dict:
+    """Serialize one effective archetype value to a UI-friendly dict.
+
+    Dispatch is by ARCHETYPE (``spec.kind``), never by scope name — the same
+    decoupling the evaluator uses — so a newly registered scope serializes with
+    no edit here as long as it reuses one of the four archetypes.
+    """
+    from kiro_crew.platform.governance import (
+        CAPABILITY,
+        ORDINAL,
+        RULESET,
+        SCOPEDMAP,
+        CapabilityGate,
+        OrdinalControl,
+        ScopedMap,
+    )
+
+    if value is None:
+        return {}
+    if archetype == RULESET:
+        return _serialize_ruleset(value)
+    if archetype == ORDINAL and isinstance(value, OrdinalControl):
+        return {"scale": value.scale, "floor": value.value}
+    if archetype == CAPABILITY and isinstance(value, CapabilityGate):
+        return {
+            "enabled": value.enabled,
+            "inner": {name: _serialize_ruleset(rs) for name, rs in value.scopes.items()},
+        }
+    if archetype == SCOPEDMAP and isinstance(value, ScopedMap):
+        return {
+            "members": _serialize_ruleset(value.members),
+            "posture": {
+                member: {leaf: _serialize_ruleset(rs) for leaf, rs in leaves.items()}
+                for member, leaves in value.posture.items()
+            },
+        }
+    return {}
+
+
+def build_governance_policy_snapshot() -> dict:
+    """Compute the effective governance ceiling across ALL scopes (host surface).
+
+    Iterates ``SCOPE_CATALOG`` (so the list stays complete and auto-extends when
+    a scope is registered) and, for each scope, intersects the boot-frozen
+    POLICY control with the host-surface PROFILE control using the model's OWN
+    composition algebra (``_compose_controls`` — the same helper the evaluator's
+    ``compose_profiles`` path uses); it does not re-implement ``policy ∩
+    profile``. A scope governed by neither level is reported ``ungoverned`` (it
+    permits — the standalone default), so with NO policy and NO profile every
+    scope is ``ungoverned`` and the response is byte-identical to a standalone
+    host.
+
+    Synchronous — reading the ceiling is in-memory, but ``resolve_active_scope``
+    may read profile files, so async callers MUST offload it (see
+    :func:`build_governance_policy_snapshot_async`). Fail-SAFE for DISPLAY: any
+    unexpected governance error yields a well-formed ``unavailable`` response
+    rather than raising, so a resolution glitch never breaks the Security page
+    (this endpoint enforces nothing).
+    """
+    from kiro_crew.platform.context import current_context
+    from kiro_crew.platform.governance import (
+        _SCOPE_ALIASES,
+        SCOPE_CATALOG,
+        GovernanceCeiling,
+        _compose_controls,
+    )
+    from kiro_crew.platform.governance_profiles import HOST_SESSION_KEY, resolve_active_scope
+
+    try:
+        ceiling = getattr(current_context(), "governance", None)
+        if ceiling is not None and not isinstance(ceiling, GovernanceCeiling):
+            ceiling = None
+        # Host-surface profile (bind: {type: surface, id: host}); usually None.
+        profile = resolve_active_scope(HOST_SESSION_KEY)
+
+        scopes: list[dict] = []
+        for scope, spec in SCOPE_CATALOG.items():
+            # Skip the folders.* aliases: they normalize to filesystem.* at parse
+            # time, so a control is never stored under the alias key — emitting it
+            # would be a permanently-ungoverned duplicate row.
+            if scope in _SCOPE_ALIASES:
+                continue
+            policy_control = ceiling.get(scope) if ceiling is not None else None
+            profile_control = profile.get(scope) if profile is not None else None
+
+            if policy_control is not None and profile_control is not None:
+                source = "policy+profile"
+                effective = _compose_controls(policy_control, profile_control)
+            elif policy_control is not None:
+                source = "policy"
+                effective = policy_control
+            elif profile_control is not None:
+                source = "profile"
+                effective = profile_control
+            else:
+                source = "ungoverned"
+                effective = None
+
+            scopes.append(
+                {
+                    "scope": scope,
+                    "archetype": spec.kind,
+                    "governed": effective is not None,
+                    "source": source,
+                    "detail": _serialize_control(spec.kind, effective),
+                }
+            )
+
+        return {
+            "version": ceiling.version if ceiling is not None else None,
+            "has_policy": ceiling is not None,
+            "profile": profile.name if profile is not None else None,
+            "unavailable": False,
+            "scopes": scopes,
+        }
+    except Exception:
+        # Display must never 500 the Security page on a governance glitch.
+        logger.warning("governance policy snapshot unavailable", exc_info=True)
+        return {
+            "version": None,
+            "has_policy": False,
+            "profile": None,
+            "unavailable": True,
+            "scopes": [],
+        }
+
+
+async def build_governance_policy_snapshot_async() -> dict:
+    """Build the governance-policy snapshot off the event loop.
+
+    ``build_governance_policy_snapshot`` may walk the profile store (filesystem)
+    via ``resolve_active_scope``, so it is offloaded to the default thread
+    executor rather than blocking aiohttp's sole event loop.
+    """
+    return await _run_off_loop(build_governance_policy_snapshot)
+
+
+async def api_governance_policy(request: web.Request) -> web.Response:
+    """GET /api/governance/policy — effective ceiling across all scopes (read)."""
+    return web.json_response(await build_governance_policy_snapshot_async())
