@@ -164,6 +164,7 @@ def _strip_attached_file_tokens(
     prefix: str = "[attached_file ",
     labels: dict[str, str] | None = None,
     budget: list[int] | None = None,
+    also: tuple[str, tuple[str, ...]] | None = None,
 ) -> str:
     """Replace dashboard-generated ``[attached_file N] path`` references.
 
@@ -182,24 +183,56 @@ def _strip_attached_file_tokens(
     ``prefix`` selects the marker family. Folder references use the sibling
     ``[attached_dir N] path`` marker with its own index space, so the caller
     passes the matching ordered path tuple for whichever prefix it scans.
+
+    ``also`` supplies a SECOND ``(prefix, paths)`` family scanned in the SAME
+    left-to-right walk. Both families must be consumed in one pass: running two
+    passes made the second scan the first's substituted output, so a basename
+    that happens to contain the other family's marker text was mangled. A real
+    FILE named ``[attached_dir 1] notes`` (brackets and spaces are legal on
+    POSIX and Windows) came out of the file pass as its own basename and was then
+    eaten by the folder pass, leaving ``notes``. Each family keeps its own
+    independent index space; only the walk is shared.
     """
+    families: list[tuple[str, tuple[str, ...]]] = [(prefix, attached_files)]
+    if also is not None:
+        families.append(also)
     chunks: list[str] = []
     cursor = 0
     # A single-element list carries the label budget so it is shared across both
-    # marker-family passes over the same message.
+    # marker families.
     remaining = budget if budget is not None else [0]
     while True:
-        token_start = content.find(prefix, cursor)
+        # Earliest marker of EITHER family wins, so the walk only ever moves
+        # forward over the original text.
+        token_start = -1
+        prefix_at = ""
+        paths_at: tuple[str, ...] = ()
+        exhausted: list[int] = []
+        for fam_i, (fam_prefix, fam_paths) in enumerate(families):
+            found = content.find(fam_prefix, cursor)
+            if found < 0:
+                # `cursor` only ever moves forward, so a family that is absent
+                # from the remainder can never match later. Drop it or every
+                # subsequent iteration re-scans to end-of-string for it, turning
+                # this O(N) walk into O(N*M) — and it runs synchronously on the
+                # event loop for up to 10 messages, over a 181KB scan limit.
+                exhausted.append(fam_i)
+                continue
+            if token_start < 0 or found < token_start:
+                token_start, prefix_at, paths_at = found, fam_prefix, fam_paths
+        for fam_i in reversed(exhausted):
+            del families[fam_i]
         if token_start < 0:
             chunks.append(content[cursor:])
             break
+        attached = paths_at
 
         if token_start > 0 and not content[token_start - 1].isspace():
             chunks.append(content[cursor : token_start + 1])
             cursor = token_start + 1
             continue
 
-        index = token_start + len(prefix)
+        index = token_start + len(prefix_at)
         digits_start = index
         while index < len(content) and content[index].isdigit():
             index += 1
@@ -212,7 +245,7 @@ def _strip_attached_file_tokens(
         token_index = int(content[digits_start:index])
         path_start = index + 2
         expected_path = (
-            attached_files[token_index - 1] if 1 <= token_index <= len(attached_files) else ""
+            attached[token_index - 1] if 1 <= token_index <= len(attached) else ""
         )
         path_end = path_start
         if expected_path and content.startswith(expected_path, path_start):
@@ -317,22 +350,17 @@ def _title_text(
         _attachment_labels(attached_files, attached_dirs) if keep_attachment_names else None
     )
     budget = [_TITLE_MAX_ATTACHMENT_LABEL_BUDGET]
+    # BOTH marker families in one left-to-right walk. Two sequential passes made
+    # the second one scan the first's substituted output, so a basename
+    # containing the other family's marker text was mangled (see
+    # _strip_attached_file_tokens). Index spaces stay independent.
     content = _strip_attached_file_tokens(
         content,
         attached_files,
         drop_trailing_partial=source_was_truncated,
         labels=labels,
         budget=budget,
-    )
-    # Folder references carry their own marker and index space, so they need a
-    # second pass with the matching ordered paths.
-    content = _strip_attached_file_tokens(
-        content,
-        attached_dirs,
-        drop_trailing_partial=source_was_truncated,
-        prefix="[attached_dir ",
-        labels=labels,
-        budget=budget,
+        also=("[attached_dir ", attached_dirs),
     )
     return " ".join(content.split())[:_TITLE_TEXT_LIMIT]
 

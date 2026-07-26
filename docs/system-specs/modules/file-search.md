@@ -136,6 +136,44 @@ Folder tokens are inserted with a trailing slash (`@src/pages/`) so a folder
 mention is visually distinct from a file mention in the composer. Matching
 tolerates the token with or without that slash.
 
+### One-pass emission
+
+Both the composer's serializer (`replaceMentionsOnce` in `fileTokens.ts`) and the
+title stripper (`_strip_attached_file_tokens`, via its `also=` family) consume
+the **file and directory marker families in a single left-to-right walk** over
+the original text. Any text they emit is final and is never re-examined.
+
+Images are the one exception, and they are safe: the composer emits `''` for an
+image mention (nothing to rescan), and the title path strips image markers in a
+separate preceding pass that likewise only ever emits blanks. A pass that
+produces no substituted text cannot be re-read by a later one.
+
+This is a correctness requirement, not a performance one. Sequential per-family
+passes re-scanned each other's *output*, and an emitted marker carries the
+attachment path verbatim, so a path that itself contains text matching a later
+pass's token was rewritten from inside a marker that pass should never have
+looked at:
+
+- **Send path.** With directory `/repo/@data.csv` and an unrelated file
+  `/other/data.csv`, the directory pass emitted
+  `[attached_dir 1] /repo/@data.csv`; the file pass then matched the `@data.csv`
+  *inside that emitted marker*, nesting a file marker in it. The agent received
+  a path that was never an attachment.
+- **Title path.** Each pass substitutes an attachment's basename. A real
+  file named `[attached_dir 1] notes` (brackets and spaces are legal on both
+  POSIX and Windows) came out of the file pass as that basename and was then
+  eaten by the folder pass, leaving `notes`.
+
+Candidates are matched **longest-first** at each position, so
+`@src/pages/list.tsx` wins over the `@src/pages/` directory that prefixes it.
+Index spaces stay independent per family; only the walk is shared. Note that
+mentions are matched by path *suffix*, so two attachments sharing a suffix (e.g.
+`/data/@notes` and `/repo/@notes`) are genuinely ambiguous in the text — that is a
+property of the mention format, not of the scan.
+
+`displayTxt` still uses the single-family `replaceTokens` helper: it makes one
+pass emitting empty strings for images, so it has no output to rescan.
+
 The agent-facing contract for these markers is documented in `AGENTS.md`
 under "File Attachments". Directories must not be passed to a file-read tool.
 
@@ -311,10 +349,10 @@ metadata that makes a spaced path resolve.
 | `test/test_file_search.py` | Endpoint behaviour, scoring, exclusions |
 | `test/test_file_index.py` | Index build, refresh, registry refcounting |
 | `test/test_file_search_dirs.py` | Directory results, `kinds` filter, independent scan budgets, dirs-visited ceiling, symlink security |
-| `test/test_chat_title_dirs.py` | Marker stripping for both families |
+| `test/test_chat_title_dirs.py` | Marker stripping for both families; shared label budget; one-pass scan (a basename containing the other family's marker text is not mangled) |
 | `test/test_queue_edit.py` | A queued-message edit drops its attachment metadata; a failed edit leaves it intact |
 | `website/src/test/FilePickerMenu.dirs.test.tsx` | Folder rows, selection payloads, trailing slash |
-| `website/src/test/fileTokens.dirs.test.ts` | `[attached_dir N]` serialization and numbering |
+| `website/src/test/fileTokens.dirs.test.ts` | `[attached_dir N]` serialization and numbering; one-pass emission (no marker rescan, longest-mention-first) |
 | `website/src/test/renderUserContent.dirs.test.tsx` | Folder chips and cards |
 | `website/src/test/chatDirDrafts.test.ts` | Per-slot folder-draft store |
 | `website/src/test/ChatPageDrafts.test.tsx` | Draft isolation, `meta.dirs` persistence guards, send-failure attachment restore |

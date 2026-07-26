@@ -300,3 +300,73 @@ describe('buildFileLabels with Windows separators', () => {
     expect(map.get('/repo/a.txt')).toBe('a.txt')
   })
 })
+
+describe('marker emission does not rescan its own output', () => {
+  // Serialization ran as sequential passes over text that ALREADY contained
+  // markers emitted by an earlier pass. A generated marker carries the absolute
+  // path verbatim, so if that path happens to contain an `@mention` matching a
+  // later pass's token, the later pass rewrites text inside the marker it should
+  // never have looked at.
+  it('leaves a folder marker intact when its path contains a later token', () => {
+    // The dir pass emits `[attached_dir 1] /repo/@data.csv`. The file pass then
+    // scans that output; `@data.csv` sits at end-of-string inside the emitted
+    // path, which is exactly what tokenRegex matches.
+    const dirs = ['/repo/@data.csv']
+    const { txt, dirPaths } = prepareSendPayload('check @@data.csv/', [], dirs)
+    expect(dirPaths).toEqual(['/repo/@data.csv'])
+    expect(txt, 'the folder path must survive verbatim').toContain('[attached_dir 1] /repo/@data.csv')
+    // A second marker for the same path means the emitted one got rewritten.
+    expect(txt.match(/\[attached_dir 1\]/g) || []).toHaveLength(1)
+    expect(txt, 'no file marker should appear — no file was attached').not.toContain('[attached_file')
+  })
+
+  it('does not let a file token rewrite the inside of a folder marker', () => {
+    // The true rescan case. The dir pass emits
+    //   `[attached_dir 1] /repo/@data.csv`
+    // and that emitted text contains `@data.csv` — which is exactly the mention
+    // for an UNRELATED attached file `/other/data.csv`. The later file pass
+    // scanned the dir pass's output and substituted a file marker INSIDE the
+    // folder marker. Note the two paths share no suffix, so this is not the
+    // ambiguous-mention case: it is purely an artifact of re-scanning.
+    const dirs = ['/repo/@data.csv']
+    const files = ['/other/data.csv']
+    const { txt } = prepareSendPayload('folder @@data.csv/ file @data.csv', files, dirs)
+    expect(txt, 'the folder path must survive verbatim').toContain('[attached_dir 1] /repo/@data.csv')
+    expect(txt, 'the file gets its own marker').toContain('[attached_file 1] /other/data.csv')
+    // Exactly one of each — a nested/duplicated marker means the emitted output
+    // was rescanned.
+    expect(txt.match(/\[attached_dir /g) || []).toHaveLength(1)
+    expect(txt.match(/\[attached_file /g) || []).toHaveLength(1)
+  })
+
+  it('resolves the longest mention first when a dir prefixes a file', () => {
+    // `@src/pages/` (dir) is a prefix of `@src/pages/list.tsx` (file). The
+    // scanner must prefer the longer candidate at a given position, or the file
+    // mention would be half-consumed as a folder.
+    const dirs = ['/repo/src/pages']
+    const files = ['/repo/src/pages/list.tsx']
+    const { txt } = prepareSendPayload('see @src/pages/ and @src/pages/list.tsx', files, dirs)
+    expect(txt).toContain('[attached_dir 1] /repo/src/pages')
+    expect(txt).toContain('[attached_file 1] /repo/src/pages/list.tsx')
+    expect(txt.match(/\[attached_dir /g) || []).toHaveLength(1)
+  })
+
+  it('keeps an image path out of an already-emitted folder marker', () => {
+    // Images are replaced with '' by their pass, so under the old multi-pass
+    // order (dirs, then images rescanning the dir pass's OUTPUT) an image mention
+    // occurring inside an emitted folder marker had its text deleted from inside
+    // that marker — corrupting the path handed to the agent.
+    //
+    // Reproducing this needs the image's MENTION TEXT to appear in the dir path:
+    // buildRelMap resolves the shortest suffix present in the text, so the image
+    // /assets/hero.png resolves to `hero.png`, and the folder /shots/@hero.png
+    // emits a marker containing `@hero.png` for the image pass to eat. An image
+    // whose suffix does NOT occur in the dir path leaves both orderings
+    // identical, which is why a mismatched pair proves nothing.
+    const dirs = ['/shots/@hero.png']
+    const files = ['/assets/hero.png']
+    const { txt } = prepareSendPayload('look at @@hero.png/ and @hero.png', files, dirs)
+    // The folder marker survives intact — nothing was excised from inside it.
+    expect(txt).toContain('[attached_dir 1] /shots/@hero.png')
+  })
+})

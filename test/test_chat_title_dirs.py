@@ -160,6 +160,31 @@ class TestTitleScanBudgetCoversBothFamilies:
         assert long_dirs[0] not in text
         assert long_files[0] not in text
 
+    def test_a_path_containing_the_other_family_marker_is_not_mangled(self):
+        """Marker families must not rescan each other's substituted output.
+
+        Each pass replaces its marker+path with the attachment's BASENAME. If a
+        basename itself contains the literal text of the other family's marker,
+        the second pass scans the first pass's output, finds that substring, and
+        mangles it — the same rescan defect the send-path serializer had.
+
+        A directory name may legitimately contain `[`, `]` and spaces on both
+        POSIX and Windows, so this is reachable from a real filesystem.
+        """
+        weird_file = "/repo/[attached_dir 1] notes"
+        content = f"[attached_file 1] {weird_file} summarize this"
+        text = _title_text(content, (weird_file,), ())
+        assert "summarize this" in text, "the user's text must survive"
+        # The file pass substitutes the basename "[attached_dir 1] notes". The
+        # folder pass must NOT then treat that substituted text as one of its own
+        # markers and eat part of it. Asserting only the absence of
+        # "attached_dir" would pass for the wrong reason — the mangling itself
+        # removes the substring — so assert the label survives whole.
+        assert "[attached_dir 1] notes" in text, (
+            "the folder pass rescanned and mangled the file pass's substituted basename"
+        )
+        assert "attached_file" not in text
+
 
 class TestFallbackTitleWithDirs:
     def test_fallback_title_strips_the_folder_marker(self):

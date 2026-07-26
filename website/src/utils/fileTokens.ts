@@ -347,6 +347,67 @@ export function replaceDirTokens(
   return replaceTokens(text, paths, relMap, replacer, dirTokenRegex)
 }
 
+/**
+ * Replace every `@mention` in one left-to-right pass.
+ *
+ * Serialization used to run as sequential `replaceTokens` passes — dirs, then
+ * images, then files — over text that ALREADY contained markers emitted by an
+ * earlier pass. An emitted marker carries the absolute path verbatim, so when a
+ * path itself contains an `@…` sequence that a later pass's token matches, the
+ * later pass rewrites text inside a marker it should never have looked at.
+ *
+ * Observed corruption: input `see @@notes/ and @@notes` with dir `/data/@notes`
+ * and file `/repo/@notes` produced
+ * `see [attached_dir 1] /data/@notes and [attached_dir 1] /data/@notes` — the
+ * file mention was replaced by a duplicate *folder* marker, so the agent was
+ * pointed at a directory that was never the attachment. That is a wrong-path
+ * substitution, not just a cosmetic glitch.
+ *
+ * One pass fixes the class rather than the instance: the scanner walks the
+ * original text once, and any text it emits is final. Candidates are matched
+ * LONGEST-FIRST at each position so `@src/pages/list.tsx` wins over the
+ * `@src/pages/` directory that prefixes it.
+ */
+export function replaceMentionsOnce(
+  text: string,
+  candidates: Array<{
+    /** Relative mention text, without the leading `@` and without a trailing separator. */
+    rel: string
+    /** Whether the trailing separator the composer inserts is tolerated (dirs). */
+    dir: boolean
+    /** Emit the replacement for this candidate. */
+    emit: () => string
+  }>,
+): string {
+  if (!candidates.length) return text
+  // Longest rel first: a directory is a prefix of the files beneath it, so a
+  // shorter dir candidate must never win against a longer file mention at the
+  // same position.
+  const ordered = [...candidates].sort((a, b) => b.rel.length - a.rel.length)
+  let out = ''
+  let i = 0
+  while (i < text.length) {
+    if (text[i] !== '@') { out += text[i]; i += 1; continue }
+    let matched = false
+    for (const c of ordered) {
+      // Compare against the ORIGINAL text only — never against `out`.
+      if (!text.startsWith(c.rel, i + 1)) continue
+      let end = i + 1 + c.rel.length
+      // A folder mention may carry the trailing separator the composer inserts.
+      if (c.dir && (text[end] === '/' || text[end] === '\\')) end += 1
+      // Same boundary rule as tokenRegex/dirTokenRegex: whitespace or end.
+      const next = text[end]
+      if (next !== undefined && !/\s/.test(next)) continue
+      out += c.emit()
+      i = end
+      matched = true
+      break
+    }
+    if (!matched) { out += text[i]; i += 1 }
+  }
+  return out
+}
+
 /** Build send payload from raw input text and pending files. */
 export interface SendPayload {
   txt: string        // LLM-facing content
@@ -407,15 +468,29 @@ export function prepareSendPayload(
   ]
   const idxMap = new Map(indexedFilePaths.map((p, i) => [p, i + 1]))
 
-  // Replace inline folder mentions first: the dir regex tolerates the trailing
-  // slash the composer inserts, and dir paths are prefixes of the file paths
-  // beneath them, so running this before the file pass avoids a partial match.
-  const withDirs = replaceDirTokens(raw, orderedDirs, dirRelMap, p => dirToken(dirIdxMap.get(p) ?? 0, p))
-
-  const llmRaw = replaceTokens(
-    replaceTokens(withDirs, imgPaths, relMap, () => ''),
-    filePaths, relMap, (p) => `[attached_file ${idxMap.get(p) ?? 0}] ${p}`,
-  )
+  // ONE pass over the original text for all three families. Sequential passes
+  // rescanned each other's emitted markers (see replaceMentionsOnce), which let
+  // a file token rewrite the inside of an already-emitted folder marker.
+  const relFor = (map: Map<string, string>, p: string) =>
+    [...map.entries()].find(([, v]) => v === p)?.[0]
+  const llmCandidates: Array<{ rel: string; dir: boolean; emit: () => string }> = []
+  for (const p of orderedDirs) {
+    const rel = relFor(dirRelMap, p)
+    // `buildRelMap` strips any trailing separator before storing a key, so these
+    // are already bare — the normalization below is a cheap invariant guard, not
+    // load-bearing. The scanner matches the composer's trailing slash itself via
+    // the `dir: true` flag.
+    if (rel) llmCandidates.push({ rel: rel.replace(/[/\\]$/, ''), dir: true, emit: () => dirToken(dirIdxMap.get(p) ?? 0, p) })
+  }
+  for (const p of imgPaths) {
+    const rel = relFor(relMap, p)
+    if (rel) llmCandidates.push({ rel, dir: false, emit: () => '' })
+  }
+  for (const p of filePaths) {
+    const rel = relFor(relMap, p)
+    if (rel) llmCandidates.push({ rel, dir: false, emit: () => `[attached_file ${idxMap.get(p) ?? 0}] ${p}` })
+  }
+  const llmRaw = replaceMentionsOnce(raw, llmCandidates)
   const unreferenced = filePaths.filter(p => !referencedPaths.has(p))
   const unreferencedTokens = unreferenced.map(p => `[attached_file ${idxMap.get(p) ?? 0}] ${p}`).join('\n')
   const unreferencedDirTokens = orderedDirs
