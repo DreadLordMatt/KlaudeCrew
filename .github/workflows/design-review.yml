@@ -161,10 +161,21 @@ jobs:
                central question — reason about the approach, not the syntax.
             3. ROOT CAUSE vs SYMPTOM: fixes the actual cause, or patches a symptom
                that resurfaces? A symptom-only fix is at best CONCERNS.
-            4. OPTIMAL / PROPORTIONATE: is there a simpler, more general, or
-               lower-risk alternative? Over- or under-engineered? Name the 1–2
-               strongest alternatives and why this wins. "No alternative
-               considered" on a non-trivial change is a finding.
+            4. OPTIMAL / PROPORTIONATE (weigh this heavily — AI-generated
+               changes skew toward OVER-ENGINEERING: extra layers, abstractions,
+               config knobs, defensive scaffolding, or a bespoke mechanism where
+               a few lines of existing/stdlib primitives would do). Ask: is there
+               a materially SIMPLER, MORE ELEGANT solution that solves THIS PR's
+               stated problem just as completely, with meaningfully less code /
+               fewer moving parts / less new surface? Also flag the rarer under-
+               engineered case. Name the 1–2 strongest alternatives and why this
+               wins — or, if a simpler one plainly wins, say so plainly. "No
+               alternative considered" on a non-trivial change is a finding. If a
+               simpler solution to the same problem exists, set the machine header
+               `Design-Simpler-Alternative: yes` and describe it in the dedicated
+               `### 💡 Simpler alternative` section so the author cannot miss it.
+               This is ADVISORY — a simpler-alternative finding NEVER raises the
+               verdict to BLOCK on its own; it informs, it does not gate.
             5. ARCHITECTURAL FIT: right layer/ownership boundary, or bolted on
                where convenient? A boundary violation is a design finding even if
                every line is correct.
@@ -206,10 +217,12 @@ jobs:
             - CONCERNS: acceptable to proceed, but a notable design risk humans
               should see.
             - BLOCK: the design itself is wrong — no real problem, the change does
-              not actually solve the stated problem, a clearly better alternative
-              was ignored, or an unsafe one-way door with no migration/compat
-              story. (Advisory: BLOCK does NOT block the merge; it flags for a
-              human.)
+              not actually solve the stated problem, or an unsafe one-way door
+              with no migration/compat story. (A simpler/more-elegant alternative
+              being available is NEVER a BLOCK — over-engineering when the
+              approach still works is owned entirely by the ADVISORY
+              `Design-Simpler-Alternative` signal.) (Advisory: BLOCK does NOT
+              block the merge; it flags for a human.)
             Tie-breaker: when torn between BLOCK and CONCERNS, choose CONCERNS.
             Only reach for BLOCK when the DESIGN is wrong — never merely because
             the change is large or far-reaching (that is the blast-radius call-out,
@@ -222,24 +235,42 @@ jobs:
             STYLE: terse, precise, punchline-first. NO preamble, NO restating the
             PR, NO echoing the design-gate questions, NO praise, NO summary of
             what the change does. The badge already shows the verdict and blast
-            radius — do NOT repeat them in prose. A clean PASS is TWO header lines
-            + a one-line punchline + the marker; nothing else. Aim for the
+            radius — do NOT repeat them in prose. A clean PASS is THREE header
+            lines + a one-line punchline + the marker; nothing else. Aim for the
             shortest output that conveys every real signal — usually well under
             ~150 words. Every sentence must be something the author would ACT on.
 
             Output EXACTLY this shape and nothing more:
 
-            The FIRST two lines are machine-parsed — emit them verbatim, each on
-            its own line, values only:
+            The FIRST three lines are machine-parsed — emit them verbatim, each
+            on its own line, values only:
             Design-Verdict: <PASS | CONCERNS | BLOCK>
             Design-Blast-Radius: <low | medium | high>
+            Design-Simpler-Alternative: <yes | no>
 
             Then a blank line and ONE bold punchline (≤25 words): the single most
             important takeaway — for PASS, why it's sound; for CONCERNS/BLOCK, the
-            core design problem in one breath.
+            core design problem in one breath. If a simpler alternative exists
+            (`Design-Simpler-Alternative: yes`) and no BLOCK/CONCERNS outranks it,
+            LEAD the punchline with it (e.g. "Works, but a simpler approach — X —
+            solves the same problem with far less machinery").
 
             Then include a section ONLY if it has real content (omit the heading
             entirely when empty — never write "None" sections, never pad):
+
+            ### 💡 Simpler alternative
+            <ONLY when `Design-Simpler-Alternative: yes`. Placed FIRST so the
+            author sees it. State, in 1–3 lines: the simpler/more-elegant approach
+            that solves THIS PR's SAME stated problem, WHY it is simpler (fewer
+            moving parts / less new surface / reuses an existing primitive), and
+            the rough shape of the trade-off. It must solve the problem as
+            COMPLETELY as the PR's approach — do NOT propose something that drops a
+            requirement or narrows scope. This is an OPTION for the author to
+            weigh, not a demand and not a blocker; phrase it as "consider X
+            instead" and keep it PROPORTIONATE (a simpler alternative is by
+            definition LESS machinery — never suggest adding layers here). Omit
+            the whole section when the PR's approach is already the simplest
+            reasonable one.>
 
             ### Blockers
             <ONLY when verdict is BLOCK. Each: one-line title, then a single
@@ -309,6 +340,7 @@ jobs:
           # Machine-parse the verdict header the prompt requires (case-insensitive).
           verdict="$(printf '%s\n' "$summary" | grep -iE '^Design-Verdict:' | head -n1 | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tr '[:lower:]' '[:upper:]')"
           blast="$(printf '%s\n' "$summary" | grep -iE '^Design-Blast-Radius:' | head -n1 | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+          simpler="$(printf '%s\n' "$summary" | grep -iE '^Design-Simpler-Alternative:' | head -n1 | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
           [ -z "$verdict" ] && verdict="UNKNOWN"
           [ -z "$blast" ] && blast="unknown"
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
@@ -319,11 +351,18 @@ jobs:
             BLOCK) badge="🔴 BLOCK (advisory)" ;;
             *) badge="" ;;
           esac
+          # A prominent, non-blocking flag so the author immediately notices the
+          # design reviewer found a simpler/more-elegant way to solve the SAME
+          # problem. Advisory only — it never changes the verdict or the check.
+          simpler_badge=""
+          case "$simpler" in
+            yes*) simpler_badge=" · 💡 simpler alternative available" ;;
+          esac
           if [ -n "$badge" ]; then
             # Valid verdict → post the review body (redacted below).
             {
               echo "$MARKER"
-              echo "## Design Review (Fable 5) — $badge · blast radius: $blast"
+              echo "## Design Review (Fable 5) — $badge · blast radius: $blast$simpler_badge"
               echo
               echo "_Advisory design-level review of \`$HEAD\` — updated in place on each push; does **not** block merge._"
               echo

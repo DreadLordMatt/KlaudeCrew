@@ -264,6 +264,18 @@ jobs:
             particular, DO NOT block for: architectural erosion, ownership-
             boundary drift, maintainability / tech-debt that compounds, missing
             abstraction, duplication, or "this should eventually be refactored".
+            ALSO NON-BLOCKING: OVER-ENGINEERING / a SIMPLER-ALTERNATIVE signal
+            from the design reviewer (its `### 💡 Simpler alternative` section or
+            a `Design-Simpler-Alternative: yes` header). "A simpler design exists"
+            is a design OPTION, not a one-way door or concrete harm — the current
+            approach still works, and simplifying later is reversible. NEVER block
+            on it. (Scope: only the SIMPLICITY / over-engineering aspect is
+            non-blocking — if the SAME finding also names a concrete harm or a
+            one-way door, that aspect is still judged against the normal bar
+            above.) But it is HIGH-VALUE for the author, so do the opposite of
+            burying it: surface it PROMINENTLY and near the TOP of "Suggested
+            follow-ups", quoting the design reviewer's alternative, so the author
+            clearly notices the simpler option they can choose to take.
             These are real and worth tracking, but they are reversible in a later
             change, so route them to "Suggested follow-ups" instead of gating.
             The author does NOT need a perfect or complete solution in THIS PR:
@@ -321,8 +333,9 @@ jobs:
             sub-threshold item to be tracked without blocking — whether routed
             by the SCOPE TEST (related-influence / out-of-scope) OR demoted
             because it is reversible-in-a-later-change (architectural erosion,
-            maintainability / tech-debt, missing abstraction) — append this
-            section LAST. It is advisory and NEVER changes the verdict (the
+            maintainability / tech-debt, missing abstraction) — OR the design
+            reviewer flagged a SIMPLER ALTERNATIVE / over-engineering — append
+            this section LAST. It is advisory and NEVER changes the verdict (the
             machine-parsed verdict line is always the first line above,
             regardless of what follows):
 
@@ -330,8 +343,11 @@ jobs:
             <one line per substantive sub-threshold item worth tracking but NOT
             worth blocking this PR (whether out-of-scope per the SCOPE TEST or an
             in-scope-but-reversible item you demoted): what it is, why it can
-            safely wait, and where it should be fixed. Omit this heading only if
-            there are genuinely none.>
+            safely wait, and where it should be fixed. If the design reviewer
+            flagged a SIMPLER ALTERNATIVE, list it FIRST and prefix it with
+            "💡 Simpler alternative:" — restate the simpler approach concisely so
+            the author can weigh adopting it now; make clear it is optional and
+            non-blocking. Omit this heading only if there are genuinely none.>
 
             End with this exact line as proof the review ran for this commit:
             [ARBITER-REVIEWED] ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
@@ -424,6 +440,13 @@ jobs:
               if [ "$CONCLUSION" = "failure" ]; then
                 printf '%s\n' "$DETAILS"
               else
+                # Even when details collapse on a PASS, keep the design reviewer's
+                # SIMPLER-ALTERNATIVE pointer ABOVE the fold so the author still
+                # notices the leaner option (advisory, never blocking).
+                simpler_line="$(printf '%s\n' "$DETAILS" | grep -m1 -F '💡 Simpler alternative:' || true)"
+                if [ -n "$simpler_line" ]; then
+                  printf '%s\n\n' "$simpler_line"
+                fi
                 echo "<details>"
                 echo "<summary>Review details</summary>"
                 echo

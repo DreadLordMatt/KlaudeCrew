@@ -93,3 +93,44 @@ class TestArbiterPresentation:
         assert 'TITLE="✅ human override accepted"' in workflow
         assert "/ai-review override arbiter $SHA:" in workflow
         assert "defer-longterm" in workflow
+
+
+class TestSimplerAlternativeSignal:
+    """The advisory 'a simpler solution exists' signal: surfaced prominently by
+    the design reviewer, emphasized by the Arbiter, and NEVER a blocker."""
+
+    def test_design_review_emits_and_renders_the_signal(self) -> None:
+        workflow = _workflow("design-review.yml")
+
+        # Machine header contract + dedicated, prominently-rendered section.
+        assert "Design-Simpler-Alternative: <yes | no>" in workflow
+        assert "### 💡 Simpler alternative" in workflow
+        # The post step parses the header, matches decorated values (yes*), and
+        # composes the badge INTO the posted comment header (assert the wiring,
+        # not just that the strings exist somewhere).
+        assert "^Design-Simpler-Alternative:" in workflow
+        assert "yes*) simpler_badge=" in workflow
+        assert "blast radius: $blast$simpler_badge" in workflow
+
+    def test_design_review_never_blocks_on_mere_over_engineering(self) -> None:
+        workflow = _workflow("design-review.yml")
+
+        # Gate #4 says the finding is advisory ...
+        assert "a simpler-alternative finding NEVER raises the" in workflow
+        # ... and the BLOCK verdict no longer lists "a better alternative was
+        # ignored" as a ground — over-engineering is owned by the advisory signal.
+        assert "owned entirely by the ADVISORY" in workflow
+        assert "a clearly better alternative\n              was ignored" not in workflow
+
+    def test_arbiter_emphasizes_but_never_blocks_on_the_signal(self) -> None:
+        workflow = _workflow("longterm-arbiter.yml")
+
+        assert "ALSO NON-BLOCKING: OVER-ENGINEERING / a SIMPLER-ALTERNATIVE signal" in workflow
+        # A co-stated concrete harm is still judged against the normal bar.
+        assert "only the SIMPLICITY / over-engineering aspect is" in workflow
+        # Emphasized at the top of the non-blocking follow-ups, and kept above
+        # the collapsed fold on a PASS so the author still notices it (assert the
+        # extraction is wired in, not merely that the prose exists).
+        assert '"💡 Simpler alternative:"' in workflow
+        assert "notices the leaner option (advisory, never blocking)" in workflow
+        assert "grep -m1 -F '💡 Simpler alternative:'" in workflow
