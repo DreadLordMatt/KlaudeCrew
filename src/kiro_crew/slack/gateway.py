@@ -88,6 +88,7 @@ from kiro_crew.dashboard.origin import (
 from kiro_crew.dashboard.stale_asset_watchdog import run_stale_asset_watchdog
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.dashboard.token_auth import MAX_SESSION_TTL_SECS, generate_token
+from kiro_crew.discord.gateway import maybe_start_discord
 from kiro_crew.embeddings import (
     get_shared_embedder,
     make_sync_embed_fn,
@@ -128,6 +129,12 @@ from kiro_crew.mcp_gateway.rewriter import (
 from kiro_crew.memory import MemoryStore
 from kiro_crew.messaging.transport import InboundMessage
 from kiro_crew.platform import boot_platform
+from kiro_crew.platform.context import PlatformCompositionError
+from kiro_crew.platform.governance_profiles import (
+    HOST_SESSION_KEY,
+    audit_governance_degraded,
+    governance_permits,
+)
 from kiro_crew.providers.base import LLMEvent
 from kiro_crew.safety_override import safety_override
 from kiro_crew.sandbox import prewarm_backend
@@ -158,6 +165,9 @@ from kiro_crew.subagent import (
     resolve_max_subagents,
 )
 from kiro_crew.taskrunner import TaskRunner
+from kiro_crew.telegram.gateway import maybe_start_telegram
+from kiro_crew.webex.gateway import maybe_start_webex
+from kiro_crew.wechat.gateway import maybe_start_wecom
 
 if TYPE_CHECKING:
     from kiro_crew.dashboard.state import _ChatSlot
@@ -511,6 +521,175 @@ def _result_hash(text: str) -> str:
     text = _VOLATILE_RE.sub("", text)
     text = _EPOCH_RE.sub(_strip_epoch, text)
     return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def _channel_transport_permitted(member: str) -> bool:
+    """Return True only if the ``channels`` scope POSITIVELY permits *member*.
+
+    Gates each non-Slack transport's STARTUP on the same ``channels`` ScopedMap
+    the two OUTBOUND chokepoints consult: outbound-send
+    (``mcp_core._vet_channel_governance``) and outbound cross-surface mirroring
+    (``dashboard.chat_runner._resolve_mirror_target``).  So one ``channels``
+    policy governs a transport consistently at connect and on every outbound
+    path — this gate is the connect-time member.  (It does NOT enforce inbound
+    receive; inbound handling is the transport's own concern.)  *member* is the
+    transport's ``channel_type`` (``wecom`` / ``telegram`` / ``discord`` /
+    ``webex``) — the IDENTICAL member id the outbound chokepoints use, so one
+    allowlist covers them all.
+
+    HOST-side resolution mirrors the canonical
+    ``apps.manager._app_activation_denied`` template:
+
+    * ``session_key=HOST_SESSION_KEY`` — starting a transport is an operator/host
+      action, so it is governed by the policy ceiling AND any ``bind: {type:
+      surface, id: host}`` profile.  An empty key would classify to surface
+      ``unknown`` and silently ignore a host profile (and historically
+      mis-classified to ``slack``); the same fix ``apps/manager`` and
+      ``slack/enterprise.py`` apply.
+    * Both the DENY and the ALLOW decision are audited here via
+      ``sel().log_governance_decision`` — ``governance_permits`` audits only its
+      own degrade, not a normal permit/deny, so the caller owns both.
+
+    Default-build invariant: with no policy governing ``channels`` (the standard
+    open-source case) ``governance_permits`` returns a permitting Decision, so
+    every ENABLED transport starts exactly as before — byte-identical behavior.
+
+    Audit + error posture (exact):
+
+    * GOVERNED allow (a policy/profile governs ``channels`` → ``rule !=
+      "default"``): **audit-or-deny**. The allow SEL is written with
+      ``critical=True`` (synchronous + raising), so a persistence failure
+      (unwritable SEL / full disk) propagates to the outer ``except`` and DENIES
+      the start — a policy-governed transport never connects unaudited. This is
+      why ``critical`` is required: the default background writer SWALLOWS disk
+      failures, so a best-effort allow-audit would let the transport connect even
+      when its audit record never landed.
+    * UNGOVERNED allow (no policy governs ``channels`` — the default OSS build →
+      ``rule == "default"`` / ``_PERMIT_NOT_GOVERNED``): **best-effort**
+      (``critical=False``). OSS transport availability must never depend on SEL
+      disk health when the operator configured no governance at all.
+    * DENY: best-effort audit (the transport is not starting either way).
+    * ERROR: **fail-closed**. A transport is an externally-reachable network
+      surface, so it starts ONLY on a positive permit. We pass
+      ``governance_permits(fail_closed=True)`` so an internal
+      governance-evaluation error yields a DENYING Decision, and the outer
+      ``except Exception`` ALSO denies (``return False`` + a ``failed_closed=True``
+      degrade audit) — deny-by-default on any error, never an unaudited connect.
+      This deliberately DIVERGES from ``apps.manager`` /
+      ``mcp_core._vet_channel_governance`` (which fail open) because they gate
+      in-process actions, not a network-reachable listener.  A
+      ``PlatformCompositionError`` still propagates (a broken CPP composition must
+      abort, not silently deny).
+    """
+    try:
+        # A bare member id queries the ``channels`` ScopedMap ``members`` ruleset.
+        # session_key=HOST_SESSION_KEY: honour a surface:host profile (empty key
+        # → "unknown" would silently ignore it), matching apps/manager.
+        # fail_closed=True: an internal governance error DENIES (network surface).
+        decision = governance_permits(
+            "channels", member, session_key=HOST_SESSION_KEY, fail_closed=True
+        )
+        if not getattr(decision, "permitted", False):
+            logger.warning(
+                "%s transport not started: denied by the channels governance policy (%s).",
+                member,
+                getattr(decision, "reason", "") or "denied",
+            )
+            # governance_permits does NOT audit a normal deny — the caller must.
+            try:
+                sel().log_governance_decision(
+                    session_key=HOST_SESSION_KEY,
+                    tool_name=f"start_transport:{member}",
+                    scope="channels",
+                    item=member,
+                    outcome="denied",
+                    rule=getattr(decision, "rule", ""),
+                    layer=getattr(decision, "layer", ""),
+                    reason=getattr(decision, "reason", ""),
+                )
+            except Exception:
+                logger.debug("transport-start deny audit failed", exc_info=True)
+            return False
+        # Audit the ALLOWED decision too (a connect to an externally-reachable
+        # surface is worth a positive audit trail). The disposition splits on
+        # whether the ``channels`` scope was actually GOVERNED for this member:
+        #   * GOVERNED allow (a policy AND/OR profile governs ``channels``):
+        #     audit-or-deny. Pass critical=True so the SEL write is
+        #     synchronous+raising; a persistence failure (unwritable SEL, full
+        #     disk) propagates to the outer except and DENIES the start — never
+        #     connect a policy-governed transport unaudited. (A background enqueue
+        #     would swallow the disk failure, so critical is required to make
+        #     audit-or-deny real, not just cover a synchronous raise.)
+        #   * UNGOVERNED allow (no policy/profile governs ``channels``):
+        #     best-effort (critical=False). OSS transport availability must NOT
+        #     depend on SEL disk health when the operator has configured no
+        #     governance for this scope.
+        # Detect "governed" via the Decision's LAYER, not its rule. ``resolve()``
+        # returns rule="rule2-intersect" for EVERY permit — including the case
+        # where a policy exists but does not govern ``channels`` — so a rule-based
+        # check would mis-treat that ungoverned case as governed. ``layer`` names
+        # WHICH level actually carried the decision:
+        #   * no policy at all   → governance_permits early-returns layer="" ;
+        #   * policy, but channels ungoverned → resolve() sets layer="default" ;
+        #   * channels governed  → layer is "policy" / "profile" / "both".
+        # So "governed" is exactly layer ∈ {policy, profile, both}.
+        governed = getattr(decision, "layer", "") in ("policy", "profile", "both")
+        try:
+            sel().log_governance_decision(
+                session_key=HOST_SESSION_KEY,
+                tool_name=f"start_transport:{member}",
+                scope="channels",
+                item=member,
+                outcome="allowed",
+                rule=getattr(decision, "rule", ""),
+                layer=getattr(decision, "layer", ""),
+                reason=getattr(decision, "reason", ""),
+                critical=governed,
+            )
+        except PlatformCompositionError:
+            raise
+        except Exception:
+            if governed:
+                # audit-or-deny: a GOVERNED transport must never connect
+                # unaudited. Re-raise so the outer fail-closed branch denies the
+                # start (critical=True already forced a synchronous+raising write,
+                # so this is a real persistence failure, not a swallowed enqueue).
+                raise
+            # UNGOVERNED allow: best-effort. An SEL ill-health (e.g. corrupt HMAC
+            # key during sel() init/redaction) must NOT deny an ungoverned
+            # transport — OSS availability does not depend on SEL disk health when
+            # the operator configured no governance for this scope. Log and start.
+            logger.warning(
+                "%s transport: ungoverned allow could not be audited (best-effort); "
+                "starting anyway",
+                member,
+                exc_info=True,
+            )
+        return True
+    except PlatformCompositionError:
+        raise
+    except Exception:
+        # Fail CLOSED (deliberate divergence from apps/manager + mcp_core, which
+        # fail open): a transport is an externally-reachable network surface, so
+        # an unexpected governance error must DENY the connect, not permit it.
+        # Record the failed-closed degrade; wrap it so a late-import failure
+        # cannot raise out of this branch and mask the deny.
+        try:
+            audit_governance_degraded(
+                "start_transport",
+                session_key=HOST_SESSION_KEY,
+                scope="channels",
+                failed_closed=True,
+            )
+        except Exception:
+            logger.debug("transport-start governance degrade audit unavailable", exc_info=True)
+        logger.warning(
+            "%s transport not started: channels governance check errored; "
+            "failing closed (deny-by-default for a network-exposed surface).",
+            member,
+            exc_info=True,
+        )
+        return False
 
 
 class GatewayOrchestrator:
@@ -4963,22 +5142,7 @@ class GatewayOrchestrator:
         init_interactions(self)
         init_socket_mode(self, seen)
 
-        # WeChat (WeCom AI-bot) channel — guarded no-op unless enabled + credentialed.
-        from kiro_crew.wechat.gateway import maybe_start_wecom
-
-        self._wecom_client = await maybe_start_wecom(self)
-        # Telegram channel — guarded no-op unless enabled + token present.
-        from kiro_crew.telegram.gateway import maybe_start_telegram
-
-        self._telegram_client = await maybe_start_telegram(self)
-        # Discord channel — guarded no-op unless enabled + token present.
-        from kiro_crew.discord.gateway import maybe_start_discord
-
-        self._discord_client = await maybe_start_discord(self)
-        # Webex channel — guarded no-op unless enabled + token present.
-        from kiro_crew.webex.gateway import maybe_start_webex
-
-        self._webex_client = await maybe_start_webex(self)
+        await self._start_channel_transports()
 
         # Check for updates before printing URLs
         print("👻 Checking for updates…")
@@ -5148,6 +5312,65 @@ class GatewayOrchestrator:
         # Kill any kiro-cli processes that survived graceful shutdown
         cleanup_orphaned_sessions()
         os._exit(0)
+
+    async def _start_channel_transports(self) -> None:
+        """Start each non-Slack transport, gated on the ``channels`` scope.
+
+        Every transport is a guarded no-op unless enabled + credentialed (its
+        own ``maybe_start_*``), and is ADDITIONALLY gated on the ``channels``
+        governance scope: a policy that denies the transport member keeps it from
+        connecting at all, and its client stays ``None``. The scope + member ids
+        (``wecom``/``telegram``/``discord``/``webex``) are IDENTICAL to the
+        outbound chokepoints — outbound-send (``mcp_core``) and outbound
+        cross-surface mirroring (``chat_runner``) — so one ``channels`` allowlist
+        governs a transport at connect time and on every outbound path (this gate
+        is the connect-time member; it does not enforce inbound receive).
+
+        Default-build invariant: with no policy governing ``channels`` (the
+        standard OSS build) the gate permits, so every transport starts exactly
+        as before — byte-identical behavior. Slack itself is NOT gated here: it
+        is the primary channel and its enterprise gate is separate.
+
+        Loop hygiene: ``_channel_transport_permitted`` reaches
+        ``ProfileStore._ensure_fresh``, which stats/reads the profile files off
+        disk — blocking I/O. This method runs on the gateway event loop (inside
+        ``run()``), so the governance decisions are computed together in the
+        maintenance executor BEFORE any transport is started; only the actual
+        ``await maybe_start_*`` stays on the loop.
+
+        Enabled-only eval: the gate is queried ONLY for a transport whose
+        ``_<member>_enabled`` is set (config-enabled + credentialed). A transport
+        that is off never starts regardless of policy, so evaluating it would only
+        emit a spurious deny-SEL for a channel that was never going to connect.
+        A member not evaluated defaults to not-permitted (it is off anyway), so
+        the no-policy default is unchanged: every ENABLED transport still resolves
+        to permit and starts exactly as before.
+        """
+        # Evaluate each channel-start decision OFF the loop (each does blocking
+        # profile-file I/O), but ONLY for config-enabled transports — a disabled
+        # transport never starts, so skip it to avoid a deny-SEL for a channel
+        # that would no-op anyway. Members not evaluated stay not-permitted.
+        members = ("wecom", "telegram", "discord", "webex")
+        enabled = {m: bool(getattr(self, f"_{m}_enabled", False)) for m in members}
+        loop = asyncio.get_running_loop()
+        permitted = await loop.run_in_executor(
+            maintenance_executor(),
+            lambda: {
+                m: (_channel_transport_permitted(m) if enabled[m] else False) for m in members
+            },
+        )
+        # WeChat (WeCom AI-bot) channel — guarded no-op unless enabled + credentialed.
+        if permitted["wecom"]:
+            self._wecom_client = await maybe_start_wecom(self)
+        # Telegram channel — guarded no-op unless enabled + token present.
+        if permitted["telegram"]:
+            self._telegram_client = await maybe_start_telegram(self)
+        # Discord channel — guarded no-op unless enabled + token present.
+        if permitted["discord"]:
+            self._discord_client = await maybe_start_discord(self)
+        # Webex channel — guarded no-op unless enabled + token present.
+        if permitted["webex"]:
+            self._webex_client = await maybe_start_webex(self)
 
 
 async def run_gateway(

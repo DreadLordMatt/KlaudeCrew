@@ -146,20 +146,96 @@ canonical taxonomy parser — never re-implemented). Resolution is:
 
 **`host` surface (in-process host actions).** A governance check that is not
 driven by a user-facing surface — app activation
-(`apps.manager._app_activation_denied`) and Slack workspace admission
-(`slack.enterprise`) — runs under the `_host` sentinel session key, which
-classifies to surface `host`. Operators can bind a `surface:host` profile to
-narrow these on top of the policy ceiling (e.g. an `apps` allowlist that further
-restricts which apps may activate). NOTE: these callers used to pass an empty
-session key, which mis-classified to `slack` and accidentally picked up
-`surface:slack` profiles; they now use the honest `host` surface, so a
-`surface:slack` profile no longer governs host-side app activation. The Slack
-posture check itself stays policy-only (a profile cannot carry `posture`,
-Rule 6).
+(`apps.manager._app_activation_denied`), Slack workspace admission
+(`slack.enterprise`), and non-Slack transport startup
+(`slack.gateway._channel_transport_permitted`) — runs under the `_host` sentinel
+session key, which classifies to surface `host`. Operators can bind a
+`surface:host` profile to narrow these on top of the policy ceiling (e.g. an
+`apps` allowlist that further restricts which apps may activate, or a `channels`
+allowlist that narrows which transports may connect below what the ceiling
+permits). NOTE: these callers used to pass an empty session key, which
+mis-classified to `slack` and accidentally picked up `surface:slack` profiles;
+they now use the honest `host` surface, so a `surface:slack` profile no longer
+governs host-side app activation or transport startup. The two policy-scope
+chokepoints (app activation + transport start) audit their decisions via
+`sel().log_governance_decision` (`governance_permits` audits only its own
+degrade, never a normal permit/deny); Slack workspace admission audits via a
+different sink (`log_api_access`, see below). They also differ on the ERROR
+disposition:
+
+- **App activation (`apps.manager._app_activation_denied`)** audits a DENY and,
+  on an unexpected governance error, **fails open** (degrades to permit + an
+  `audit_governance_degraded` record) — the app's own enable guard still applies
+  and wedging host boot on a governance hiccup is worse.
+- **Non-Slack transport start (`slack.gateway._channel_transport_permitted`)**
+  audits BOTH the allowed and the denied decision and **fails closed**: it passes
+  `governance_permits(fail_closed=True)`, and its outer error branch also denies
+  (`return False` + `audit_governance_degraded(failed_closed=True)`), so a
+  transport connects ONLY on a positive permit. This deliberately DIVERGES from
+  app-activation and `mcp_core._vet_channel_governance` (both fail open) because a
+  transport is an externally-reachable network surface — deny-by-default on any
+  error is the safer posture there, and a transport that fails to start leaks
+  nothing. `fail_closed=True` is the same disposition the authorization/admission
+  chokepoints use (e.g. `capabilities.publish` in `handlers/artifacts.py`,
+  `capabilities.theme_install` in `handlers/themes.py`, `capabilities.theme_persona`
+  in `chat_runner.py`) where a wrong permit lets bytes leave the box or ingests
+  untrusted content. The ALLOW audit is disposition-split: a **governed** allow
+  (a policy/profile governs `channels`, so the Decision's `rule != "default"`) is
+  **audit-or-deny** — written `critical=True` (synchronous + raising) so a SEL
+  persistence failure propagates and DENIES the start (the default background
+  writer swallows disk failures, so `critical` is required for the guarantee to
+  be real); an **ungoverned** allow (no policy governs `channels` — the default
+  OSS build, `rule == "default"`) is **best-effort** so OSS transport
+  availability never depends on SEL disk health. The deny audit is best-effort
+  (the transport is not starting either way).
+- **Slack workspace admission (`slack.enterprise`)** audits via `log_api_access`
+  (not `log_governance_decision`) and its posture probe fails **closed** (returns
+  False + `audit_governance_degraded(failed_closed=True)`) on an error, because
+  admitting an unverified workspace is the higher-blast-radius mistake.
+
+The Slack posture check itself stays policy-only (a profile cannot carry
+`posture`, Rule 6).
 
 Profiles hot-reload via an mtime fingerprint (`ProfileStore`); a schema-invalid
 profile falls back to deny-all (Validation rule 5), **not** the ceiling.
 `extends` is monotonic narrowing (`compose_profiles`).
+
+**Present-but-unrecoverable profile — governed fleet fails closed, standalone is
+lenient.** The reload reads each file's bytes SEPARATELY from parsing and handles
+four on-disk states:
+
+- *Parse error with a salvageable bind* (present, readable, but invalid JSON /
+  schema, yet the parsed dict carries a valid `bind`): deny-all, binding
+  **salvaged from the parsed content** (`_salvage_bind`) so the bound surface
+  still resolves to deny-all, not policy-only.
+- *Present but unrecoverable* — an `OSError` on `read_text` (bad perms, IO error)
+  OR a `UnicodeError`/`UnicodeDecodeError` (invalid encoding) OR a parse error
+  with **no** salvageable bind. The intended `bind` cannot be recovered from the
+  file, so it **cannot** be honoured. We deliberately do **not** guess a bind from
+  the filename — the stem does not reliably encode the bind (an unreadable file
+  that binds `app:file-explorer` is not `surface:<stem>`, so a filename guess
+  would mis-bind and still fail open on the real lookup). Instead the disposition
+  splits on whether the fleet is governed:
+  - **Governed fleet** (a policy ceiling is present): boot **fails closed** —
+    `assert_profiles_within_ceiling` raises `PlatformCompositionError` and aborts
+    boot rather than run with a silently-dropped restrictive profile
+    (deny-by-default: refuse to run over run-ungoverned).
+  - **Standalone / ungoverned** (no ceiling): **lenient** — the file becomes an
+    unbound deny-all that drops out of the bind index, so the surface falls to
+    policy-only (matches pre-split standalone behavior; a profile blip never
+    crashes an ungoverned install). Catching `UnicodeError` alongside `OSError`
+    at the read is required: `UnicodeDecodeError` is not an `OSError`, so without
+    it a corrupt-encoding file would escape uncaught and crash boot inside
+    `assert_profiles_within_ceiling`.
+- *Absent* (missing file, or one that vanished between `iterdir()` and read):
+  **not** a policy — skipped, no manufactured deny. An attended/host surface with
+  no profile at all legitimately falls to the policy ceiling (policy-only), per
+  `resolve_active_scope`.
+
+A **transient** read error is not sticky: after a reload that hit an
+unrecoverable file the store does **not** commit the mtime/size fingerprint, so
+the next access re-reads and a since-recovered file takes effect (rather than the
+deny-all fallback staying cached until file metadata changes or restart).
 
 ## Enforcement planes
 
@@ -192,7 +268,14 @@ profile falls back to deny-all (Validation rule 5), **not** the ceiling.
   (at `cron_add`); the sandbox ordinal floor is clamped in `sandbox.wrap_argv`;
   spawn in `subagent._vet_spawn_governance`; outbound messaging in
   `mcp_core._vet_messaging_governance` plus the per-transport `channels` check
-  in `mcp_core._vet_channel_governance`; durable memory writes in
+  in `mcp_core._vet_channel_governance`; the per-transport **startup** gate in
+  `slack.gateway._channel_transport_permitted` (a `channels` deny for a member
+  keeps that non-Slack transport — `wecom`/`telegram`/`discord`/`webex` — from
+  connecting at boot; resolved under `session_key=HOST_SESSION_KEY` so a
+  `surface:host` profile can narrow it; the four decisions are computed in the
+  maintenance executor before any client starts, since the profile-file read is
+  blocking and this runs on the gateway loop; Slack itself is not gated here);
+  durable memory writes in
   `mcp_core._vet_memory_writes_governance` (at `learn_add`); script-hook
   execution in `hooks._script_hooks_capability_denied` (at `run_script_hook`);
   app activation in `apps.manager._app_activation_denied` (at `enable_app`). All
@@ -313,7 +396,8 @@ The **enforced** scopes in v1 are: `tools`, `mcp`, `commands` (host gate + cron
 command body + the enterprise force-pin for built-in denied-command rules, see
 below), `filesystem.read` / `filesystem.write` / `folders.*` and
 `network.egress` (host gate via tool kind + args), `channels` (per-transport at
-the messaging chokepoint), `apps` (app activation), `sandbox.min_level` (ordinal
+the messaging chokepoint AND at non-Slack transport startup), `apps` (app
+activation), `sandbox.min_level` (ordinal
 floor at `wrap_argv`), `approval_mode` (boot floor only), and every capability
 gate — `capabilities.spawn`, `capabilities.messaging`, `capabilities.cron`,
 `capabilities.memory_writes`, `capabilities.script_hooks`, and

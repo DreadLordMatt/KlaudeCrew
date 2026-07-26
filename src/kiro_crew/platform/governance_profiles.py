@@ -238,6 +238,15 @@ class ProfileStore:
         self._by_name: Dict[str, Profile] = {}
         # surface/app/task index → profile name, built from each profile's bind.
         self._by_bind: Dict[Tuple[str, str], str] = {}
+        # Set by a reload when a file was PRESENT but its bind could NOT be
+        # recovered (unreadable content / invalid encoding, data is None). Such a
+        # file cannot be honoured — it may carry a restrictive bind that is now
+        # silently dropped. For an ungoverned/standalone host we tolerate it
+        # (lenient, no crash — matches today's behavior); a GOVERNED fleet must
+        # fail closed to a boot-abort instead of running with a dropped profile,
+        # which ``assert_profiles_within_ceiling`` enforces by reading this flag.
+        # Records the offending file name(s) for the boot-abort message.
+        self._unrecoverable: Tuple[str, ...] = ()
 
     def _ensure_fresh(self) -> None:
         directory = _profiles_dir()
@@ -245,11 +254,20 @@ class ProfileStore:
         if fp == self._fingerprint:
             return
         self._reload(directory)
-        self._fingerprint = fp
+        # Only COMMIT the fingerprint cache when the reload fully succeeded. If a
+        # transient read error left an unrecoverable file (F2-3), leave the
+        # fingerprint stale so the NEXT access re-reads (the deny-all fallback
+        # otherwise stays cached until file metadata changes / restart even after
+        # the read recovers). A clean reload advances the cache as before.
+        if self._unrecoverable:
+            self._fingerprint = None
+        else:
+            self._fingerprint = fp
 
     def _reload(self, directory: Path) -> None:
         by_name: Dict[str, Profile] = {}
         by_bind: Dict[Tuple[str, str], str] = {}
+        unrecoverable: list[str] = []
         try:
             files = [p for p in sorted(directory.iterdir()) if p.suffix == ".json"]
         except OSError:
@@ -258,8 +276,47 @@ class ProfileStore:
         for path in files:
             stem = path.stem
             data: object = None
+            # Read the bytes FIRST, separately from parsing, so a present-but-
+            # UNREADABLE file is distinguished from a genuine parse error. The
+            # parse-error path below salvages the bind from the parsed content; an
+            # unreadable file has NO readable content, so its bind can't be
+            # salvaged — the fallback stays UNBOUND (deny_all_profile has
+            # bind=None). We do NOT guess a bind from the filename: the stem does
+            # not reliably encode the bind (an unreadable file that binds
+            # app:file-explorer is NOT surface:<stem>), so a filename guess would
+            # mis-bind and STILL fail open on the real lookup. Instead we record
+            # the file as unrecoverable; a GOVERNED fleet turns that into a
+            # boot-abort (assert_profiles_within_ceiling), while a standalone host
+            # tolerates it (lenient, no crash — matches pre-split behavior).
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                raw = path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                # Vanished between iterdir() and read (TOCTOU) — the file is now
+                # ABSENT, not a present policy. A missing file is not a deny, so
+                # skip it (don't manufacture a fail-closed for a surface that has
+                # no profile at all).
+                continue
+            except (OSError, UnicodeError):
+                # PRESENT but UNREADABLE: an IO/permission error (OSError) OR
+                # invalid encoding (UnicodeDecodeError, whose base is UnicodeError)
+                # — both mean the content, and thus the intended bind, cannot be
+                # read. Record it as unrecoverable and fall back to an UNBOUND
+                # deny-all (a lenient standalone tolerates it; a governed fleet
+                # boot-aborts via assert_profiles_within_ceiling). Catching
+                # UnicodeError here is required: it is NOT an OSError, so without
+                # it a corrupt-encoding profile would escape both handlers and
+                # crash boot inside assert_profiles_within_ceiling.
+                logger.warning(
+                    "profile %s is present but unreadable (bind unrecoverable); "
+                    "deny-all fallback (unbound). A governed fleet fails closed at boot.",
+                    path.name,
+                    exc_info=True,
+                )
+                by_name[stem] = deny_all_profile(stem)
+                unrecoverable.append(path.name)
+                continue
+            try:
+                data = json.loads(raw)
                 if not isinstance(data, dict):
                     raise PlatformCompositionError("profile is not a JSON object")
                 by_name[stem] = parse_profile(data)
@@ -273,11 +330,20 @@ class ProfileStore:
                 # to deny-all (not policy-only).  Without this, an invalid profile
                 # with a valid bind would be dropped from the bind index and its
                 # surface would fail OPEN to the policy ceiling — defeating
-                # Validation rule 5 on the binding path.
+                # Validation rule 5 on the binding path.  A parse error means the
+                # JSON parsed (or partially did), so ``_salvage_bind`` can often
+                # recover the real bind from the dict — unlike the unreadable case
+                # above where there is no content to salvage from.
                 fallback = deny_all_profile(stem)
                 salvaged = _salvage_bind(data)
                 if salvaged is not None:
                     fallback = replace(fallback, bind=salvaged)
+                else:
+                    # A parse error with NO salvageable bind (e.g. valid JSON but
+                    # missing/garbage bind) also leaves a restrictive profile
+                    # potentially dropped — same fail-closed treatment for a
+                    # governed fleet as the unreadable case.
+                    unrecoverable.append(path.name)
                 by_name[stem] = fallback
         # Pass 2: resolve ``extends`` (monotonic narrowing) now that all are parsed.
         # The "non-trivial chain" guard must read each parent's ORIGINAL ``extends``,
@@ -330,6 +396,19 @@ class ProfileStore:
                 by_bind[key] = name
         self._by_name = by_name
         self._by_bind = by_bind
+        self._unrecoverable = tuple(unrecoverable)
+
+    def unrecoverable_files(self) -> Tuple[str, ...]:
+        """File names that were PRESENT but whose bind could not be recovered.
+
+        Populated by the last reload (unreadable content / invalid encoding, or a
+        parse error with no salvageable bind). A governed fleet turns a non-empty
+        result into a boot-abort via :func:`assert_profiles_within_ceiling`; a
+        standalone host tolerates it (lenient). Reads through ``_ensure_fresh`` so
+        the value reflects the current on-disk state.
+        """
+        self._ensure_fresh()
+        return self._unrecoverable
 
     def get(self, name: str) -> Optional[Profile]:
         self._ensure_fresh()
@@ -395,6 +474,24 @@ def assert_profiles_within_ceiling(ceiling: "object") -> None:
 
     if not isinstance(ceiling, GovernanceCeiling):
         return
+    # Governed fleet + a PRESENT profile whose bind could not be recovered
+    # (unreadable content / invalid encoding / unsalvageable parse error) →
+    # fail closed to a boot-abort. Such a file may carry a restrictive bind that
+    # was silently dropped from the bind index; a governed fleet must refuse to
+    # run rather than run with the operator's narrowing missing. (No-op for a
+    # standalone host — ``ceiling is None`` returned above — so a profile blip on
+    # an ungoverned install never crashes boot.) Distinguished from a TRANSIENT
+    # blip by re-reading: ``unrecoverable_files`` runs through ``_ensure_fresh``,
+    # and the store deliberately does NOT cache the fingerprint after an
+    # unrecoverable reload, so a since-recovered file no longer reports here.
+    unrecoverable = _STORE.unrecoverable_files()
+    if unrecoverable:
+        raise PlatformCompositionError(
+            "governed fleet: profile file(s) present but unrecoverable "
+            f"(bind cannot be resolved): {', '.join(sorted(unrecoverable))}. "
+            "Refusing to boot with a silently-dropped restrictive profile "
+            "(fail-closed). Fix or remove the file(s)."
+        )
     for profile in _STORE.all_profiles():
         assert_governance_floor(ceiling, profile)  # raises PlatformCompositionError on weakening
 

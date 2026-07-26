@@ -125,6 +125,183 @@ def test_invalid_profile_with_valid_bind_still_denies_its_surface(profiles_dir):
     assert not resolve(None, prof, "capabilities.spawn", "researcher").permitted
 
 
+def _make_read_text_raise(monkeypatch, target: "object", exc: Exception):
+    """Monkeypatch ``Path.read_text`` to raise ``exc`` for ``target`` only.
+
+    Portable simulation of a present-but-unreadable file (chmod 000 is a no-op on
+    Windows). ``target`` is compared by resolved path so it matches regardless of
+    how the store constructs the Path.
+    """
+    from pathlib import Path
+
+    real_read_text = Path.read_text
+    target_str = str(target)
+
+    def _patched(self, *args, **kwargs):
+        if str(self) == target_str:
+            raise exc
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _patched)
+
+
+def _write_host_profile(path):
+    path.write_text(
+        json.dumps(
+            {
+                "name": "host",
+                "bind": {"type": "surface", "id": "host"},
+                "channels": {"members": {"mode": "allow", "allow": ["slack"]}},
+            }
+        )
+    )
+
+
+def _make_ceiling():
+    from kiro_crew.platform.governance import parse_policy
+
+    return parse_policy({"version": 1, "boot": {"fail_closed": True}})
+
+
+def test_unreadable_profile_governed_fleet_boot_aborts(profiles_dir, monkeypatch):
+    # F1-1 (corrected): a PRESENT-but-UNREADABLE profile whose bind cannot be
+    # recovered must NOT be guessed by filename (the stem does not reliably encode
+    # the bind). For a GOVERNED fleet (ceiling present) it fails CLOSED to a
+    # boot-abort: assert_profiles_within_ceiling raises PlatformCompositionError
+    # rather than run with a silently-dropped restrictive profile.
+    from kiro_crew.platform.context import PlatformCompositionError
+    from kiro_crew.platform.governance_profiles import assert_profiles_within_ceiling
+
+    path = profiles_dir / "host.json"
+    _write_host_profile(path)
+    _make_read_text_raise(monkeypatch, path, OSError("permission denied"))
+    gp.reset_store()
+
+    with pytest.raises(PlatformCompositionError):
+        assert_profiles_within_ceiling(_make_ceiling())
+
+
+def test_unreadable_profile_standalone_is_lenient(profiles_dir, monkeypatch):
+    # F1-1 (corrected): a standalone/ungoverned host (no ceiling) must NOT crash
+    # on an unreadable profile blip. assert_profiles_within_ceiling(None) is a
+    # no-op, and the unbound deny-all fallback simply drops out — the surface
+    # falls to policy-only (matches pre-split standalone behavior, no regression).
+    from kiro_crew.platform.governance_profiles import (
+        HOST_SESSION_KEY,
+        assert_profiles_within_ceiling,
+    )
+
+    path = profiles_dir / "host.json"
+    _write_host_profile(path)
+    _make_read_text_raise(monkeypatch, path, OSError("permission denied"))
+    gp.reset_store()
+
+    assert_profiles_within_ceiling(None)  # no ceiling → no crash
+    # Unbound deny-all drops from the bind index → host surface is policy-only.
+    assert gp.resolve_active_scope(HOST_SESSION_KEY) is None
+
+
+def test_invalid_utf8_profile_governed_fleet_boot_aborts(profiles_dir, monkeypatch):
+    # F2-1 (UTF-8): an invalid-encoding file raises UnicodeDecodeError (base
+    # UnicodeError), which is NOT an OSError. The read guard must catch
+    # (OSError, UnicodeError) so it does not escape both handlers and crash boot
+    # uncaught. Treated as present-but-unreadable → governed fleet boot-aborts.
+    from kiro_crew.platform.context import PlatformCompositionError
+    from kiro_crew.platform.governance_profiles import assert_profiles_within_ceiling
+
+    path = profiles_dir / "host.json"
+    # Write raw invalid UTF-8 bytes (0xff is never valid UTF-8).
+    path.write_bytes(b'{"name": "host", "bind": {"type": "surface", "id": "\xff\xfe"}}')
+    gp.reset_store()
+
+    # Must not escape uncaught; a governed fleet boot-aborts fail-closed.
+    with pytest.raises(PlatformCompositionError):
+        assert_profiles_within_ceiling(_make_ceiling())
+
+
+def test_invalid_utf8_profile_standalone_does_not_crash(profiles_dir):
+    # F2-1: the SAME invalid-encoding file on a standalone host (no ceiling) must
+    # be tolerated — resolve must not raise UnicodeDecodeError.
+    from kiro_crew.platform.governance_profiles import HOST_SESSION_KEY
+
+    path = profiles_dir / "host.json"
+    path.write_bytes(b'{"name": "host", "bind": {"type": "surface", "id": "\xff\xfe"}}')
+    gp.reset_store()
+    # No crash; unbound deny-all → policy-only.
+    assert gp.resolve_active_scope(HOST_SESSION_KEY) is None
+
+
+def test_transient_read_error_not_cached(profiles_dir, monkeypatch):
+    # F2-3: a transient read error must NOT be cached — once the read recovers,
+    # the next access re-reads and the real (readable) profile takes effect,
+    # instead of the deny-all fallback staying cached until metadata changes.
+    from pathlib import Path
+
+    path = profiles_dir / "cron.json"
+    path.write_text(
+        json.dumps(
+            {
+                "name": "cron",
+                "bind": {"type": "surface", "id": "cron"},
+                "tools": {"mode": "allow", "allow": ["read"]},
+            }
+        )
+    )
+    real_read_text = Path.read_text
+    state = {"fail": True}
+    target = str(path)
+
+    def _patched(self, *args, **kwargs):
+        if str(self) == target and state["fail"]:
+            raise OSError("transient NFS blip")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _patched)
+    gp.reset_store()
+    # First access hits the transient error → unbound deny-all → cron surface
+    # policy-only (the fallback dropped out); fingerprint NOT cached.
+    assert gp.resolve_active_scope("cron:job-1:run-1") is None
+    # Read recovers WITHOUT any file-metadata change.
+    state["fail"] = False
+    # Next access must re-read (fingerprint was not committed) and pick up the
+    # real profile — proving the transient error was not cached.
+    prof = gp.resolve_active_scope("cron:job-1:run-1")
+    assert prof is not None and prof.name == "cron"
+
+
+def test_absent_profile_still_yields_policy_only(profiles_dir):
+    # GUARDRAIL: the fix must NOT manufacture a deny for a surface that has NO
+    # profile at all. An absent host profile → resolve_active_scope returns None
+    # (attended/host surface, policy ceiling alone governs), NOT a false deny.
+    from kiro_crew.platform.governance_profiles import HOST_SESSION_KEY
+
+    # profiles_dir is empty (no host.json).
+    assert gp.resolve_active_scope(HOST_SESSION_KEY) is None
+
+
+def test_vanished_profile_mid_reload_is_absent_not_deny(profiles_dir, monkeypatch):
+    # A file present at iterdir() but gone at read (TOCTOU) is treated as ABSENT
+    # (skipped), not as a present-but-unreadable deny — a missing file is not a
+    # policy. FileNotFoundError is a subclass of OSError, so the reload must
+    # distinguish it from the genuine-unreadable case.
+    from kiro_crew.platform.governance_profiles import HOST_SESSION_KEY
+
+    path = profiles_dir / "host.json"
+    path.write_text(
+        json.dumps(
+            {
+                "name": "host",
+                "bind": {"type": "surface", "id": "host"},
+                "channels": {"members": {"mode": "allow", "allow": ["slack"]}},
+            }
+        )
+    )
+    _make_read_text_raise(monkeypatch, path, FileNotFoundError("vanished"))
+    gp.reset_store()
+    # Vanished → absent → policy-only (None), no false deny.
+    assert gp.resolve_active_scope(HOST_SESSION_KEY) is None
+
+
 def test_extends_narrows(profiles_dir):
     _write(
         profiles_dir,
