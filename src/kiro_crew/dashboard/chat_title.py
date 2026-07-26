@@ -28,9 +28,21 @@ _TITLE_MAX_ATTEMPTS = 5
 _TITLE_TEXT_LIMIT = 16_384
 _TITLE_MAX_ATTACHMENT_FILES = 20
 _TITLE_MAX_ATTACHMENT_PATH_LENGTH = 4_096
-_TITLE_SOURCE_SCAN_LIMIT = _TITLE_TEXT_LIMIT + _TITLE_MAX_ATTACHMENT_FILES * (
-    _TITLE_MAX_ATTACHMENT_PATH_LENGTH + 32
-)
+# Two marker families each get the full per-family allowance (files and folders
+# are counted separately), so the scan budget must cover BOTH. Budgeting for one
+# family would let a message carrying long file AND folder paths be truncated
+# before its user text, leaving title generation with an empty transcript.
+_TITLE_ATTACHMENT_FAMILIES = 2
+# Total budget for ALL substituted attachment labels in one message, and the cap
+# on any single one. The transcript line fed to the titler is itself capped, so
+# without these a message carrying many (or one pathological) attachment name
+# would spend the whole line on names and truncate away the user's caption --
+# the same failure mode as dropping the names entirely.
+_TITLE_MAX_ATTACHMENT_LABEL_BUDGET = 80
+_TITLE_MAX_ATTACHMENT_LABEL_LENGTH = _TITLE_MAX_ATTACHMENT_LABEL_BUDGET // 2
+_TITLE_SOURCE_SCAN_LIMIT = _TITLE_TEXT_LIMIT + (
+    _TITLE_ATTACHMENT_FAMILIES * _TITLE_MAX_ATTACHMENT_FILES
+) * (_TITLE_MAX_ATTACHMENT_PATH_LENGTH + 32)
 
 # Titling is a trivial 3-6 word task, so run it on the cheapest/fastest model
 # (Haiku) rather than the kirocrew-lite default (Opus 4.6 on the kiro-cli path).
@@ -107,33 +119,146 @@ def _strip_markdown_images(content: str, *, drop_trailing_partial: bool = False)
     return "".join(chunks)
 
 
+def _trailing_segment(path: str) -> str:
+    """Last path segment, separator-agnostic, capped to the per-label limit.
+
+    Uses ``_to_posix_sep`` so a legal POSIX name containing a backslash keeps it:
+    metadata-free replay of ``/repo/a\\b`` titled it ``b`` instead of ``a\\b``.
+    """
+    base = _to_posix_sep(path).rstrip("/").rsplit("/", 1)[-1]
+    return base[:_TITLE_MAX_ATTACHMENT_LABEL_LENGTH]
+
+
+def _to_posix_sep(path: str) -> str:
+    """Normalize separators, treating ``\\`` as one only for Windows-style paths.
+
+    On POSIX a backslash is a legal filename character, so rewriting every ``\\``
+    to ``/`` mislabeled ``/repo/a\\b`` as ``b`` in generated titles. Mirrors
+    ``pathSegments`` on the frontend so chips and titles agree.
+    """
+    drive_prefixed = (
+        len(path) >= 3
+        and path[0].isalpha()
+        and path[1] == ":"
+        and path[2] in ("/", "\\")
+    )
+    if drive_prefixed or ("\\" in path and "/" not in path):
+        return path.replace("\\", "/")
+    return path
+
+
+def _attachment_labels(*path_groups: tuple[str, ...]) -> dict[str, str]:
+    """Map each attachment path to its title label: the trailing path segment.
+
+    Titles keep the name rather than the full path: the path is noise and can
+    leak a directory layout, but the name is usually the whole topic. A label is
+    widened to the last two segments when its basename collides, because three
+    folders all named ``docs`` would otherwise read as "docs and docs and docs"
+    -- which the titling model rejects as SKIP, the very failure this substitution
+    exists to fix. Mirrors the disambiguation the composer applies to chips.
+
+    Groups are labelled together so a file and a folder sharing a basename are
+    disambiguated against each other too.
+    """
+    normalized = {
+        p: _to_posix_sep(p).rstrip("/") for group in path_groups for p in group if p
+    }
+    basenames = [n.rsplit("/", 1)[-1] for n in normalized.values()]
+    dupes = {b for b in basenames if basenames.count(b) > 1}
+    labels: dict[str, str] = {}
+    for original, norm in normalized.items():
+        segments = norm.split("/")
+        label = (
+            "/".join(segments[-2:])
+            if segments[-1] in dupes and len(segments) > 1
+            else segments[-1]
+        )
+        labels[original] = label[:_TITLE_MAX_ATTACHMENT_LABEL_LENGTH]
+
+    return labels
+
+
 def _strip_attached_file_tokens(
     content: str,
     attached_files: tuple[str, ...] = (),
     *,
     drop_trailing_partial: bool = False,
+    prefix: str = "[attached_file ",
+    labels: dict[str, str] | None = None,
+    budget: list[int] | None = None,
+    also: tuple[str, tuple[str, ...]] | None = None,
 ) -> str:
-    """Remove dashboard-generated ``[attached_file N] path`` references.
+    """Replace dashboard-generated ``[attached_file N] path`` references.
+
+    The marker and its full path are replaced by the attachment's BASENAME, not
+    dropped. Dropping them left an attachment-only message with no content at
+    all: "tell me about [attached_dir 1] /long/path/docs and [attached_dir 2]
+    /long/path/website/docs" collapsed to "tell me about and", so the titling
+    model correctly answered SKIP and every such chat fell back to a truncated
+    name. The basename preserves the topic while still keeping the full path out
+    of the title.
 
     Current dashboard messages store paths in token-index order, making each
     lookup constant-time. The whitespace-delimited fallback preserves support
     for older messages without metadata.
+
+    ``prefix`` selects the marker family. Folder references use the sibling
+    ``[attached_dir N] path`` marker with its own index space, so the caller
+    passes the matching ordered path tuple for whichever prefix it scans.
+
+    ``also`` supplies a SECOND ``(prefix, paths)`` family scanned in the SAME
+    left-to-right walk. Both families must be consumed in one pass: running two
+    passes made the second scan the first's substituted output, so a basename
+    that happens to contain the other family's marker text was mangled. A real
+    FILE named ``[attached_dir 1] notes`` (brackets and spaces are legal on
+    POSIX and Windows) came out of the file pass as its own basename and was then
+    eaten by the folder pass, leaving ``notes``. Each family keeps its own
+    independent index space; only the walk is shared.
     """
-    prefix = "[attached_file "
+    families: list[tuple[str, tuple[str, ...]]] = [(prefix, attached_files)]
+    if also is not None:
+        families.append(also)
     chunks: list[str] = []
     cursor = 0
+    # A single-element list carries the label budget so it is shared across both
+    # marker families.
+    remaining = budget if budget is not None else [0]
+    # Each family caches the position of its next match. Re-running `find` for
+    # every family on every iteration made the walk quadratic whenever a family's
+    # marker sat LATE in the input: dropping absent families (find == -1) only
+    # helps when a family is missing entirely, not when its next match is simply
+    # far ahead, so a 181KB scan re-traversed the tail once per token —
+    # synchronously on the event loop, for up to 10 messages. A cached position is
+    # still valid while `cursor` has not passed it, because `cursor` only ever
+    # moves forward and the text is never mutated during the walk.
+    fam_state: list[list] = [[p, paths, content.find(p, cursor)] for p, paths in families]
     while True:
-        token_start = content.find(prefix, cursor)
+        # Earliest marker of EITHER family wins, so the walk only ever moves
+        # forward over the original text.
+        token_start = -1
+        prefix_at = ""
+        paths_at: tuple[str, ...] = ()
+        for fam in fam_state:
+            if fam[2] >= 0 and fam[2] < cursor:
+                # Cursor advanced past the cached hit — find the next one.
+                fam[2] = content.find(fam[0], cursor)
+            if fam[2] < 0:
+                continue
+            if token_start < 0 or fam[2] < token_start:
+                token_start, prefix_at, paths_at = fam[2], fam[0], fam[1]
+        # A family whose find returned -1 stays -1 forever (cursor only moves
+        # forward), so it is skipped from here on without another scan.
         if token_start < 0:
             chunks.append(content[cursor:])
             break
+        attached = paths_at
 
         if token_start > 0 and not content[token_start - 1].isspace():
             chunks.append(content[cursor : token_start + 1])
             cursor = token_start + 1
             continue
 
-        index = token_start + len(prefix)
+        index = token_start + len(prefix_at)
         digits_start = index
         while index < len(content) and content[index].isdigit():
             index += 1
@@ -146,7 +271,7 @@ def _strip_attached_file_tokens(
         token_index = int(content[digits_start:index])
         path_start = index + 2
         expected_path = (
-            attached_files[token_index - 1] if 1 <= token_index <= len(attached_files) else ""
+            attached[token_index - 1] if 1 <= token_index <= len(attached) else ""
         )
         path_end = path_start
         if expected_path and content.startswith(expected_path, path_start):
@@ -169,7 +294,24 @@ def _strip_attached_file_tokens(
             continue
 
         chunks.append(content[cursor:token_start])
-        chunks.append(" ")
+        # Substitute the name rather than dropping it: an attachment-only message
+        # would otherwise be left with no content for the titler to name. Once
+        # the shared budget is spent, the rest collapse to a bare space so the
+        # user's own text keeps its place in the transcript line. ``labels=None``
+        # opts out entirely (the truncated fallback does this).
+        if labels is None:
+            label = ""
+        elif expected_path:
+            label = labels.get(expected_path, "")
+        else:
+            # Older messages carry no metadata and so no ordered path to look up;
+            # derive the label from the text the whitespace scan captured.
+            label = _trailing_segment(content[path_start:path_end])
+        if label and len(label) <= remaining[0]:
+            remaining[0] -= len(label)
+            chunks.append(f" {label} ")
+        else:
+            chunks.append(" ")
         cursor = path_end
 
     return "".join(chunks)
@@ -189,22 +331,62 @@ def _message_attachment_paths(message: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
-def _title_text(content: str, attached_files: tuple[str, ...] = ()) -> str:
+def _message_dir_paths(message: dict[str, Any]) -> tuple[str, ...]:
+    """Return bounded, index-preserving folder paths from message metadata."""
+    meta = message.get("meta")
+    if not isinstance(meta, dict):
+        return ()
+    dirs = meta.get("dirs")
+    if not isinstance(dirs, list):
+        return ()
+    return tuple(
+        path if isinstance(path, str) and 0 < len(path) <= _TITLE_MAX_ATTACHMENT_PATH_LENGTH else ""
+        for path in dirs[:_TITLE_MAX_ATTACHMENT_FILES]
+    )
+
+
+def _title_text(
+    content: str,
+    attached_files: tuple[str, ...] = (),
+    attached_dirs: tuple[str, ...] = (),
+    *,
+    keep_attachment_names: bool = True,
+) -> str:
     """Return bounded message text suitable for title generation.
 
     A bounded allowance large enough for every accepted attachment is sanitized
     first, so generated paths cannot crowd later user text out of the retained
     title input. The normalized user text is capped separately.
+
+    ``keep_attachment_names`` substitutes each attachment's basename so the LLM
+    has something to name. The truncated fallback passes False: an
+    attachment-only message must stay unnameable there, because titling it
+    "report.txt" would lock a filename in as the permanent title and prevent a
+    later real title from replacing it.
     """
     source_was_truncated = len(content) > _TITLE_SOURCE_SCAN_LIMIT
     content = content[:_TITLE_SOURCE_SCAN_LIMIT]
     if content.startswith("[BROWSE] "):
         content = content[len("[BROWSE] ") :]
     content = _strip_markdown_images(content, drop_trailing_partial=source_was_truncated)
+    # One label map and one budget shared by both passes, so a file and a folder
+    # with the same basename disambiguate against each other and their names
+    # cannot together crowd out the user's text.
+    labels = (
+        _attachment_labels(attached_files, attached_dirs) if keep_attachment_names else None
+    )
+    budget = [_TITLE_MAX_ATTACHMENT_LABEL_BUDGET]
+    # BOTH marker families in one left-to-right walk. Two sequential passes made
+    # the second one scan the first's substituted output, so a basename
+    # containing the other family's marker text was mangled (see
+    # _strip_attached_file_tokens). Index spaces stay independent.
     content = _strip_attached_file_tokens(
         content,
         attached_files,
         drop_trailing_partial=source_was_truncated,
+        labels=labels,
+        budget=budget,
+        also=("[attached_dir ", attached_dirs),
     )
     return " ".join(content.split())[:_TITLE_TEXT_LIMIT]
 
@@ -214,7 +396,11 @@ def _build_title_prompt(messages: list[dict[str, Any]]) -> str | None:
     lines: list[str] = []
     for m in messages[:10]:
         role = m.get("role", "")
-        content = _title_text(m.get("content", ""), _message_attachment_paths(m))
+        content = _title_text(
+            m.get("content", ""),
+            _message_attachment_paths(m),
+            _message_dir_paths(m),
+        )
         if role in ("user", "assistant") and content:
             lines.append(f"{role}: {content[:200]}")
     if not lines:
@@ -361,7 +547,14 @@ def _fallback_title_from_messages(messages: list[dict[str, Any]]) -> str:
             text
             for m in messages
             if m.get("role") == "user"
-            and (text := _title_text(m.get("content", ""), _message_attachment_paths(m)))
+            and (
+                text := _title_text(
+                    m.get("content", ""),
+                    _message_attachment_paths(m),
+                    _message_dir_paths(m),
+                    keep_attachment_names=False,
+                )
+            )
         ),
         "",
     )

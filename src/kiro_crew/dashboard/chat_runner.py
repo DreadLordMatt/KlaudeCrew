@@ -68,6 +68,7 @@ from kiro_crew.dashboard.chat_utils import (
     _remove_queued_by_id,
     _validate_tool_name,
     is_system_injection,
+    queued_append_meta,
 )
 from kiro_crew.dashboard.handlers import (
     MAX_PROMPT_BYTES,
@@ -1686,6 +1687,16 @@ def _settle_consumed_steers(slot: "_ChatSlot", snapshot: str) -> None:
         len(remaining),
     )
     slot._pending_steers[:] = remaining
+    # Drop parked metadata for settled entries so the side table cannot grow
+    # across turns. Each text holds a LIST of per-occurrence metadata, so trim it
+    # to however many copies of that text are still pending rather than keeping
+    # or dropping the whole key.
+    for key in list(slot._pending_steer_meta):
+        still = remaining.count(key)
+        if not still:
+            del slot._pending_steer_meta[key]
+        else:
+            del slot._pending_steer_meta[key][still:]
 
 
 def _requeue_unconsumed_steers(state: "DashboardState", slot: "_ChatSlot") -> None:
@@ -1708,7 +1719,17 @@ def _requeue_unconsumed_steers(state: "DashboardState", slot: "_ChatSlot") -> No
         return
     requeued = slot._pending_steers[:]
     slot._pending_steers.clear()
+    # Metadata travels with the requeued cards; drained after the loop so an
+    # identical steer appearing twice still finds its lists on the second pass.
+    # Metadata travels with the requeued cards; drained after the loop so an
+    # identical steer appearing twice still finds its lists on the second pass.
+    # Each text maps to a LIST of per-occurrence metadata, popped in order so two
+    # identical steers with different attachments keep their own.
+    steer_meta = {k: list(v) for k, v in slot._pending_steer_meta.items()}
+    slot._pending_steer_meta.clear()
     for steer_msg in reversed(requeued):
+        _occurrences = steer_meta.get(steer_msg) or []
+        _meta_for_msg = _occurrences.pop(0) if _occurrences else None
         # Raw-at-rest by design: slot._queue is a DELIVERY payload (the drained
         # entry becomes the next turn's LLM input), matching every other queue
         # producer (queue_append in chat_handlers / messaging). All dashboard
@@ -1716,7 +1737,7 @@ def _requeue_unconsumed_steers(state: "DashboardState", slot: "_ChatSlot") -> No
         # apply _redact_for_display, and every queue_* broadcast (including the
         # queue_push below) sanitizes. Sanitizing at insert would corrupt the
         # delivered message relative to the normal queue path.
-        qid = slot.queue_insert(0, steer_msg)
+        qid = slot.queue_insert(0, steer_msg, meta=_meta_for_msg)
         try:
             content, _ = redact_exfiltration_urls(steer_msg)
             content, _ = redact_credentials(content)
@@ -1727,6 +1748,9 @@ def _requeue_unconsumed_steers(state: "DashboardState", slot: "_ChatSlot") -> No
                     "content": _redact_for_display(content),
                     "ts": datetime.now(timezone.utc).isoformat(),
                     "queue_id": qid,
+                    # Same as the handler's queue_push sites: an open client needs
+                    # the ordered lists to render a spaced path on the card.
+                    **({"meta": _meta_for_msg} if _meta_for_msg else {}),
                 },
             )
         except Exception:
@@ -4657,6 +4681,17 @@ async def _run_chat(
             cron_label = _m.group(1) if _m else "cron"
             cron_label, _ = redact_exfiltration_urls(cron_label)
             cron_label, _ = redact_credentials(cron_label)
+            # Carry a queued user message's attachment metadata onto the
+            # persisted entry (see queued_append_meta for the ownership rules).
+            # Without this the drained message keeps its `[attached_dir N]`
+            # markers but loses the ordered lists, and replay truncates any path
+            # containing a space at the first space.
+            _queued_meta = queued_append_meta(
+                consumed,
+                is_cron=is_cron,
+                is_subagent=is_subagent,
+                is_recovery=is_recovery,
+            )
             slot.append(
                 "subagent"
                 if is_subagent
@@ -4669,6 +4704,7 @@ async def _run_chat(
                 else "msg msg-inject"
                 if is_recovery
                 else "msg msg-u",
+                meta=_queued_meta or None,
             )
 
             task = asyncio.create_task(

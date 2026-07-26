@@ -56,6 +56,8 @@ Object.defineProperty(window, 'matchMedia', {
 })
 
 import ChatPage from '../pages/ChatPage'
+import { DIR_DRAFTS_KEY } from '../utils/chatDirDrafts'
+import { DRAFTS_KEY } from '../utils/chatDrafts'
 
 function makeStore(activeSlot: string, slots: { key: string; mode?: string }[]) {
   return configureStore({
@@ -127,7 +129,7 @@ beforeEach(() => {
 // someone reorders the effects or moves the advance up. All three persist
 // writes are asserted (not just text) because the advance now guards all three.
 describe('ChatPage composerSlotRef effect ordering', () => {
-  it('declares all three composer-persist effects before advancing composerSlotRef', () => {
+  it('declares all four composer-persist effects before advancing composerSlotRef', () => {
     // Deliberately brittle: this matches exact code substrings from ChatPage.tsx
     // to lock a load-bearing effect-declaration order. An innocuous rename/reformat
     // will trip it. The fix is to UPDATE the substrings below to the new form,
@@ -136,19 +138,142 @@ describe('ChatPage composerSlotRef effect ordering', () => {
     const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
     const textIdx = src.indexOf('setDraft(drafts.current, s, input)')
     const fileIdx = src.indexOf('setFileDraft(fileDrafts.current, s, pendingFiles)')
+    const dirIdx = src.indexOf('setDirDraft(dirDrafts.current, s, pendingDirs)')
     const pasteIdx = src.indexOf('setPasteDraft(pasteDrafts.current, s, pasteBlocks)')
     const advanceIdx = src.indexOf('composerSlotRef.current = activeSlot')
     expect(textIdx, 'text-persist effect (setDraft off composerSlotRef) not found').toBeGreaterThan(-1)
     expect(fileIdx, 'file-persist effect (setFileDraft off composerSlotRef) not found').toBeGreaterThan(-1)
+    expect(dirIdx, 'dir-persist effect (setDirDraft off composerSlotRef) not found').toBeGreaterThan(-1)
     expect(pasteIdx, 'paste-persist effect (setPasteDraft off composerSlotRef) not found').toBeGreaterThan(-1)
     expect(advanceIdx, 'composerSlotRef advance not found').toBeGreaterThan(-1)
     const order = 'persist effect must be declared BEFORE the composerSlotRef advance (draft-smear guard). If effects moved, UPDATE the substrings; do not delete this guard.'
     expect(textIdx, order).toBeLessThan(advanceIdx)
     expect(fileIdx, order).toBeLessThan(advanceIdx)
+    expect(dirIdx, order).toBeLessThan(advanceIdx)
     expect(pasteIdx, order).toBeLessThan(advanceIdx)
   })
 
-  // Symptom B (send routing to the slot the user already left) can't be covered
+  // The folder-leak fix: the slot-change effect must RESET pendingDirs from the
+  // incoming slot's draft. Without it a folder picked in chat A rides along on
+  // the next send in chat B. Behaviorally awkward to reach (needs a real picker
+  // selection), so guard the reset line statically.
+  it('resets pendingDirs from the incoming slot draft on slot change', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
+    expect(src, 'slot change must restore pendingDirs from dirDrafts').toContain(
+      "setPendingDirs(activeSlot ? (dirDrafts.current[activeSlot] ?? []).slice() : [])",
+    )
+  })
+
+  // The replay fix: send() must persist dirPaths on meta.dirs, otherwise a
+  // folder path containing a space is truncated by the content-scan fallback.
+  it('persists folder paths on meta.dirs', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
+    expect(src, 'send() must destructure dirPaths from prepareSendPayload').toMatch(
+      /const \{[^}]*dirPaths[^}]*\} = prepareSendPayload\(/,
+    )
+    expect(src, 'send() must set meta.dirs').toContain('if (dirPaths.length) meta.dirs = dirPaths')
+  })
+
+  // Behavioural counterpart to the static guards above: a send that fails at the
+  // transport must put the folder chip BACK on screen. Asserting on the dir-draft
+  // storage instead does NOT work — the `pendingDirs` persist effect rewrites
+  // that key from state on every change, so storage repopulates even with the
+  // failure-path `setDirDraft` deleted. The rendered chip is driven by
+  // `pendingDirs` alone, so it isolates the restore.
+  it('restores a staged folder chip and raw text when the send fails', async () => {
+    const SPACED = '/repo/my docs'
+    sessionStorage.setItem(DIR_DRAFTS_KEY, JSON.stringify({ s1: [SPACED] }))
+    localStorage.setItem(DRAFTS_KEY, JSON.stringify({ s1: 'review @my docs/' }))
+    const { api } = await import('../api/client')
+    const sendChat = api.sendChat as ReturnType<typeof vi.fn>
+    sendChat.mockRejectedValueOnce(new Error('network down'))
+
+    const store = makeStore('s1', [{ key: 's1' }])
+    await renderAndWaitForInput(store)
+
+    const input = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    await waitFor(() => expect(input.value).toContain('@my docs/'))
+    // The staged folder is on screen before the send.
+    expect(screen.getAllByLabelText('Remove folder').length).toBe(1)
+
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+    await waitFor(() => expect(sendChat).toHaveBeenCalled())
+
+    // The chip must come back: send() clears pendingDirs optimistically, so if
+    // the failure path does not restore it the user's attachment is gone.
+    await waitFor(() => {
+      expect(
+        screen.queryAllByLabelText('Remove folder').length,
+        'staged folder chip was not restored after a failed send',
+      ).toBe(1)
+    })
+    expect(
+      (screen.getByLabelText('Message input') as HTMLTextAreaElement).value,
+      'raw composer text was not restored after a failed send',
+    ).toContain('@my docs/')
+    sendChat.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+  })
+
+
+  // GPT round-10 HIGH: the optimistic edit hid the attachment before the PATCH
+  // resolved and swallowed the rejection, so a failed edit left the UI claiming
+  // the attachment was removed while the backend still queued and submitted it.
+  it('does not mutate the queued card when the edit request fails', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
+    expect(src, 'edit must dispatch inside .then(), not before the request').toMatch(
+      /api\.editQueuedMessage\([^)]*\)\s*\n\s*\.then\(/,
+    )
+    expect(src, 'the optimistic pre-dispatch must be gone').not.toContain(
+      "dispatch(editQueuedMessage({ slot: activeSlot, queue_id: queueId, content: trimmed }))",
+    )
+    expect(src, 'must apply the server-stored text, not the submitted text').toContain(
+      'const stored = typeof res?.content === \'string\' ? res.content : trimmed',
+    )
+  })
+
+  // steer() renders its own optimistic bubble from the tokenized text, so it
+  // needs the same ordered lists as send() or a spaced path truncates there too.
+  it('persists attachment metadata on the steered optimistic bubble', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
+    expect(src, 'steer() must set files on the bubble meta').toContain(
+      'if (filePaths.length) steerMeta.files = filePaths',
+    )
+    expect(src, 'steer() must set dirs on the bubble meta').toContain(
+      'if (dirPaths.length) steerMeta.dirs = dirPaths',
+    )
+    expect(src, 'steer() must not discard the payload lists').not.toContain(
+      'const { txt } = prepareSendPayload(raw, files, dirs)',
+    )
+  })
+
+  // The optimistic bubble alone is not enough: the SERVER must persist the
+  // ordered lists too, or the spaced path is truncated by the content-scan
+  // fallback after a reload. Guarded statically because the assertion is about
+  // what crosses the network boundary, and the mutation is fire-and-forget.
+  it('sends attachment metadata to the server on steer', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../pages/ChatPage.tsx'), 'utf8')
+    expect(src, 'steer() must send the lists, not just the text').toMatch(
+      /steerMutation\.mutate\(\s*\{\s*text:\s*llmTxt,\s*meta:/,
+    )
+    expect(src, 'steer() must put files on the server meta').toContain(
+      'if (filePaths.length) serverMeta.files = filePaths',
+    )
+    expect(src, 'steer() must put dirs on the server meta').toContain(
+      'if (dirPaths.length) serverMeta.dirs = dirPaths',
+    )
+    const client = readFileSync(resolve(here, '../api/client.ts'), 'utf8')
+    expect(client, 'steerChat must forward meta in the request body').toMatch(
+      /steer:\s*true,\s*\.\.\.\(meta\s*\?\s*\{\s*meta\s*\}\s*:\s*\{\}\)/,
+    )
+  })
+
   // behaviorally: the ref-vs-closure divergence it fixes is a same-tick race
   // between the reducer's activeSlot flip and send()'s re-memoization, and RTL
   // flushes a render between any dispatch and the Enter event, so the closure
@@ -462,6 +587,43 @@ describe('ChatPage draft persistence', { timeout: 15_000 }, () => {
       return s
     })
     expect(saved['new-slot']).toBeUndefined()
+  })
+
+  it('restores a staged image after a failed send, not just non-image files', async () => {
+    // Images are filtered out of prepareSendPayload's `filePaths` (they go into
+    // `imgPaths` and become `![image](...)` markdown), so restoring `filePaths`
+    // alone silently dropped the image: it lives only in pendingFiles, never in
+    // the raw text, so a retry would have sent the message without it.
+    const { api } = await import('../api/client')
+    vi.mocked(api.uploadFiles).mockResolvedValueOnce({ paths: ['/tmp/shot.png', '/tmp/notes.txt'] })
+    vi.mocked(api.sendChat).mockRejectedValueOnce(new Error('Network error'))
+
+    const store = makeStore('slot-a', [{ key: 'slot-a' }])
+    await renderAndWaitForInput(store)
+
+    const input = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    const dropTarget = input.closest('div') as HTMLElement
+    await act(async () => {
+      fireEvent.drop(dropTarget, {
+        dataTransfer: {
+          files: [new File(['x'], 'shot.png', { type: 'image/png' }), new File(['y'], 'notes.txt', { type: 'text/plain' })],
+          types: ['Files'],
+        },
+      })
+    })
+    await waitFor(() => {
+      const saved = JSON.parse(sessionStorage.getItem('mc-chat-file-drafts') || '{}')
+      expect(saved['slot-a']).toEqual(['/tmp/shot.png', '/tmp/notes.txt'])
+    })
+
+    await act(async () => { fireEvent.change(input, { target: { value: 'look at this' } }) })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+
+    await waitFor(() => {
+      const saved = JSON.parse(sessionStorage.getItem('mc-chat-file-drafts') || '{}')
+      expect(saved['slot-a'], 'the image must survive the send-failure restore')
+        .toEqual(['/tmp/shot.png', '/tmp/notes.txt'])
+    })
   })
 
   it('restores draft to localStorage on connection error', async () => {

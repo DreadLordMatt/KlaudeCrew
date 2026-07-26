@@ -676,6 +676,54 @@ def _normalize_slot_key(name: str) -> str:
     return _SLOT_KEY_FILENAME_UNSAFE_RE.sub("_", _ascii_slot_key(name))
 
 
+def strip_attachment_markers(content: str, meta: object) -> str:
+    """Remove ``[attached_file N] path`` / ``[attached_dir N] path`` pairs.
+
+    Used when attachment metadata is being DROPPED (queue edit) and the marker
+    text must not survive in the content. Without this, ``item.pop("meta")``
+    left the markers behind: the runner still resolved them and sent the
+    attachment the user thought they had removed, and any path containing a
+    space rendered truncated because the index space backing it was gone.
+
+    Strips by exact ``marker + path`` using the paths from the OUTGOING ``meta``
+    rather than by pattern, so a path containing spaces, brackets or a literal
+    ``[attached_dir 1]`` is removed exactly and nothing else is touched. Markers
+    whose index is absent from ``meta`` are left alone — they belong to a family
+    this call does not own.
+    Whitespace is repaired ONLY at each removal site, never globally. A global
+    ``[ \t]{2,}`` collapse plus per-line strip rewrote text far from any marker:
+    a pasted code snippet lost its indentation and aligned columns collapsed to
+    single spaces. Each marker is removed along with the horizontal whitespace
+    immediately around it, so the gap closes without touching anything else.
+    """
+    if not meta or not content or not isinstance(meta, dict):
+        return content
+    for prefix, key in (("[attached_file ", "files"), ("[attached_dir ", "dirs")):
+        paths = meta.get(key)
+        # Metadata arrives from client JSON, so the value may be any type. Only
+        # a list of strings is meaningful; anything else is ignored rather than
+        # iterated (a bare string would iterate as characters).
+        if not isinstance(paths, list):
+            continue
+        for idx, path in enumerate(paths, start=1):
+            if not path or not isinstance(path, str):
+                continue
+            marker = re.escape(f"{prefix}{idx}] {path}")
+            # Require a boundary after the path. Without it the marker matched a
+            # PREFIX of a longer path: with meta owning `/d`, editing the text to
+            # mention `[attached_dir 1] /dossier` stripped `/d` and left
+            # `ossier`, corrupting the message.
+            bound = r"(?=\s|$)"
+            # A marker alone on its line takes the whole line (including the
+            # newline) so no blank line is left behind.
+            content = re.sub(rf"^[ \t]*{marker}{bound}[ \t]*\n?", "", content, flags=re.M)
+            # Otherwise collapse the marker and the whitespace hugging it to a
+            # single space, then tidy a trailing remnant at end-of-line.
+            content = re.sub(rf"[ \t]*{marker}{bound}[ \t]*", " ", content)
+            content = re.sub(r"[ \t]+$", "", content, flags=re.M)
+    return content.strip()
+
+
 class _ChatSlot:
     """Independent chat session that runs server-side."""
 
@@ -764,6 +812,7 @@ class _ChatSlot:
         "_native_subagent_tracker",
         "_native_subagent_output",
         "_pending_steers",
+        "_pending_steer_meta",
     )
 
     def __init__(
@@ -956,6 +1005,23 @@ class _ChatSlot:
         # STOP, error). Without this, a steer swallowed by a dying turn
         # vanished with no trace (2026-07-17 incident; see the requeue site).
         self._pending_steers: list[str] = []
+        # Attachment metadata for entries in ``_pending_steers``, keyed by the
+        # message text. A side table rather than a richer ``_pending_steers``
+        # element type: that list's shape is load-bearing for the settle/requeue
+        # matching (and its regression suite) after the 2026-07-17 incident, so
+        # it stays a plain list of message strings.
+        #
+        # Needed because an accepted-but-unconsumed steer is degraded into an
+        # ordinary queue card by ``_requeue_unconsumed_steers``. Without the
+        # metadata that requeued card keeps its `[attached_file N]` /
+        # `[attached_dir N]` markers but loses the ordered lists, so the path is
+        # truncated at its first space when the card later drains.
+        #
+        # Keyed by text, so two identical steers with different attachments
+        # share one entry — acceptable because the settle logic already matches
+        # identical steers by count, not identity, and the failure mode is a
+        # duplicate list rather than a lost one.
+        self._pending_steer_meta: dict[str, list[dict]] = {}
 
     @property
     def _plan_stage_count(self) -> int:
@@ -1057,7 +1123,7 @@ class _ChatSlot:
 
     # ── Queue helpers (dict-based queue items) ──
 
-    def queue_append(self, content: str, kind: str = "") -> str:
+    def queue_append(self, content: str, kind: str = "", meta: dict | None = None) -> str:
         """Append a message to the queue. Returns the generated queue ID.
 
         ``kind`` is a structural origin tag (e.g. ``"synthetic_recovery"`` for
@@ -1065,18 +1131,34 @@ class _ChatSlot:
         not by content equality — survives queue transformations and cannot
         collide with user-typed text that happens to match an internal string.
         Empty string = plain user/system content (default).
+
+        ``meta`` carries the (already-redacted) attachment metadata of a queued
+        user message — ``meta.files`` / ``meta.dirs``. It must survive the queue
+        because those ordered lists are what let a path containing a space
+        replay losslessly; without it the drain persists the message with
+        markers but no lists, and ``parseFiles``/``parseDirs`` fall back to the
+        whitespace scan that truncates ``/repo/my docs`` to ``/repo/my``.
         """
         qid = uuid.uuid4().hex[:12]
-        self._queue.append({"id": qid, "content": content, "kind": kind})
+        item: dict = {"id": qid, "content": content, "kind": kind}
+        # Only set when present so existing queue-shape assertions (which
+        # compare against the 3-key dict) stay valid for unattached messages.
+        if meta:
+            item["meta"] = meta
+        self._queue.append(item)
         return qid
 
-    def queue_insert(self, index: int, content: str, kind: str = "") -> str:
+    def queue_insert(self, index: int, content: str, kind: str = "", meta: dict | None = None) -> str:
         """Insert a message at a specific queue position. Returns the queue ID.
 
-        See :meth:`queue_append` for the ``kind`` structural origin tag.
+        See :meth:`queue_append` for the ``kind`` structural origin tag and the
+        ``meta`` attachment metadata.
         """
         qid = uuid.uuid4().hex[:12]
-        self._queue.insert(index, {"id": qid, "content": content, "kind": kind})
+        item: dict = {"id": qid, "content": content, "kind": kind}
+        if meta:
+            item["meta"] = meta
+        self._queue.insert(index, item)
         return qid
 
     def queue_pop(self, index: int = 0) -> dict[str, str]:
@@ -1091,16 +1173,54 @@ class _ChatSlot:
                 return item["content"]
         return None
 
-    def queue_edit_by_id(self, queue_id: str, content: str) -> bool:
-        """Replace the content of a queue item by ID. Returns True if found.
+    def queue_edit_by_id(self, queue_id: str, content: str) -> str | None:
+        """Replace the content of a queue item by ID.
 
-        Order is preserved — only the content of the matching item changes.
+        Returns the STORED content (markers stripped) on success, ``""`` when the
+        item exists but the edit strips to nothing, and ``None`` when the id is
+        unknown. The caller needs the three cases distinct: unknown id is a 404,
+        empty result is a validation error, success echoes the stored text.
+
+        The stripped text is returned rather than a bool because the queue and
+        every client-facing echo must agree. Returning ``True`` and letting the
+        caller broadcast its own ``content`` desynchronized them: the queue held
+        the stripped text while the placeholder, the ``queue_edit`` broadcast and
+        the HTTP response all still carried the marker, so clients rendered an
+        attachment the queued prompt no longer contained.
+
+        Attachment metadata is DROPPED, because the edited text now owns its own
+        attachments. ``content`` carries the ``[attached_file N]`` /
+        ``[attached_dir N]`` markers and ``meta`` carries the ordered path lists
+        that those markers index into; the two are a matched pair generated
+        together at send time. An edit rewrites only ``content``, so keeping the
+        old ``meta`` desynchronizes them: if the user replaces the auto-selected
+        text the marker is gone (the model never receives the attachment) while
+        the surviving metadata still renders an attachment card in history —
+        showing an attachment that was never sent.
+
+        The tradeoff is deliberate: editing a queued message to fix a typo also
+        drops its attachments, which is visible and recoverable (re-stage and
+        re-send) rather than silent and misleading.
+
+        An edit whose text is ONLY markers strips to the empty string. That is
+        rejected instead of stored: an empty queue entry drains as a turn with no
+        request at all, silently losing what the user asked for. The caller
+        surfaces it as a validation error so the user can retype.
         """
         for item in self._queue:
             if item["id"] == queue_id:
-                item["content"] = content
-                return True
-        return False
+                # Strip the markers belonging to the metadata we are dropping.
+                # Leaving them in content sent the attachment anyway (the runner
+                # resolves markers from text) and rendered spaced paths wrong.
+                stripped = strip_attachment_markers(content, item.get("meta"))
+                if not stripped.strip():
+                    # Item found but unusable — signal with "" so the caller can
+                    # tell this apart from an unknown id. The queue is left intact.
+                    return ""
+                item["content"] = stripped
+                item.pop("meta", None)
+                return stripped
+        return None
 
     @property
     def running(self) -> bool:

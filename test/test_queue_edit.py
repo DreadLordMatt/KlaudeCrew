@@ -28,7 +28,7 @@ class TestQueueEditHelper:
         slot.queue_append("keep")
         qid = slot.queue_append("old text")
         slot.queue_append("also keep")
-        assert slot.queue_edit_by_id(qid, "new text") is True
+        assert slot.queue_edit_by_id(qid, "new text") == "new text"
         assert [q["content"] for q in slot._queue] == ["keep", "new text", "also keep"]
 
     def test_edit_by_id_preserves_order_and_id(self):
@@ -41,12 +41,145 @@ class TestQueueEditHelper:
     def test_edit_by_id_not_found(self):
         slot = _ChatSlot("s1")
         slot.queue_append("msg")
-        assert slot.queue_edit_by_id("nonexistent", "x") is False
+        assert slot.queue_edit_by_id("nonexistent", "x") is None
         assert slot._queue[0]["content"] == "msg"
 
     def test_edit_by_id_empty_queue(self):
         slot = _ChatSlot("s1")
-        assert slot.queue_edit_by_id("anything", "x") is False
+        assert slot.queue_edit_by_id("anything", "x") is None
+
+    def test_edit_drops_attachment_meta(self):
+        """An edit discards the item's attachment metadata.
+
+        ``content`` (the ``[attached_file N]`` / ``[attached_dir N]`` markers) and
+        ``meta`` (the ordered path lists those markers index into) are generated
+        together at send time. An edit rewrites only ``content``, so keeping the
+        old ``meta`` desynchronizes the pair: replacing the auto-selected text
+        removes the marker, so the model never receives the attachment, while the
+        surviving metadata still renders an attachment card in history — an
+        attachment that was never sent.
+        """
+        slot = _ChatSlot("s1")
+        qid = slot.queue_append(
+            "look at [attached_dir 1] /repo/my docs",
+            meta={"dirs": ["/repo/my docs"]},
+        )
+        assert slot.queue_edit_by_id(qid, "never mind, just say hi") == "never mind, just say hi"
+        item = slot._queue[0]
+        assert item["content"] == "never mind, just say hi"
+        assert "meta" not in item, "stale attachment metadata survived the edit"
+
+    def test_edit_strips_markers_the_dropped_meta_backed(self):
+        """An edit that KEEPS the marker text must still lose the marker.
+
+        The sibling test edits the marker away, so dropping ``meta`` is enough.
+        When the user edits around the marker instead — fixing a typo, or the
+        client echoing the served content back — the marker survived into a
+        message with no ``meta``. Two failures followed: the runner resolves
+        markers from the text, so the attachment the user thought they dropped
+        was still sent; and with the index space gone a path containing a space
+        rendered truncated at the first space.
+        """
+        slot = _ChatSlot("s1")
+        qid = slot.queue_append(
+            "look at [attached_dir 1] /repo/my docs",
+            meta={"dirs": ["/repo/my docs"]},
+        )
+        assert slot.queue_edit_by_id(qid, "look at [attached_dir 1] /repo/my docs please") == "look at please"
+        item = slot._queue[0]
+        assert "meta" not in item
+        assert "attached_dir" not in item["content"], "marker outlived the metadata backing it"
+        assert "/repo/my docs" not in item["content"]
+        assert item["content"] == "look at please"
+
+    def test_edit_keeps_markers_it_does_not_own(self):
+        """Only the indices present in the dropped meta are stripped."""
+        slot = _ChatSlot("s1")
+        qid = slot.queue_append("a [attached_dir 1] /d", meta={"dirs": ["/d"]})
+        # Index 2 was never in this item's meta, so it is not ours to remove.
+        assert slot.queue_edit_by_id(qid, "a [attached_dir 1] /d b [attached_dir 2] /other") == "a b [attached_dir 2] /other"
+        assert slot._queue[0]["content"] == "a b [attached_dir 2] /other"
+
+    def test_attachment_only_edit_is_rejected(self):
+        """An edit that strips to nothing must not be stored.
+
+        The endpoint validates non-empty BEFORE stripping, so "[attached_dir 1]
+        /path" passed validation and then stripped to "". The queue kept an empty
+        entry, which drains as a turn carrying no request at all — the user's
+        prompt silently vanishes. Returns "" (not None) so the caller can tell
+        this apart from an unknown id and answer 400 rather than 404.
+        """
+        slot = _ChatSlot("s1")
+        qid = slot.queue_append(
+            "[attached_dir 1] /repo/my docs", meta={"dirs": ["/repo/my docs"]}
+        )
+        assert slot.queue_edit_by_id(qid, "[attached_dir 1] /repo/my docs") == ""
+        # Queue is left untouched, not emptied.
+        assert slot._queue[0]["content"] == "[attached_dir 1] /repo/my docs"
+        assert slot._queue[0]["meta"] == {"dirs": ["/repo/my docs"]}
+
+    def test_edit_survives_non_list_meta(self):
+        """Untrusted meta shapes must not break the edit.
+
+        `meta` originates in client JSON, so `dirs` can be any type. A bare string
+        would iterate as characters; a dict/int would raise. Either way the edit
+        must still succeed and simply not strip anything.
+        """
+        for bad in ("not-a-list", 42, {"0": "x"}, None):
+            slot = _ChatSlot("s1")
+            qid = slot.queue_append("hello there", meta={"dirs": bad})
+            assert slot.queue_edit_by_id(qid, "hello there") == "hello there"
+            assert "meta" not in slot._queue[0]
+
+    def test_edit_ignores_non_string_path_members(self):
+        slot = _ChatSlot("s1")
+        qid = slot.queue_append("a [attached_dir 2] /d", meta={"dirs": [None, "/d"]})
+        assert slot.queue_edit_by_id(qid, "a [attached_dir 2] /d") == "a"
+
+    def test_edit_does_not_strip_a_longer_path_sharing_the_prefix(self):
+        """The marker must match a whole path, not a prefix of a longer one.
+
+        With meta owning `/d`, an edit mentioning `[attached_dir 1] /dossier`
+        stripped the `/d` and left `ossier` — silent message corruption.
+        """
+        slot = _ChatSlot("s1")
+        qid = slot.queue_append("seed", meta={"dirs": ["/d"]})
+        assert (
+            slot.queue_edit_by_id(qid, "see [attached_dir 1] /dossier now")
+            == "see [attached_dir 1] /dossier now"
+        )
+
+    def test_edit_preserves_indentation_outside_the_marker(self):
+        """Stripping must not reformat text away from the marker.
+
+        A global ``[ \\t]{2,}`` collapse plus per-line strip rewrote the whole
+        message: a pasted code snippet lost its indentation and aligned columns
+        collapsed to single spaces. Only whitespace hugging the removed marker
+        may change.
+        """
+        slot = _ChatSlot("s1")
+        qid = slot.queue_append("seed", meta={"dirs": ["/d"]})
+        code = "def f():\n    x=1\n    [attached_dir 1] /d\n    y=2"
+        assert slot.queue_edit_by_id(qid, code) == "def f():\n    x=1\n    y=2"
+
+        slot2 = _ChatSlot("s2")
+        qid2 = slot2.queue_append("seed", meta={"dirs": ["/d"]})
+        assert (
+            slot2.queue_edit_by_id(qid2, "col1    col2 [attached_dir 1] /d") == "col1    col2"
+        )
+
+    def test_edit_without_meta_leaves_no_meta_key(self):
+        slot = _ChatSlot("s1")
+        qid = slot.queue_append("plain prompt")
+        assert slot.queue_edit_by_id(qid, "edited prompt") == "edited prompt"
+        assert "meta" not in slot._queue[0]
+
+    def test_failed_edit_leaves_meta_intact(self):
+        """A non-matching edit must not strip an untouched item's metadata."""
+        slot = _ChatSlot("s1")
+        slot.queue_append("x", meta={"dirs": ["/a"]})
+        assert slot.queue_edit_by_id("nope", "y") is None
+        assert slot._queue[0]["meta"] == {"dirs": ["/a"]}
 
     def test_edit_by_id_duplicate_content(self):
         """Two items with same content — only the matching ID is edited."""
@@ -108,6 +241,58 @@ def _make_app(state):
 
 
 class TestQueueEditEndpoint:
+    @pytest.mark.asyncio
+    async def test_edit_echoes_stored_text_not_submitted_text(self):
+        """Queue, placeholder, broadcast and response must all agree.
+
+        The strip happens server-side, so echoing the SUBMITTED text left every
+        client rendering an `[attached_dir N]` marker the queued prompt no longer
+        contained — the queue held the stripped text while the UI showed the
+        attachment. All four consumers now use the stored text.
+        """
+        state = _make_state()
+        state.broadcast_ws = MagicMock()
+        slot = state.get_or_create_slot("chat-1")
+        qid = slot.queue_append(
+            "look at [attached_dir 1] /repo/my docs", meta={"dirs": ["/repo/my docs"]}
+        )
+        slot.append("queued", "look at [attached_dir 1] /repo/my docs", json.dumps({"queue_id": qid}))
+
+        with patch("kiro_crew.sel.sel") as mock_sel:
+            mock_sel.return_value = MagicMock()
+            async with TestClient(TestServer(_make_app(state))) as client:
+                resp = await client.patch(
+                    f"/api/chat/slots/chat-1/queue/{qid}",
+                    json={"content": "look at [attached_dir 1] /repo/my docs please"},
+                )
+                assert resp.status == 200
+                data = await resp.json()
+
+        assert "attached_dir" not in data["content"], "response echoed the stripped marker"
+        assert data["content"] == "look at please"
+        assert slot._queue[0]["content"] == "look at please"
+        queued = [m for m in slot.messages if m.get("role") == "queued"]
+        assert queued[0]["content"] == "look at please", "placeholder kept the marker"
+        edits = [c.args[1] for c in state.broadcast_ws.call_args_list if c.args[0] == "queue_edit"]
+        assert len(edits) == 1
+        assert "attached_dir" not in edits[0]["content"], "broadcast kept the marker"
+
+    @pytest.mark.asyncio
+    async def test_attachment_only_edit_returns_400(self):
+        state = _make_state()
+        slot = state.get_or_create_slot("chat-1")
+        qid = slot.queue_append("[attached_dir 1] /d", meta={"dirs": ["/d"]})
+
+        with patch("kiro_crew.sel.sel") as mock_sel:
+            mock_sel.return_value = MagicMock()
+            async with TestClient(TestServer(_make_app(state))) as client:
+                resp = await client.patch(
+                    f"/api/chat/slots/chat-1/queue/{qid}", json={"content": "[attached_dir 1] /d"}
+                )
+                # 400 (bad edit), not 404 (missing item) — the item exists.
+                assert resp.status == 400
+        assert slot._queue[0]["content"] == "[attached_dir 1] /d"
+
     @pytest.mark.asyncio
     async def test_edit_updates_queue_and_messages(self):
         state = _make_state()

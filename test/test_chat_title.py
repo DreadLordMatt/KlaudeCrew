@@ -78,6 +78,7 @@ def test_prompt_strips_non_image_attachment_before_truncation():
     prompt = _build_title_prompt([{"role": "user", "content": f"{attachment}\nreview this config"}])
 
     assert prompt is not None
+    # The basename is substituted but capped, so the caption still survives.
     assert "review this config" in prompt
     assert "attached_file" not in prompt
     assert "/uploads/" not in prompt
@@ -97,7 +98,9 @@ def test_prompt_strips_non_image_attachment_path_with_spaces_from_metadata():
 
     assert prompt is not None
     assert "summarize the findings" in prompt
-    assert "quarterly report final.txt" not in prompt
+    # The basename (with its spaces) is kept; the parent path is not.
+    assert "quarterly report final.txt" in prompt
+    assert "/Users/example/uploads/" not in prompt
 
 
 def test_title_text_bounds_source_scanning():
@@ -125,6 +128,7 @@ def test_prompt_strips_multiple_near_limit_attachments_before_text_cap():
     prompt = _build_title_prompt([{"role": "user", "content": content, "meta": {"files": paths}}])
 
     assert prompt is not None
+    # Each substituted label is capped, so five of them cannot crowd out the text.
     assert "summarize the quarterly findings" in prompt
     assert "attached_file" not in prompt
     assert "/tmp/" not in prompt
@@ -160,8 +164,10 @@ def test_prompt_strips_mixed_attachments_and_keeps_caption():
 
     assert prompt is not None
     assert "compare these outputs" in prompt
+    # Images are still dropped entirely; file attachments keep their basename.
     assert "screenshot.png" not in prompt
-    assert "results.csv" not in prompt
+    assert "results.csv" in prompt
+    assert "/tmp/results.csv" not in prompt
 
 
 def test_prompt_preserves_escaped_and_code_quoted_markdown_images():

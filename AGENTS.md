@@ -638,7 +638,21 @@ Users attach files via `@filename` syntax in chat input. The file picker searche
 - `@relative/path` tokens resolved to full paths
 - Image files rendered inline as markdown `![image](path)`
 - Non-image files sent as `[attached_file N] /full/path`
+- Folder references sent as `[attached_dir N] /full/path`
 - The `[PROJECT]` context entry tells you which directory is active
+
+`[attached_dir N]` is a **path reference, not content**. The directory is not
+listed and nothing under it is inlined — you are given the path and are expected
+to explore it yourself with your own glob/grep/read tools, scoped to what the
+request actually needs.
+
+Do **not** attempt to `read` an `[attached_dir N]` path as a file: it is a
+directory, the read will fail, and that is why folders use their own marker
+instead of reusing `[attached_file N]`.
+
+The two markers number into **separate ordered lists** — `[attached_file 1]` and
+`[attached_dir 1]` refer to different attachments. Resolve each against its own
+family; never assume a shared index.
 
 ## Widget Protocol
 
