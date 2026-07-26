@@ -1033,6 +1033,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   const [dragOver, setDragOver] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [pendingFiles, setPendingFiles] = useState<string[]>([])
+  // Staged folder references, kept separate from pendingFiles because a folder
+  // is a path handed to the agent, never an uploaded attachment. Per-message
+  // only for now: the per-slot draft persistence and prompt-marker
+  // serialization land with the attachment-metadata change.
+  const [pendingDirs, setPendingDirs] = useState<string[]>([])
   const [snipFrame, setSnipFrame] = useState<HTMLCanvasElement | null>(null)
   const pendingFilesRef = useRef(pendingFiles)
   useEffect(() => {
@@ -1997,7 +2002,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
 
     setPrefillHint(false)
     if (!optionText) {
-      setInput(''); setPendingFiles([]); setPasteBlocks([]); if (uiSlot) { delete drafts.current[uiSlot]; delete fileDrafts.current[uiSlot]; delete pasteDrafts.current[uiSlot]; saveDrafts() }
+      setInput(''); setPendingFiles([]); setPendingDirs([]); setPasteBlocks([]); if (uiSlot) { delete drafts.current[uiSlot]; delete fileDrafts.current[uiSlot]; delete pasteDrafts.current[uiSlot]; saveDrafts() }
       // The challenge-handoff prompt is seeded into PREFILL_STORAGE_KEY and the
       // slot-restore effect re-applies it on slot changes. Once that prompt is
       // sent, clear the seed so a later slot-restore can't re-fill the (now
@@ -2656,7 +2661,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     // (appendSlotMessage) instead of rendering a duplicate.
     dispatch(appendMessage({ role: 'user', content: llmTxt, cls: 'msg msg-u', ts: new Date().toISOString(), meta: { steer: true, optimistic: true } }))
     steerMutation.mutate(llmTxt)
-    setInput(''); setPendingFiles([]); setPasteBlocks([])
+    setInput(''); setPendingFiles([]); setPendingDirs([]); setPasteBlocks([])
     delete drafts.current[activeSlot]; delete fileDrafts.current[activeSlot]; delete pasteDrafts.current[activeSlot]
     saveDrafts()
   }, [activeSlot, steerMutation, saveDrafts, dispatch])
@@ -3544,9 +3549,16 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
               onUploadFiles={uploadFiles}
               uploading={uploading}
               pendingFiles={pendingFiles}
+              pendingDirs={pendingDirs}
               resizedInfo={resizedInfo}
               onRemoveFile={p => setPendingFiles(prev => prev.filter(x => x !== p))}
-              onFileSelect={path => setPendingFiles(prev => prev.includes(path) ? prev : [...prev, path])}
+              onRemoveDir={p => setPendingDirs(prev => prev.filter(x => x !== p))}
+              // A folder is a path reference, not an upload — it must never land
+              // in pendingFiles, where the send path would treat it as an
+              // attachable file and try to read it.
+              onFileSelect={(path, kind) => kind === 'dir'
+                ? setPendingDirs(prev => prev.includes(path) ? prev : [...prev, path])
+                : setPendingFiles(prev => prev.includes(path) ? prev : [...prev, path])}
               onFileOpen={handleFileOpen}
               project={currentSlot?.project || ''}
               isMac={isMac}
