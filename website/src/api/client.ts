@@ -1105,7 +1105,9 @@ export const api = {
   cancelUpdate: () => post('/api/update/cancel').then(j),
   simulateUpdate: (opts?: { delay?: number; fail_at?: string }) => post('/api/update/simulate', opts || {}).then(j),
   pickFiles: () => post('/api/upload').then(j) as Promise<{ paths: string[] }>,
-  fileDiff: (path: string) => fetch('/api/file-diff?path=' + encodeURIComponent(path)).then(j) as Promise<{ diff: string; original: string; status?: 'clean' | 'modified' | 'untracked' | 'not_git' }>,
+  fileDiff: (path: string, opts?: { lexical?: boolean }) => fetch('/api/file-diff?path=' + encodeURIComponent(path) + (opts?.lexical ? '&lexical=1' : '')).then(j) as Promise<{ diff: string; original: string; status?: 'clean' | 'modified' | 'untracked' | 'deleted' | 'not_git' | 'filters_unsafe'; error?: string; truncated?: boolean; original_truncated?: boolean; diff_truncated?: boolean; diff_unavailable?: boolean; diff_basis?: 'staged' }>,
+  /** Working-tree changes for the git repo at a directory (Changes → Local tab). */
+  gitChanges: (dir: string) => fetch('/api/git-changes?dir=' + encodeURIComponent(dir)).then(j) as Promise<{ dir: string; truncated?: boolean; filters_unsafe?: string; repo: { root: string; name: string; branch: string; files: Array<{ path: string; rel: string; status: string; staged: boolean; additions?: number; deletions?: number; kind?: string }>; truncated?: boolean } | null }>,
   /** Fuzzy file search for @-mention picker */
   fileSearch: (q: string, project?: string, signal?: AbortSignal) => {
     const p = new URLSearchParams({ q })

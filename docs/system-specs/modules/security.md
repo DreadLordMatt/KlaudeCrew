@@ -920,6 +920,140 @@ When writing new code, these rules MUST be followed:
 4. **Sanitize all external content** — use `md()`, `sanitize()`, or `esc()` from `helpers.ts`
 5. **No inline event handlers in HTML strings** — use React event props
 
+### Git Working-Tree Read Hardening (`dashboard/handlers/git_changes.py`)
+
+`GET /api/git-changes` and `GET /api/file-diff` render VISUAL-ONLY information
+about a repository the dashboard user points a chat at, but they are POLLED
+and spawn `git` unsandboxed as the gateway user — and a checkout's `.git`
+directory can bind arbitrary commands to content reads (clean/smudge/process
+filters, `textconv`, `fsmonitor`, external diff drivers via `.git/config`,
+re-bindable through `info/attributes` after any pre-check). Repository
+contents are therefore treated as HOSTILE. The defenses, and what each blocks:
+
+1. **Isolated synthetic `GIT_DIR`** (`_isolate_repo_git_metadata`): every
+   content-reading git invocation runs against a private temp `GIT_DIR`
+   holding only minimal non-executable config and a detached HEAD, with the
+   real object database attached read-only via
+   `GIT_ALTERNATE_OBJECT_DIRECTORIES` and the real index as
+   `GIT_INDEX_FILE`. The repo's own config, hooks, and `info/attributes` are
+   ABSENT by construction — closing filter/textconv/fsmonitor execution and
+   the config/attributes TOCTOU race structurally, not by (raceable)
+   inspection. The empty tree is written into the PRIVATE object dir and set
+   as `GIT_ATTR_SOURCE` so worktree `.gitattributes` is never consulted.
+2. **Fail-closed attribute pre-check** (`_repo_attrs_unsafe`): refuses repos
+   whose git dir resolves into a sensitive location, or whose `info/attributes`
+   is any non-empty/non-regular entry (`lstat` — a FIFO reports size 0 while
+   streaming attacker attributes). Refusals surface as `filters_unsafe` and are
+   SEL-audited as `denied`.
+
+   **A missing `GIT_ATTR_SOURCE` is deliberately NOT a refusal.** Executing a
+   driver requires BOTH an attribute binding a path to a driver name (worktree
+   `.gitattributes`) AND a config entry defining what that name runs
+   (`filter.<name>.clean`, `diff.<name>.textconv`); an attribute naming an
+   undefined driver resolves to nothing. `GIT_ATTR_SOURCE` removes the
+   attribute half and exists only on git >= 2.41, while the synthetic `GIT_DIR`
+   (item 1) removes the **config** half on every git version. Gating whole-repo
+   scans on the redundant half made the Local tab permanently unusable on stock
+   git 2.34 (Ubuntu 22.04), 2.39 (Debian 12) and Apple git 2.39. The variable
+   is still SET whenever git supports it. Residual without it is output
+   DISTORTION (a `-diff` attribute can suppress a patch body), not execution —
+   acceptable for a read-only panel. Pinned by
+   `test_repo_filter_never_executes_without_attr_source` (canary with both
+   halves present and the variable absent) and
+   `test_scan_works_without_attr_source`.
+3. **Pinned + non-writable git executable** (`_GIT_EXE`, `_assert_git_outside`,
+   `_assert_git_not_writable`): blocks post-startup PATH poisoning, refuses to
+   scan a repository that contains the resolved executable, AND refuses an
+   executable (or its directory) writable by the gateway user — pinning a
+   *path* is not pinning *code*, since a same-uid agent can replace a
+   user-owned binary in place. Re-validated per call, so a later permission
+   change is caught on the next poll. The containment verdict fires on the
+   FIRST spawn's result in both handlers (`_resolve_repo_root` for the scan;
+   the `--show-toplevel` membership probe for file-diff), so no further probe
+   can run a git the repository supplies; every refusal surfaces as
+   `filters_unsafe` with its reason (a `PermissionError` is re-raised ahead of
+   the degrade-to-"no repo" arm so a hostile setup never reads as a clean
+   absence of any repository).
+4. **Allowlisted minimal env** (`_hardened_git_env`, `_GIT_SAFE_ENV_KEYS`):
+   only PATH/locale/temp vars are inherited (no gateway credentials, no
+   `GIT_CONFIG_*`/`GIT_DIR` overrides); sets `GIT_CONFIG_NOSYSTEM=1`,
+   `GIT_CONFIG_GLOBAL=devnull`, `GIT_ATTR_NOSYSTEM=1`,
+   `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`.
+5. **Sensitive-path exclusion, twice**: `_sensitive_git_pathspecs` excludes
+   every `_SENSITIVE_HOME_DIRS` expansion AND the active data home
+   (`config_dir()` — covers a custom `KIROCREW_HOME` inside the repo, whose
+   security-policy/token keystone files would otherwise be read by
+   `--numstat`) via top-anchored pathspecs BEFORE git reads content; each
+   emitted row is additionally re-checked with
+   `is_sensitive_path(realpath(...))`.
+6. **Hard-link defense**: Python-side worktree content reads (untracked /
+   replacement synthesis) use `safe_read_file_bytes_nolink` — the
+   descriptor-pinned read rejects multi-link inodes, so
+   `ln ~/.ssh/id_rsa repo/innocent.txt` (whose realpath IS the benign project
+   path) is refused instead of served as an all-added patch.
+7. **Bounded everything**: byte-capped subprocess stdout via a Popen reader
+   thread (`_run_git_capped_bytes` — `subprocess.run` would buffer a multi-GB
+   file in full), 2MB output caps, 500-file cap, a 10s aggregate scan
+   deadline that clips EVERY subprocess timeout (`asyncio.to_thread` work is
+   not cancelled with the HTTP request), and all filesystem work — validation
+   included — off the event loop.
+8. **Honest degradation**: every failure/cap surfaces as `truncated` /
+   `diff_unavailable` / `filters_unsafe` rather than presenting a partial
+   scan as clean; deadline expiry during repo resolution reports `truncated`,
+   never "no repository". This includes a capped or failed `--numstat` (rows
+   would otherwise silently lose their +/- totals while the response claimed a
+   complete scan) and an index-only change whose patch has no two-way basis
+   (`diff_basis: "staged"`; non-Local consumers treat it as unavailable rather
+   than diffing it against a base the editor buffer does not match). Malformed
+   paths (embedded NUL) return **400**, not 500, and exactly ONE SEL outcome is
+   emitted per request — a refusal audits `denied` and nothing else, never
+   `allowed` followed by `denied`.
+9. **Submodules are never entered** (`--ignore-submodules=dirty` on both the
+   status and numstat probes): a submodule is a SEPARATE repository with its
+   own config, which the synthetic `GIT_DIR` does not cover — inspecting its
+   dirty content would run the CHILD's clean/process filters. `dirty` still
+   reports the gitlink when the recorded commit differs (the `kind:'dir'` row)
+   while never diffing content inside the child.
+10. **The transitive alternates chain is verified before attachment**
+   (`_alternate_object_dirs`): git follows `objects/info/alternates`
+   RECURSIVELY, so attaching a repository's object dir also attaches whatever
+   that file points at — a hostile repo can aim the chain at a protected
+   object store and have `git show` serve its blobs. The whole chain is
+   enumerated (bounded depth / entries / bytes, cycle-guarded) and every hop
+   checked with `is_sensitive_path`; an unverifiable chain fails closed.
+11. **Directory requests are refused** (`api_file_diff`): a plain directory
+   would make `git diff -- <dir>` RECURSE and emit a patch for every tracked
+   descendant — content the caller never named and that never passed per-path
+   validation. Only a gitlink (submodule mount point, `_is_gitlink_dir`) is
+   allowed through, since its diff is a one-line commit-pointer change and
+   `--ignore-submodules=dirty` keeps git out of the child. NOTE: the original
+   handler's `os.path.isfile()` gate did this implicitly; it was replaced by
+   `lexists` to support deleted paths, which is what reopened the case.
+12. **Hard links are refused on the TRACKED path too**: the Python-side reads
+   in item 6 cover untracked/replacement content, but a tracked file is diffed
+   by `git diff -- <path>`, which reopens BY NAME. A multi-link regular file is
+   therefore refused outright (`_is_multilink_regular`) — a hard link has no
+   target to resolve, so `realpath` and the sensitive-path gate both see only
+   the benign project path. Affected rows carry `kind:'hardlink'` so the UI
+   offers no action that could only refuse. Excluded paths also mark the scan
+   `truncated`: their content is never read, so the scan cannot know whether
+   they changed, and an otherwise-empty result must not read as a clean tree.
+   Synthetic rows were rejected as the alternative — most tracked files are
+   unmodified, so a row per hard link would invent changes.
+13. **The `check-attr` safety probe is capped** (64KB, fails closed on
+   truncation): its output echoes REPOSITORY-CONTROLLED attribute values, so it
+   is attacker-sized; a clipped answer cannot prove a path is filter-free. The
+   synthetic config also preserves only git's own normalized `--type=bool`
+   values for `core.fileMode`/`core.symlinks` (`_repo_bool`), so a repo with
+   `fileMode=false` reports no phantom modifications and a hostile value cannot
+   inject config syntax.
+
+All spawns are fixed hardened argv (no `shell=True`) with cwd gated by
+`hooks.validate_file_path`; they are allowlisted in `test_spawn_audit.py`
+under `dashboard/handlers/git_changes.py::*`. Regression tests
+(`test_api_git_changes.py`, `test_api_file_diff.py`) include a canary proving
+a repo-bound clean filter never executes during scans or diffs.
+
 ### Binary File Handling (`security.py`, `handlers/files.py`, `mcp_core.py`)
 
 The `file_send` MCP tool and outbox handlers support binary media files with a deny-by-default MIME allowlist.

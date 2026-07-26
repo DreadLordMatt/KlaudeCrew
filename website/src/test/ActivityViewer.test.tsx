@@ -54,9 +54,12 @@ vi.mock('../components/MarkdownPanel', async () => {
   }
 })
 
+import { api } from '../api/client'
 import ActivityViewer from '../pages/chat/ActivityViewer'
 import { api } from '../api/client'
 import { __resetPanelTabs } from '../hooks/usePanelTabs'
+
+const mockFileDiff = vi.mocked(api.fileDiff)
 
 function wrapper({ children }: { children: React.ReactNode }) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -84,6 +87,28 @@ describe('ActivityViewer', () => {
   // Also reset the module-level panel-tab store (which holds inline-preview
   // drafts) so a draft from one test can't leak into the next.
   beforeEach(() => { localStorage.clear(); __resetPanelTabs() })
+
+  it('does not calculate complete-looking totals from a truncated patch', async () => {
+    mockFileDiff.mockResolvedValueOnce({
+      diff: '--- a/a.ts\n+++ b/a.ts\n@@ -1 +1,2 @@\n-old\n+visible one\n+visible two\n',
+      original: 'old\n',
+      status: 'modified',
+      truncated: true,
+      diff_truncated: true,
+    })
+    render(
+      <ActivityViewer
+        {...baseProps}
+        view="files"
+        files={[{ path: '/proj/truncated.ts', source: 'tool' }]}
+      />,
+      { wrapper },
+    )
+    const partial = await screen.findByText('partial')
+    expect(partial).toHaveAttribute('title', expect.stringContaining('totals unavailable'))
+    expect(screen.queryByText('+2')).not.toBeInTheDocument()
+    expect(screen.queryByText('-1')).not.toBeInTheDocument()
+  })
 
   it('renders each detected PR as a source selector in the Changes view', () => {
     render(

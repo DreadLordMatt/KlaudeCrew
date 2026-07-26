@@ -447,7 +447,7 @@ function FileTile({ f, onFileOpen, onFileRemove }: { f: TouchedFile; onFileOpen?
     queryFn: () => api.fileDiff(f.path),
     placeholderData: (prev) => prev,
   })
-  const stats = data?.diff ? countDiffStats(data.diff) : null
+  const stats = data?.diff && !data.diff_truncated ? countDiffStats(data.diff) : null
   return (
     <div
       className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border bg-bg-elevated text-[12px] cursor-pointer hover:bg-bg-hover hover:border-border-strong transition-all max-w-full"
@@ -471,6 +471,11 @@ function FileTile({ f, onFileOpen, onFileRemove }: { f: TouchedFile; onFileOpen?
         )}
       </span>
       <span className="truncate text-text max-w-[140px]">{name}</span>
+      {data?.diff_truncated && (
+        <span className="text-[10px] font-mono text-warn shrink-0 ml-0.5" title="Line totals unavailable because the diff was truncated">
+          partial
+        </span>
+      )}
       {stats && (stats.added > 0 || stats.removed > 0) && (
         <span className="flex items-center gap-1 text-[10px] font-mono shrink-0 ml-0.5">
           {stats.added > 0 && <span className="text-ok">+{stats.added}</span>}
@@ -618,7 +623,7 @@ function SessionArtifactsTab({ slot, onFileOpen }: { slot: string; onFileOpen?: 
   )
 }
 
-export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, files, onFileOpen, onFileRemove, navLinks, navResolving, view, sources, selectedSourceUrl, onSelectSource, onAddToChat, onFileSave, onSubmitComments, openDocPaths, previewPath, onPreviewPathChange }: {
+export default function ActivityViewer({ subagents, toolLog, open, onToggle, slot, files, onFileOpen, onFileRemove, navLinks, navResolving, view, sources, projectDir, selectedSourceUrl, onSelectSource, onAddToChat, onFileSave, onSubmitComments, openDocPaths, previewPath, onPreviewPathChange }: {
   subagents: Record<string, SubagentActivity>; toolLog: ToolActivity[]; open: boolean; onToggle: () => void; slot: string
   files?: TouchedFile[]; onFileOpen?: (path: string) => void; onFileRemove?: (path: string) => void; onFilesClear?: (source: 'history' | 'tool') => void
   projectDir?: string
@@ -663,7 +668,6 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
   previewOpenRef.current = previewPathValue != null
   const reduxTab = useAppSelector(s => s.chat.activityTab)
   const [tab, setTab] = useState<'changes' | 'subagents' | 'workflows' | 'logs' | 'files' | 'side' | 'artifacts'>(reduxTab === ('nav' as string) ? 'files' : reduxTab)
-  const hasSources = (sources?.length || 0) > 0
   const explicitTab = useRef(false)
   const containerRef = useRef<HTMLDivElement>(null)
   // Exception-first ordering: agents needing attention (failed, stalled,
@@ -767,10 +771,12 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
   // When a `view` prop is supplied, SidePanel owns the tab strip — render only
   // that view and skip the internal SegmentedControl.
   const requestedTab = view ?? tab
-  const effectiveTab = requestedTab === 'changes' && !hasSources ? 'files' : requestedTab
+  // The Changes tab is ever-present: even with no PR sources it hosts the
+  // Local working-tree view (scoped by the chat's project directory).
+  const effectiveTab = requestedTab
 
   const TABS: { key: typeof tab; label: string; icon: ReactNode; count?: number }[] = [
-    ...(hasSources ? [{ key: 'changes' as const, label: 'Changes', icon: <GitPullRequest size={13} />, count: sources!.length }] : []),
+    { key: 'changes' as const, label: 'Changes', icon: <GitPullRequest size={13} />, count: sources?.length || 0 },
     { key: 'files', label: 'Files', icon: <FileText size={13} />, count: files?.length || 0 },
     { key: 'artifacts', label: 'Artifacts', icon: <Component size={13} /> },
     { key: 'subagents', label: 'Subagents', icon: <Bot size={13} />, count: ids.length + visibleLog.filter(isSpawnApproval).length },
@@ -797,14 +803,16 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
         </div>
       )}
 
-      {/* Changes (pull request sources) view */}
-      {effectiveTab === 'changes' && hasSources && (
+      {/* Changes view: ever-present Local worktree tab + pull request sources */}
+      {effectiveTab === 'changes' && (
         <div className="flex-1 min-h-0 overflow-hidden">
           <PullRequestPanel
-            sources={sources!}
+            sources={sources || []}
             selectedUrl={selectedSourceUrl || ''}
             onSelect={onSelectSource || (() => {})}
             onAddToChat={onAddToChat || (() => {})}
+            projectDir={projectDir}
+            onFileOpen={onFileOpen}
           />
         </div>
       )}

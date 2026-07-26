@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseUnifiedDiff } from '../utils/parseUnifiedDiff'
+import { parseUnifiedDiff, parseUnifiedDiffCapped } from '../utils/parseUnifiedDiff'
 
 describe('parseUnifiedDiff', () => {
   it('numbers add, del, and context rows from the hunk header', () => {
@@ -29,5 +29,31 @@ describe('parseUnifiedDiff', () => {
 
   it('returns no rows for an empty patch', () => {
     expect(parseUnifiedDiff('')).toEqual([])
+  })
+
+  it('preserves a genuine trailing blank context line', () => {
+    const rows = parseUnifiedDiff('@@ -1,2 +1,2 @@\n-old\n+new\n \n')
+    expect(rows[rows.length - 1]).toEqual({ kind: 'context', oldLine: 2, newLine: 2, text: '' })
+  })
+})
+
+describe('parseUnifiedDiffCapped', () => {
+  const bigPatch = '@@ -0,0 +1,50 @@\n' + Array.from({ length: 50 }, (_, i) => `+l${i}`).join('\n')
+
+  it('caps rows and reports truncation', () => {
+    const { rows, truncated } = parseUnifiedDiffCapped(bigPatch, 10)
+    expect(rows).toHaveLength(10)
+    expect(truncated).toBe(true)
+  })
+
+  it('does not report truncation for an exactly-cap-sized patch', () => {
+    const { rows, truncated } = parseUnifiedDiffCapped(bigPatch, 50)
+    expect(rows).toHaveLength(50)
+    expect(truncated).toBe(false)
+  })
+
+  it('matches the uncapped parse for small patches', () => {
+    const patch = '@@ -1,2 +1,2 @@\n context\n-old\n+new\n'
+    expect(parseUnifiedDiffCapped(patch, 100)).toEqual({ rows: parseUnifiedDiff(patch), truncated: false })
   })
 })

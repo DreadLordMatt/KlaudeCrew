@@ -113,6 +113,7 @@ import { loadFileDrafts, saveFileDrafts as persistFileDrafts, setFileDraft } fro
 import { loadPasteDrafts, savePasteDrafts as persistPasteDrafts, setPasteDraft } from '../utils/chatPasteDrafts'
 import { findPrevUserMsgDisplayIdx } from '../utils/findPrevUserMsgDisplayIdx'
 import {
+  LOCAL_CHANGES_SOURCE_URL,
   loadSeenPullRequestLinks,
   persistSeenPullRequestLinks,
   PullRequestLinkIndex,
@@ -1277,6 +1278,14 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   )
   const [selectedSourceUrl, setSelectedSourceUrl] = useState('')
 
+  // Source selection is component-wide state: without a reset, the Local
+  // sentinel (or a stale PR url) selected in one chat would carry into the
+  // next slot and suppress its own reconciliation-to-first-source below.
+  // In-memory only — selection is deliberately never persisted.
+  useEffect(() => {
+    setSelectedSourceUrl('')
+  }, [activeSlot])
+
   // Add and focus the per-slot Changes tab for newly detected source URLs,
   // but leave panel visibility under explicit user control.
   const [seenSourceUrls] = useState(loadSeenPullRequestLinks)
@@ -1301,7 +1310,10 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
       setSelectedSourceUrl('')
       return
     }
-    if (!sourceLinks.some(source => source.url === selectedSourceUrl)) {
+    if (
+      selectedSourceUrl !== LOCAL_CHANGES_SOURCE_URL
+      && !sourceLinks.some(source => source.url === selectedSourceUrl)
+    ) {
       setSelectedSourceUrl(sourceLinks[0].url)
     }
     // React to indexed sources, selection, and hydration completion only;

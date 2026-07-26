@@ -178,10 +178,35 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "dashboard/handlers/core.py::_stt_prereq_commands",
         "dashboard/handlers/core.py::_unusable",
         "dashboard/handlers/core.py::api_stt_install",
-        "dashboard/handlers/files.py::_run",
         "dashboard/handlers/files.py::api_reveal_path",
         "dashboard/handlers/files.py::api_screenshot",
         "dashboard/handlers/files.py::api_upload",
+        # Git working-tree read endpoints (handlers/git_changes.py — the
+        # Changes panel's Local tab + /api/file-diff): every spawn is a fixed
+        # hardened git argv (module-pinned absolute executable, no shell=True)
+        # whose cwd is the DASHBOARD USER's project directory, gated by
+        # hooks.validate_file_path / is_sensitive_path — not agent input.
+        # _run_git_capped_bytes exists precisely to BOUND these spawns
+        # (byte-capped stdout via Popen + reader thread); the other helpers run
+        # constant rev-parse/hash-object/check-attr/--version probes that build
+        # and then VERIFY the attribute-isolation hardening which stops a
+        # repository's config/attributes from binding clean/process filters to
+        # content reads (check-attr RESOLVES attributes, never runs a driver).
+        # _isolate_repo_git_metadata writes solely to its owner-only temporary
+        # GIT_DIR. `_run` is the nested worker of both endpoint handlers
+        # (subprocess.run of the same fixed argv set under the isolated env).
+        # NOT sandbox-routed: these read the operator's own working tree as
+        # the gateway user by design; isolation comes from the synthetic
+        # GIT_DIR + allowlisted env, not the agent sandbox.
+        "dashboard/handlers/git_changes.py::_empty_tree_hash",
+        "dashboard/handlers/git_changes.py::_git_diff_base",
+        "dashboard/handlers/git_changes.py::_git_dirs",
+        "dashboard/handlers/git_changes.py::_git_path_abs",
+        "dashboard/handlers/git_changes.py::_git_supports_attr_source",
+        "dashboard/handlers/git_changes.py::_isolate_repo_git_metadata",
+        "dashboard/handlers/git_changes.py::_resolve_repo_root",
+        "dashboard/handlers/git_changes.py::_run",
+        "dashboard/handlers/git_changes.py::_run_git_capped_bytes",
         "dashboard/handlers/knowledge.py::_run_folder_dialog",
         # Terminal live-cwd probe on hosts without /proc (macOS/BSD): fixed
         # `lsof -a -p <pid> -d cwd -Fn` list-argv (no shell=True) where <pid>

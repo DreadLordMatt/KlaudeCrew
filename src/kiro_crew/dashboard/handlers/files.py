@@ -10,7 +10,6 @@ import logging
 import mimetypes
 import os
 import re
-import subprocess
 import sys
 import time
 import urllib.parse
@@ -1986,72 +1985,6 @@ async def api_file_search(request: web.Request) -> web.Response:
         "results": trimmed,
         "root": safe_roots[0] if scoped and safe_roots else "",
     })
-
-
-async def api_file_diff(request: web.Request) -> web.Response:
-    """GET /api/file-diff?path=... — returns git diff and HEAD content for a file."""
-    raw_path = request.query.get("path", "").strip()
-    if not raw_path:
-        _sel().log_api_access(caller=request.get("user", "dashboard"), operation="file_diff", outcome="allowed", resources="empty_path")
-        return web.json_response({"diff": "", "original": ""})
-    raw_path = os.path.realpath(os.path.expanduser(raw_path))
-    if not os.path.isfile(raw_path):
-        _sel().log_api_access(caller=request.get("user", "dashboard"), operation="file_diff", outcome="allowed", resources=f"path={raw_path}", error="not_found")
-        return web.json_response({"diff": "", "original": ""})
-    if is_sensitive_path(raw_path):
-        _sel().log_api_access(caller=request.get("user", "dashboard"), operation="file_diff", outcome="denied", resources=raw_path, error="sensitive path")
-        return web.json_response({"error": "Access denied"}, status=403)
-
-    dirpath = os.path.dirname(raw_path)
-
-    def _run() -> dict:
-        # Disable textconv/filter drivers and fsmonitor to prevent code execution
-        # via .gitattributes or .git/config in untrusted repos.
-        _git = ["git", "-c", "diff.textconv=", "-c", "core.attributesFile=/dev/null", "-c", "core.fsmonitor="]
-        _env = {**os.environ, "GIT_ATTR_NOSYSTEM": "1"}
-        try:
-            subprocess.run(
-                [*_git, "rev-parse", "--git-dir"],
-                cwd=dirpath, capture_output=True, timeout=5, check=True, env=_env,
-            )
-            # Get HEAD content
-            root = subprocess.run(
-                [*_git, "rev-parse", "--show-toplevel"],
-                cwd=dirpath, capture_output=True, text=True, timeout=5, env=_env,
-            ).stdout.strip()
-            rel = os.path.relpath(raw_path, root)
-            head = subprocess.run(
-                [*_git, "show", "--no-textconv", f"HEAD:{rel}"],
-                cwd=dirpath, capture_output=True, text=True, timeout=10, env=_env,
-            )
-            original = head.stdout if head.returncode == 0 else ""
-            # Get diff
-            r = subprocess.run(
-                [*_git, "diff", "--no-textconv", "--no-ext-diff", "HEAD", "--", raw_path],
-                cwd=dirpath, capture_output=True, text=True, timeout=10, env=_env,
-            )
-            diff = r.stdout.strip() if r.returncode == 0 else ""
-            if not diff:
-                # Check for untracked file
-                r2 = subprocess.run(
-                    [*_git, "status", "--porcelain", "--", raw_path],
-                    cwd=dirpath, capture_output=True, text=True, timeout=5, env=_env,
-                )
-                if r2.returncode == 0 and r2.stdout.strip().startswith("??"):
-                    r3 = subprocess.run(
-                        [*_git, "diff", "--no-textconv", "--no-ext-diff", "--no-index", "/dev/null", raw_path],
-                        cwd=dirpath, capture_output=True, text=True, timeout=10, env=_env,
-                    )
-                    diff = r3.stdout if r3.stdout else ""
-                    return {"diff": diff, "original": "", "status": "untracked"}
-            status = "modified" if diff else "clean"
-            return {"diff": diff, "original": original, "status": status}
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, UnicodeDecodeError):
-            return {"diff": "", "original": "", "status": "not_git"}
-
-    result = await asyncio.to_thread(_run)
-    _sel().log_api_access(caller=request.get("user", "dashboard"), operation="file_diff", outcome="allowed", resources=f"path={raw_path}")
-    return web.json_response(result)
 
 
 async def api_browse_dirs(request: web.Request) -> web.Response:

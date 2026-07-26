@@ -637,7 +637,12 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
     return !['image', 'svg', 'csv', 'json', 'jsonl', 'html', 'pdf'].includes(detectFileType(filePath))
   })
   const [diffMode, setDiffMode] = useState(initialDiffMode ?? false)
+  // Set from `diffData` further down (declared here because the toggle below
+  // is memoized before the query result exists). A truncated original cannot
+  // be diffed at all — see `diffUnavailable`.
+  const diffUnavailableRef = useRef(false)
   const toggleDiffMode = useCallback(() => {
+    if (diffUnavailableRef.current) return
     const next = !diffMode
     setDiffMode(next)
     onDiffModeChange?.(next)
@@ -647,7 +652,6 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
   const [diffSplit, setDiffSplit] = usePersistedBool('mc-diff-split', true)
   const [monacoSelection, setMonacoSelection] = useState<{ text: string; x: number; y: number } | null>(null)
   const diffActiveRef = useRef(false)
-  diffActiveRef.current = diffMode && editing
   const diffInitFileRef = useRef<string | null>(null)
   const dark = useIsDark()
   const [saving, setSaving] = useState(false)
@@ -860,25 +864,10 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
   }, [])
 
   // Leaving preview (edit/diff) has no rendered DOM to search — close find so
-  // Monaco's own find takes over cleanly.
-  useEffect(() => { if (editing || diffMode) closeFind() }, [editing, diffMode, closeFind])
-
-  // Capture-phase Cmd+F: fires before ChatPage's bubble-phase chat-find. We
-  // only steal the key in markdown preview when this panel is the active
-  // region; otherwise we let it bubble (chat-find) or let Monaco handle it.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'f') return
-      if (editing || diffMode || !isMarkdown) return       // Monaco/edit owns it; non-markdown skip
-      if (!findActiveRef.current) return                    // cursor is in chat → let chat-find handle
-      e.preventDefault()
-      e.stopImmediatePropagation()                          // beat ChatPage's bubble-phase chat-find
-      setFindOpen(true)
-      requestAnimationFrame(() => { findInputRef.current?.focus(); findInputRef.current?.select() })
-    }
-    document.addEventListener('keydown', onKey, true)
-    return () => document.removeEventListener('keydown', onKey, true)
-  }, [editing, diffMode, isMarkdown])
+  // Monaco's own find takes over cleanly — see the find effects below,
+  // which are declared after `effectiveDiffMode` so they gate on the mode
+  // actually RENDERING (a failed diff fetch renders preview, where panel
+  // find must stay live) rather than on the raw `diffMode` preference.
 
   const findBar = findOpen ? (
     <div data-mc-mdpanel className="absolute top-2 right-3 z-30 flex items-center gap-1.5 bg-bg-elevated border border-border rounded-lg shadow-md px-2.5 py-1.5 text-[13px]">
@@ -918,13 +907,80 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
   )
 
   // Detect if file has uncommitted changes and pre-fetch HEAD content
-  const { data: diffData, isFetching: diffChecking } = useQuery({
+  const { data: diffData, isFetching: diffChecking, isError: diffError } = useQuery({
     queryKey: ['file-diff', filePath],
     queryFn: () => api.fileDiff(filePath),
     enabled: !!filePath && !isRichType,
     staleTime: 10_000,
   })
-  const originalContent = diffData?.original ?? ''
+  // A truncated original (HEAD content beyond the endpoint's byte cap) must
+  // not feed the Monaco diff — the missing tail would render as newly added.
+  // Blanking it is not enough: an empty original diffed against the current
+  // file presents EVERY line as added, so diff mode is made unavailable
+  // outright (toggle inert + already-on state reset) rather than merely
+  // skipped by the auto-open below. `filters_unsafe` is the same situation for
+  // a different reason: the endpoint REFUSED to read the base, so there is no
+  // original at all. An explicit diff_unavailable result likewise means the
+  // backend could not read both replacement sides completely.
+  const diffRefused = diffData?.status === 'filters_unsafe'
+  const diffIncomplete = !!diffData?.diff_unavailable
+  // Server-CONFIRMED unavailability: the response itself says the base cannot
+  // be used. Kept separate from `diffUnavailable` because a transient fetch
+  // error must gate RENDERING without clearing the user's stored preference —
+  // and a retained `diffData` alongside a failed background refetch would
+  // otherwise satisfy the reset guard below and permanently flip the tab.
+  // `not_git` means the endpoint found no repository for this path, so there is
+  // no baseline at all — diffing the editor buffer against '' would render the
+  // whole file as newly added.
+  const diffNoBaseline = diffData?.status === 'not_git'
+  const diffServerUnavailable =
+    !!diffData?.original_truncated || diffRefused || diffIncomplete || diffNoBaseline
+  const diffUnavailable = diffServerUnavailable || diffError
+  const effectiveDiffMode = diffMode && !diffUnavailable
+  diffActiveRef.current = effectiveDiffMode && editing
+  // Shown on the disabled toggles: prefer the backend's own reason so the user
+  // is not left guessing why diff is greyed out.
+  const diffUnavailableTitle = diffData?.error
+    ? `Diff unavailable — ${diffData.error}`
+    : diffNoBaseline
+      ? 'Diff unavailable — this file is not in a git repository'
+      : diffError
+        ? "Diff unavailable — the file's git baseline could not be loaded"
+        : 'Diff unavailable — the original is too large to load in full'
+  diffUnavailableRef.current = diffUnavailable
+
+  // Close the find bar when Monaco owns the surface (edit or an ACTIVE diff).
+  useEffect(() => { if (editing || effectiveDiffMode) closeFind() }, [editing, effectiveDiffMode, closeFind])
+
+  // Capture-phase Cmd+F: fires before ChatPage's bubble-phase chat-find. We
+  // only steal the key in markdown preview when this panel is the active
+  // region; otherwise we let it bubble (chat-find) or let Monaco handle it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'f') return
+      // effectiveDiffMode, not diffMode: when a diff fetch fails the panel
+      // renders PREVIEW, and gating on the raw preference left Cmd+F inert.
+      if (editing || effectiveDiffMode || !isMarkdown) return
+      if (!findActiveRef.current) return                    // cursor is in chat → let chat-find handle
+      e.preventDefault()
+      e.stopImmediatePropagation()                          // beat ChatPage's bubble-phase chat-find
+      setFindOpen(true)
+      requestAnimationFrame(() => { findInputRef.current?.focus(); findInputRef.current?.select() })
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
+  }, [editing, effectiveDiffMode, isMarkdown])
+  const originalContent = (diffUnavailable ? '' : diffData?.original) ?? ''
+  useEffect(() => {
+    // Persist the reset ONLY on server-confirmed unavailability. A transient
+    // fetch error already gates rendering via effectiveDiffMode; clearing the
+    // stored preference for it would let one flaky request (even a failed
+    // BACKGROUND refetch that left stale data in place) permanently flip a
+    // restored tab out of diff mode.
+    if (!diffServerUnavailable || !diffMode) return
+    setDiffMode(false)
+    onDiffModeChange?.(false)
+  }, [diffServerUnavailable, diffMode, onDiffModeChange])
   // Auto-open diff mode once for a genuine edit unless this file tab already
   // carries an explicit choice. File-tab metadata survives ChatPage unmounts,
   // so returning to a session restores preview/source instead of re-enabling
@@ -932,15 +988,18 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
   useEffect(() => {
     if (!diffData || diffInitFileRef.current === filePath) return
     diffInitFileRef.current = filePath
+    // A restored tab can carry initialDiffMode=true; honoring it here would
+    // overwrite the reset above and diff against a base we do not have.
+    if (diffUnavailable) return
     if (initialDiffMode !== undefined) {
       setDiffMode(initialDiffMode)
       return
     }
-    if (diffData.diff && diffData.status === 'modified') {
+    if (diffData.diff && diffData.status === 'modified' && !diffData.original_truncated) {
       setDiffMode(true)
       onDiffModeChange?.(true)
     }
-  }, [diffData, filePath, initialDiffMode, onDiffModeChange])
+  }, [diffData, filePath, initialDiffMode, onDiffModeChange, diffUnavailable])
 
   const revealOrCopy = useCallback(async (path: string, action: 'open' | 'reveal') => {
     try {
@@ -1293,7 +1352,7 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
 
   const editorToolbarButtons = (<>
     {!isRichType && (
-      <button className={`p-1.5 rounded-md border cursor-pointer ${diffMode ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={toggleDiffMode} title="Toggle diff view" aria-label="Toggle diff view"><FileDiff size={14} /></button>
+      <button className={`p-1.5 rounded-md border ${diffUnavailable ? 'border-border text-muted opacity-50 cursor-not-allowed' : 'cursor-pointer'} ${effectiveDiffMode ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={toggleDiffMode} disabled={diffUnavailable} title={diffUnavailable ? diffUnavailableTitle : 'Toggle diff view'} aria-label="Toggle diff view"><FileDiff size={14} /></button>
     )}
     {!isRichType && editing && (
       <button className={`p-1.5 rounded-md border cursor-pointer transition-all ${wordWrap ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={() => setWordWrap(!wordWrap)} title="Toggle word wrap" aria-label="Toggle word wrap"><WrapText size={14} /></button>
@@ -1353,7 +1412,7 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
               ))}
             </span>
             {dirty && <span className="text-warn text-[15px] leading-none shrink-0" title="Unsaved changes">●</span>}
-            {diffMode && (diffStats.added > 0 || diffStats.removed > 0) && (
+            {effectiveDiffMode && (diffStats.added > 0 || diffStats.removed > 0) && (
               <span className="text-[11px] font-mono font-semibold shrink-0">
                 {diffStats.added > 0 && <span className="text-ok">+{diffStats.added}</span>}
                 {diffStats.removed > 0 && <span className="text-danger ml-1.5">-{diffStats.removed}</span>}
@@ -1376,11 +1435,11 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
                 aria-pressed={editing}
               >{editing ? 'View Preview' : 'View Source'}</button>
             )}
-            {!isRichType && diffMode && (
+            {!isRichType && effectiveDiffMode && (
               <button className={barIconBtn(!diffSplit)} onClick={() => setDiffSplit(!diffSplit)} title={diffSplit ? 'Switch to unified view' : 'Switch to split view'} aria-label={diffSplit ? 'Switch to unified view' : 'Switch to split view'} aria-pressed={!diffSplit}><Columns2 size={14} /></button>
             )}
             {!isRichType && (
-              <button className={barIconBtn(diffMode)} onClick={toggleDiffMode} title="Toggle diff view" aria-label="Toggle diff view" aria-pressed={diffMode}><FileDiff size={14} /></button>
+              <button className={barIconBtn(effectiveDiffMode)} onClick={toggleDiffMode} disabled={diffUnavailable} title={diffUnavailable ? diffUnavailableTitle : 'Toggle diff view'} aria-label="Toggle diff view" aria-pressed={effectiveDiffMode}><FileDiff size={14} /></button>
             )}
             <OverflowMenu filePath={filePath} content={content} revealOrCopy={revealOrCopy}
               onRefresh={handleRefresh} refreshDisabled={refreshing || dirty} refreshTitle={dirty ? 'Save or discard changes first' : 'Refresh file (re-read from disk)'}
@@ -1418,7 +1477,7 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
       )}
       {/* Code / editor / diff views run flush (edge-to-edge) against the
           panel — only markdown preview keeps reading padding. */}
-      <div className={`flex-1 overflow-hidden -mx-5 -my-4 flex ${isMarkdown && !editing && !diffMode ? 'py-4 pl-4 pr-0' : ''}`}>
+      <div className={`flex-1 overflow-hidden -mx-5 -my-4 flex ${isMarkdown && !editing && !effectiveDiffMode ? 'py-4 pl-4 pr-0' : ''}`}>
         {!fullscreen && <div data-mc-mdpanel className="relative flex-1 min-w-0 min-h-0">
           {findBar}
           {/* In markdown preview the scroll box runs flush to the panel's right
@@ -1426,9 +1485,9 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
               pr-6 keeps the text clear of the ticks. */}
           <div ref={sidePanelScrollRef} className={`h-full overflow-auto ${isMarkdown && !editing ? 'scrollbar-overlay pr-6' : ''}`}>
             {!diffChecking && !isRichType && (
-              <DiffEditorBlock flush sideBySide={diffSplit} diffMode={diffMode} lang={lang} originalContent={originalContent} content={content} dark={dark} diffActiveRef={diffActiveRef} handleChange={handleChange} editing={editing} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onSelect={onSubmitComments ? (text, rect) => setMonacoSelection({ text, x: rect.x, y: rect.y }) : undefined} />
+              <DiffEditorBlock flush sideBySide={diffSplit} diffMode={effectiveDiffMode} lang={lang} originalContent={originalContent} content={content} dark={dark} diffActiveRef={diffActiveRef} handleChange={handleChange} editing={editing} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onSelect={onSubmitComments ? (text, rect) => setMonacoSelection({ text, x: rect.x, y: rect.y }) : undefined} />
             )}
-            {!diffMode && <ContentRenderer flush isRichType={isRichType} fileType={fileType} filePath={filePath} content={content} editing={editing} lang={lang} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onChange={handleChange}
+            {!effectiveDiffMode && <ContentRenderer flush isRichType={isRichType} fileType={fileType} filePath={filePath} content={content} editing={editing} lang={lang} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onChange={handleChange}
               previewRef={previewRef} displayContent={displayContent} isMarkdown={isMarkdown} highlightedHtml={highlightedHtml} gutterReadRef={gutterReadRef} markdownClassName="msg-content text-sm leading-relaxed" />}
           </div>
           {isMarkdown && !editing && <MarkdownOutlineRail containerRef={sidePanelScrollRef} />}
@@ -1468,8 +1527,8 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
         <div data-mc-mdpanel className="relative flex-1 overflow-hidden min-h-0">
           {findBar}
           <div ref={fullscreenBodyRef} className="h-full overflow-auto px-16 py-4">
-            {!isRichType && <DiffEditorBlock sideBySide={diffSplit} diffMode={diffMode} lang={lang} originalContent={originalContent} content={content} dark={dark} diffActiveRef={diffActiveRef} handleChange={handleChange} editing={editing} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onSelect={onSubmitComments ? (text, rect) => setMonacoSelection({ text, x: rect.x, y: rect.y }) : undefined} />}
-            {!diffMode && <ContentRenderer isRichType={isRichType} fileType={fileType} filePath={filePath} content={content} editing={editing} lang={lang} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onChange={handleChange}
+            {!isRichType && <DiffEditorBlock sideBySide={diffSplit} diffMode={effectiveDiffMode} lang={lang} originalContent={originalContent} content={content} dark={dark} diffActiveRef={diffActiveRef} handleChange={handleChange} editing={editing} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onSelect={onSubmitComments ? (text, rect) => setMonacoSelection({ text, x: rect.x, y: rect.y }) : undefined} />}
+            {!effectiveDiffMode && <ContentRenderer isRichType={isRichType} fileType={fileType} filePath={filePath} content={content} editing={editing} lang={lang} lineNums={lineNums} wordWrap={wordWrap} autocomplete={autocomplete} onChange={handleChange}
               previewRef={fullscreenPreviewRef} displayContent={displayContent} isMarkdown={isMarkdown} highlightedHtml={highlightedHtml} gutterReadRef={gutterFullscreenRef} previewStyle={mdPreviewStyle} />}
           </div>
           {isMarkdown && !editing && <MarkdownOutlineRail containerRef={fullscreenBodyRef} />}

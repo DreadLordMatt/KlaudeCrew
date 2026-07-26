@@ -110,7 +110,6 @@ from kiro_crew.dashboard.handlers.files import (  # noqa: E402, F401
     api_browse_dirs,
     api_browse_files,
     api_dashboard_config,
-    api_file_diff,
     api_file_download,
     api_file_raw,
     api_file_read,
@@ -129,6 +128,12 @@ from kiro_crew.dashboard.handlers.files import (  # noqa: E402, F401
     api_workspaces_create,
     api_workspaces_delete,
     api_workspaces_update,
+)
+
+# ── Git working-tree reads (extracted to handlers/git_changes.py) ──
+from kiro_crew.dashboard.handlers.git_changes import (  # noqa: E402, F401
+    api_file_diff,
+    api_git_changes,
 )
 
 # ── Hooks (extracted to handlers/hooks.py) ──

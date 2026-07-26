@@ -11,7 +11,27 @@ export type DiffRow =
 
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/
 
-export function parseUnifiedDiff(patch: string): DiffRow[] {
+/** Yield lines without materializing the whole split array.
+ *
+ * `patch.split('\n')` on a 2MB newline-dense patch allocates hundreds of
+ * thousands of strings up front, which defeats any cap applied afterwards.
+ * Walking with indexOf lets a bounded parse stop early and allocate only the
+ * lines it actually consumes. */
+function* iterLines(patch: string): Generator<string> {
+  let start = 0
+  for (;;) {
+    const nl = patch.indexOf('\n', start)
+    if (nl === -1) {
+      if (start < patch.length) yield patch.slice(start)
+      return
+    }
+    yield patch.slice(start, nl)
+    start = nl + 1
+  }
+}
+
+/** Parse at most `maxRows` rows (unbounded when omitted). */
+export function parseUnifiedDiff(patch: string, maxRows?: number): DiffRow[] {
   const rows: DiffRow[] = []
   if (!patch) return rows
   let oldLine = 0
@@ -19,7 +39,8 @@ export function parseUnifiedDiff(patch: string): DiffRow[] {
   // Old-file line number just past the previous hunk, for gap sizing.
   let prevHunkOldEnd: number | null = null
 
-  for (const line of patch.split('\n')) {
+  for (const line of iterLines(patch)) {
+    if (maxRows !== undefined && rows.length >= maxRows) break
     const hunk = line.match(HUNK_RE)
     if (hunk) {
       const oldStart = Number(hunk[1])
@@ -42,16 +63,31 @@ export function parseUnifiedDiff(patch: string): DiffRow[] {
       rows.push({ kind: 'del', oldLine, newLine: null, text: line.slice(1) })
       oldLine += 1
     } else {
-      // Context lines are prefixed with a space; a bare empty string can
-      // appear for an empty context line or a trailing split artifact.
+      // Context lines are prefixed with a space; a bare empty string is an
+      // empty context line.
       rows.push({ kind: 'context', oldLine, newLine, text: line.slice(1) })
       oldLine += 1
       newLine += 1
     }
     prevHunkOldEnd = oldLine
   }
-  // Drop a trailing empty context row created by a trailing newline split.
-  const last = rows[rows.length - 1]
-  if (last && last.kind === 'context' && last.text === '' && patch.endsWith('\n')) rows.pop()
+  // NOTE: no trailing-row cleanup. `split('\n')` used to yield a phantom ''
+  // element for a patch ending in a newline, which was popped here; `iterLines`
+  // does not emit it, so popping would delete a GENUINE final blank context
+  // line instead.
   return rows
+}
+
+/** Parse for rendering: at most `maxRows` rows, plus whether more existed.
+ *
+ * Parses one row past the limit so `truncated` is exact — a patch with exactly
+ * `maxRows` rows is complete, not capped — while still never walking the whole
+ * patch. */
+export function parseUnifiedDiffCapped(
+  patch: string,
+  maxRows: number,
+): { rows: DiffRow[]; truncated: boolean } {
+  const rows = parseUnifiedDiff(patch, maxRows + 1)
+  if (rows.length > maxRows) return { rows: rows.slice(0, maxRows), truncated: true }
+  return { rows, truncated: false }
 }

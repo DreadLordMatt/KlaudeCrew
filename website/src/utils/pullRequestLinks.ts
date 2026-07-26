@@ -41,6 +41,14 @@ function emitChangeSources(found: Map<string, AttributedLink>): PullRequestLink[
 
 export const MAX_PULL_REQUEST_SOURCES = 64
 
+/**
+ * Sentinel "url" for the ever-present Local Changes tab in the Changes panel's
+ * source strip. Never a real provider link: it must not enter the seen-source
+ * index, be persisted, or be sent to a provider — it only routes selection
+ * between the local worktree view and the PR sources.
+ */
+export const LOCAL_CHANGES_SOURCE_URL = 'local:changes'
+
 const SEEN_SOURCES_STORAGE_KEY = 'mc-pr-source-seen-v1'
 const MAX_PERSISTED_SOURCE_SLOTS = 32
 const MAX_PERSISTED_SOURCE_URLS = 512
