@@ -446,10 +446,12 @@ class TestKiroPrerequisiteHelpers:
 
     @pytest.mark.skipif(sys.platform != "linux", reason="Linux memfd seals")
     def test_linux_memfd_seals_reject_later_writes(self) -> None:
-        memfd_create = getattr(os, "memfd_create")
-        fd = memfd_create(
+        # Goes through the platform_compat shim, not os.memfd_create directly:
+        # interpreters built against glibc < 2.27 (Amazon Linux 2) lack the
+        # attribute entirely even though the kernel supports the syscall.
+        fd = platform_compat.create_memfd(
             "kiro-cli-test",
-            getattr(os, "MFD_ALLOW_SEALING", 0x0002),
+            platform_compat.MFD_ALLOW_SEALING,
         )
         try:
             os.write(fd, b"immutable")

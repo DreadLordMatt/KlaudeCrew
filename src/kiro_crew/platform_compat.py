@@ -221,6 +221,66 @@ def release_lock(fd: int) -> None:
         pass
 
 
+# Linux ``memfd_create(2)`` syscall numbers keyed by ``os.uname().machine``.
+# CPython exposes ``os.memfd_create`` ONLY when built against glibc >= 2.27,
+# which is when the libc wrapper appeared. Amazon Linux 2 ships glibc 2.26, so
+# interpreters built there lack the attribute even though the KERNEL supports
+# the syscall (Linux >= 3.17). Without a fallback, every ACP executable
+# snapshot fails closed on those hosts, which takes the agent offline.
+_MEMFD_CREATE_SYSCALLS: Mapping[str, int] = {
+    "x86_64": 319,
+    "aarch64": 279,
+}
+
+# memfd flags — absent from ``os`` on the same pre-2.27 builds as the function.
+MFD_CLOEXEC: int = getattr(os, "MFD_CLOEXEC", 0x0001)
+MFD_ALLOW_SEALING: int = getattr(os, "MFD_ALLOW_SEALING", 0x0002)
+
+
+def create_memfd(name: str, flags: int) -> int:
+    """
+    Create an anonymous Linux memfd and return its descriptor.
+    Prefers ``os.memfd_create``; falls back to a direct ``syscall(2)`` through
+    ``ctypes`` on interpreters that were built without the glibc wrapper. The
+    fallback raises ``OSError`` carrying ``errno`` so callers can keep
+    distinguishing failures (notably ``EINVAL`` for an unsupported flag such as
+    ``MFD_EXEC`` on kernels older than 6.3).
+
+    The native function is tried BEFORE the host-platform guard: callers are
+    parameterized by ``platform_name`` so they can exercise the Linux branch on
+    a non-Linux runner with ``os.memfd_create`` patched in. Only the raw syscall
+    fallback, which needs a real Linux kernel and ``os.uname``, is host-gated.
+    """
+
+    native = getattr(os, "memfd_create", None)
+    if callable(native):
+        return int(native(name, flags))
+    if not IS_LINUX:
+        raise OSError("memfd creation is only available on Linux")
+
+    machine = os.uname().machine
+    number = _MEMFD_CREATE_SYSCALLS.get(machine)
+    if number is None:
+        raise OSError(f"memfd_create syscall number is unknown for machine {machine!r}")
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        syscall = libc.syscall
+    except (AttributeError, OSError) as exc:
+        raise OSError(f"memfd_create syscall is unreachable: {exc}") from exc
+    syscall.restype = ctypes.c_long
+    fd = int(
+        syscall(
+            ctypes.c_long(number),
+            ctypes.c_char_p(name.encode("utf-8")),
+            ctypes.c_uint(flags),
+        )
+    )
+    if fd < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err), name)
+    return fd
+
+
 def seal_memfd(fd: int) -> None:
     """Make a populated Linux memfd permanently immutable.
 

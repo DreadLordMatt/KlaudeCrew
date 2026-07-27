@@ -765,7 +765,10 @@ canonicalizes symlinks before its final no-follow open. Linux copies verified
 bytes into a kernel write-sealed `MFD_EXEC` memfd, passes its descriptor through
 every wrapper as `/proc/self/fd/<fd>`, and closes the gateway copy after process
 creation. Older kernels that reject `MFD_EXEC` with `EINVAL` retry creation
-without that flag; other creation errors fail closed. Snapshot registry
+without that flag; other creation errors fail closed. Creation is routed through
+`platform_compat.create_memfd` so hosts whose CPython was built against
+glibc < 2.27 (Amazon Linux 2) reach a `ctypes` `syscall(2)` fallback instead of
+failing closed on a missing `os.memfd_create` attribute. Snapshot registry
 ownership is removed synchronously, while descriptor close runs on the
 dedicated subprocess executor so cancellation and startup teardown cannot block
 the gateway event loop. Because Mach-O does not reliably launch through

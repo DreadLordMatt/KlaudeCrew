@@ -633,20 +633,13 @@ def snapshot_trusted_acp_executable(
 
     snapshot_fd = -1
     try:
-        memfd_create = getattr(os, "memfd_create", None)
-        if not callable(memfd_create):
-            raise OSError("Linux memfd executable snapshots are unavailable")
-        memfd_flags = (
-            getattr(os, "MFD_CLOEXEC", 0x0001)
-            | getattr(os, "MFD_ALLOW_SEALING", 0x0002)
-            | _MFD_EXEC
-        )
+        memfd_flags = platform_compat.MFD_CLOEXEC | platform_compat.MFD_ALLOW_SEALING | _MFD_EXEC
         try:
-            snapshot_fd = memfd_create("kiro-cli-acp", memfd_flags)
+            snapshot_fd = platform_compat.create_memfd("kiro-cli-acp", memfd_flags)
         except OSError as exc:
             if exc.errno != errno.EINVAL:
                 raise
-            snapshot_fd = memfd_create("kiro-cli-acp", memfd_flags & ~_MFD_EXEC)
+            snapshot_fd = platform_compat.create_memfd("kiro-cli-acp", memfd_flags & ~_MFD_EXEC)
         _copy_verified_executable_to_fd(canonical, snapshot_fd, expected)
         platform_compat.seal_memfd(snapshot_fd)
         launch_path = f"/proc/self/fd/{snapshot_fd}"

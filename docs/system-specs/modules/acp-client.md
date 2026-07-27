@@ -28,7 +28,11 @@ wrapper chain and execute its `/proc/self/fd/<fd>` identity; the gateway closes
 its copy immediately after process creation, while the child retains the
 inherited descriptor. Kernels that predate `MFD_EXEC` reject the flag with
 `EINVAL`; creation retries once without that flag, while every other error
-remains fail-closed. There is no mutable pathname or verify-to-exec replacement
+remains fail-closed. Interpreters built against glibc < 2.27 (Amazon Linux 2)
+expose no `os.memfd_create` even though the kernel supports the syscall, so
+creation always goes through `platform_compat.create_memfd`, which falls back to
+a direct `syscall(2)` via `ctypes` and preserves `errno` so the `MFD_EXEC` retry
+still discriminates. There is no mutable pathname or verify-to-exec replacement
 window. macOS cannot reliably execute Mach-O through `/dev/fd`, so it first
 requires the current digest to match protected post-installer, process-start
 override, or immutable-system provenance and requires `/usr/bin/codesign` to

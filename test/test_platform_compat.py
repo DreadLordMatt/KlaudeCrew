@@ -114,6 +114,76 @@ class TestProcessHelpers:
         assert pc.process_matches(2_000_000_000, ("kiro-cli", "claude")) is False
 
 
+class TestCreateMemfd:
+    """The ACP executable-snapshot path depends on this shim being total.
+
+    ``os.memfd_create`` only exists on CPython built against glibc >= 2.27, so
+    Amazon Linux 2 hosts (glibc 2.26) must reach the ctypes syscall fallback or
+    the agent cannot launch at all.
+    """
+
+    def test_rejects_non_linux_without_native(self, monkeypatch):
+        # The guard covers only the raw-syscall fallback, so the native
+        # function must be absent for it to be reachable. Callers pass an
+        # explicit platform_name and patch os.memfd_create to drive the Linux
+        # branch from a Windows runner; that path must stay open.
+        monkeypatch.delattr(os, "memfd_create", raising=False)
+        monkeypatch.setattr(pc, "IS_LINUX", False)
+        with pytest.raises(OSError, match="only available on Linux"):
+            pc.create_memfd("probe", pc.MFD_CLOEXEC)
+
+    def test_native_is_used_even_when_host_is_not_linux(self, monkeypatch):
+        # Regression: guarding the whole function on IS_LINUX broke the
+        # pre-existing simulated-Linux snapshot tests on Windows runners.
+        monkeypatch.setattr(pc, "IS_LINUX", False)
+        monkeypatch.setattr(os, "memfd_create", lambda _n, _f: 4242, raising=False)
+        assert pc.create_memfd("probe", pc.MFD_CLOEXEC) == 4242
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="Linux memfd")
+    def test_prefers_native_when_present(self, monkeypatch):
+        calls: list[tuple[str, int]] = []
+        monkeypatch.setattr(
+            os,
+            "memfd_create",
+            lambda name, flags: calls.append((name, flags)) or 4242,
+            raising=False,
+        )
+        assert pc.create_memfd("probe", pc.MFD_CLOEXEC) == 4242
+        assert calls == [("probe", pc.MFD_CLOEXEC)]
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="Linux memfd")
+    def test_ctypes_fallback_returns_usable_fd(self, monkeypatch):
+        # Force the fallback even on a glibc >= 2.27 host so both branches are
+        # covered everywhere, not just on old distros.
+        monkeypatch.delattr(os, "memfd_create", raising=False)
+        fd = pc.create_memfd("probe", pc.MFD_CLOEXEC | pc.MFD_ALLOW_SEALING)
+        try:
+            assert fd >= 0
+            assert os.path.exists(f"/proc/self/fd/{fd}")
+            os.write(fd, b"payload")
+            pc.seal_memfd(fd)
+            with pytest.raises(OSError):
+                os.write(fd, b"tamper")
+        finally:
+            os.close(fd)
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="Linux memfd")
+    def test_ctypes_fallback_surfaces_errno_for_bad_flags(self, monkeypatch):
+        # Callers distinguish EINVAL (unsupported flag, e.g. MFD_EXEC before
+        # kernel 6.3) from hard failures, so errno must survive the shim.
+        monkeypatch.delattr(os, "memfd_create", raising=False)
+        with pytest.raises(OSError) as excinfo:
+            pc.create_memfd("probe", 0xFFFF_FFFF)
+        assert excinfo.value.errno == errno.EINVAL
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="Linux memfd")
+    def test_ctypes_fallback_rejects_unknown_machine(self, monkeypatch):
+        monkeypatch.delattr(os, "memfd_create", raising=False)
+        monkeypatch.setattr(pc, "_MEMFD_CREATE_SYSCALLS", {})
+        with pytest.raises(OSError, match="syscall number is unknown"):
+            pc.create_memfd("probe", pc.MFD_CLOEXEC)
+
+
 class TestFindListeningPids:
     def test_returns_list_of_ints_for_unused_port(self):
         # A very-high port nothing is bound to → empty list, never raises, on any OS.
@@ -173,7 +243,7 @@ class TestStrftime:
         if pc.IS_WINDOWS:
             assert dt.fmt == "%#I:%M %p"
         else:
-            assert dt.fmt == "%-I:%M %p"   # untouched on POSIX
+            assert dt.fmt == "%-I:%M %p"  # untouched on POSIX
 
     def test_real_datetime_formats_without_error(self):
         # End-to-end against a real datetime: must not raise ValueError on
@@ -193,11 +263,11 @@ class TestIsExecutableFile:
         f.write_text("#!/bin/sh\nexit 0\n")
         os.chmod(f, 0o644)  # no x-bit
         if pc.IS_WINDOWS:
-            assert pc.is_executable_file(f) is True   # .sh extension → runnable
+            assert pc.is_executable_file(f) is True  # .sh extension → runnable
         else:
             assert pc.is_executable_file(f) is False  # no x-bit → not runnable
         os.chmod(f, 0o755)  # +x
-        assert pc.is_executable_file(f) is True       # runnable on both now
+        assert pc.is_executable_file(f) is True  # runnable on both now
 
     def test_missing_file_is_not_executable(self, tmp_path):
         assert pc.is_executable_file(tmp_path / "nope.sh") is False
@@ -254,9 +324,7 @@ class TestFindPythonInterpreter:
             return stub if name in ("python", "python3") else real
 
         monkeypatch.setattr("shutil.which", fake_which)
-        monkeypatch.setattr(
-            pc.subprocess, "check_output", lambda *a, **k: "3.12\n"
-        )
+        monkeypatch.setattr(pc.subprocess, "check_output", lambda *a, **k: "3.12\n")
         got = pc.find_python_interpreter()
         assert got == real
         assert pc._is_windows_store_python_stub(got) is False
@@ -353,7 +421,7 @@ class TestChmodShims:
         f.write_text("x")
         fd = os.open(str(f), os.O_RDONLY)
         try:
-            pc.fchmod_safe(fd, 0o600)   # applies on POSIX, no-op on Windows
+            pc.fchmod_safe(fd, 0o600)  # applies on POSIX, no-op on Windows
         finally:
             os.close(fd)
 
@@ -766,13 +834,13 @@ class TestTaskkillErrorMapping:
         def _run(*_a, **_kw):
             r = types.SimpleNamespace(returncode=rc, stdout=b"", stderr=stderr)
             return r
+
         return _run
 
     def test_taskkill_rc128_maps_to_process_lookup(self, monkeypatch):
         monkeypatch.setattr(pc, "IS_POSIX", False)
         monkeypatch.setattr(pc, "IS_WINDOWS", True)
-        monkeypatch.setattr(pc.subprocess, "run",
-                            self._fake_run(128, b"process not found"))
+        monkeypatch.setattr(pc.subprocess, "run", self._fake_run(128, b"process not found"))
         with pytest.raises(ProcessLookupError):
             pc.kill_pid(99999, pc.SIGKILL)
         with pytest.raises(ProcessLookupError):
@@ -781,8 +849,7 @@ class TestTaskkillErrorMapping:
     def test_taskkill_rc5_maps_to_permission_error(self, monkeypatch):
         monkeypatch.setattr(pc, "IS_POSIX", False)
         monkeypatch.setattr(pc, "IS_WINDOWS", True)
-        monkeypatch.setattr(pc.subprocess, "run",
-                            self._fake_run(5, b"access denied"))
+        monkeypatch.setattr(pc.subprocess, "run", self._fake_run(5, b"access denied"))
         with pytest.raises(PermissionError):
             pc.kill_pid(99999, pc.SIGKILL)
         with pytest.raises(PermissionError):
@@ -791,8 +858,7 @@ class TestTaskkillErrorMapping:
     def test_taskkill_generic_rc_maps_to_oserror(self, monkeypatch):
         monkeypatch.setattr(pc, "IS_POSIX", False)
         monkeypatch.setattr(pc, "IS_WINDOWS", True)
-        monkeypatch.setattr(pc.subprocess, "run",
-                            self._fake_run(42, b"weird error"))
+        monkeypatch.setattr(pc.subprocess, "run", self._fake_run(42, b"weird error"))
         with pytest.raises(OSError) as ei:
             pc.kill_pid(99999, pc.SIGKILL)
         # not one of the more specific subclasses
@@ -811,6 +877,7 @@ class TestTaskkillErrorMapping:
 
         def _boom(*_a, **_kw):
             raise FileNotFoundError(2, "taskkill.exe not found")
+
         monkeypatch.setattr(pc.subprocess, "run", _boom)
         with pytest.raises(OSError):
             pc.kill_pid(99999, pc.SIGKILL)
@@ -835,8 +902,7 @@ class TestRestrictToOwnerArgvOnLinux:
         monkeypatch.setattr(pc, "IS_WINDOWS", True)
         # Reset the success-only SID memo so the monkeypatched stub wins
         monkeypatch.setattr(pc, "_USER_SID_CACHE", [])
-        monkeypatch.setattr(pc, "_current_user_sid",
-                            lambda: "*S-1-5-21-1-2-3-1000")
+        monkeypatch.setattr(pc, "_current_user_sid", lambda: "*S-1-5-21-1-2-3-1000")
         captured: dict = {}
 
         def fake_run(argv, **_kw):
@@ -864,11 +930,12 @@ class TestRestrictToOwnerArgvOnLinux:
         monkeypatch.setattr(pc, "IS_POSIX", False)
         monkeypatch.setattr(pc, "IS_WINDOWS", True)
         monkeypatch.setattr(pc, "_USER_SID_CACHE", [])
-        monkeypatch.setattr(pc, "_current_user_sid",
-                            lambda: "*S-1-5-21-9-9-9-9")
-        monkeypatch.setattr(pc.subprocess, "run",
-                            lambda *a, **k: types.SimpleNamespace(
-                                returncode=1, stdout=b"", stderr=b"denied"))
+        monkeypatch.setattr(pc, "_current_user_sid", lambda: "*S-1-5-21-9-9-9-9")
+        monkeypatch.setattr(
+            pc.subprocess,
+            "run",
+            lambda *a, **k: types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"denied"),
+        )
         f = tmp_path / "secret.key"
         f.write_bytes(b"s" * 32)
         with pytest.raises(OSError):
@@ -917,10 +984,11 @@ class TestRestrictToOwnerArgvOnLinux:
             if len(attempts) == 1:
                 return types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"")
             return types.SimpleNamespace(
-                returncode=0, stdout=b'"ANT\\user","S-1-5-21-1-2-3-500"', stderr=b"")
+                returncode=0, stdout=b'"ANT\\user","S-1-5-21-1-2-3-500"', stderr=b""
+            )
 
         monkeypatch.setattr(pc.subprocess, "run", flaky_run)
-        assert pc._current_user_sid() is None          # first call fails...
+        assert pc._current_user_sid() is None  # first call fails...
         assert pc._current_user_sid() == "*S-1-5-21-1-2-3-500"  # ...retry succeeds
         assert pc._current_user_sid() == "*S-1-5-21-1-2-3-500"  # ...and is cached
         assert len(attempts) == 2, "success must be memoized (no third spawn)"
@@ -1029,7 +1097,8 @@ class TestRestrictToOwner:
         f.write_bytes(b"s" * 32)
         pc.restrict_to_owner(f)
         out = subprocess.check_output(
-            ["icacls", str(f)], stderr=subprocess.DEVNULL,
+            ["icacls", str(f)],
+            stderr=subprocess.DEVNULL,
         ).decode("utf-8", "replace")
         # Owner Rights SID rendered as "OWNER RIGHTS" in the DACL dump, with (F)
         # for full control; inheritance stripping means "(I)" (inherited) markers
@@ -1166,8 +1235,10 @@ class TestFindListeningPidsErrors:
 
     def _fake_netstat(self, blob: str):
         """Return a fake subprocess.check_output that returns *blob*."""
+
         def _run(*_a, **_kw):
             return blob
+
         return _run
 
     def test_windows_finds_ipv6_listener_via_netstat(self, monkeypatch):
@@ -1207,9 +1278,7 @@ class TestFindListeningPidsErrors:
         # future-proof against a hypothetical Windows build that switches to
         # "TCP6" (the netstat -p flag already accepts "tcpv6"). Guard the
         # defensive path so a future relabel doesn't silently re-break this.
-        blob = (
-            "  TCP6   [::1]:7777             [::]:0                 LISTENING       77\n"
-        )
+        blob = "  TCP6   [::1]:7777             [::]:0                 LISTENING       77\n"
         monkeypatch.setattr(pc, "IS_POSIX", False)
         monkeypatch.setattr(pc, "IS_WINDOWS", True)
         monkeypatch.setattr(pc.subprocess, "check_output", self._fake_netstat(blob))
@@ -1254,6 +1323,7 @@ class TestFindListeningPidsErrors:
         # canned-blob tests above by exercising the real netstat parse against
         # whatever this Windows build actually prints.
         import socket as _socket
+
         s = _socket.socket(_socket.AF_INET6, _socket.SOCK_STREAM)
         try:
             s.bind(("::1", 0))
@@ -1293,9 +1363,7 @@ class TestKillAsyncVariants:
         monkeypatch.setattr(pc, "kill_pid", fake_kill_pid)
         import asyncio as _asyncio
 
-        result = _asyncio.new_event_loop().run_until_complete(
-            pc.kill_pid_async(4242, pc.SIGKILL)
-        )
+        result = _asyncio.new_event_loop().run_until_complete(pc.kill_pid_async(4242, pc.SIGKILL))
         assert result is True
         assert seen == [(4242, pc.SIGKILL)]
 
@@ -1389,13 +1457,11 @@ class TestKillAsyncVariants:
 
         result = real_loop.run_until_complete(_driver())
         assert result is True
-        assert seen_executors == [sentinel], (
-            f"expected the subprocess_executor sentinel, got {seen_executors!r}"
-        )
+        assert seen_executors == [
+            sentinel
+        ], f"expected the subprocess_executor sentinel, got {seen_executors!r}"
 
-    def test_windows_kill_process_tree_async_offloads_via_subprocess_executor(
-        self, monkeypatch
-    ):
+    def test_windows_kill_process_tree_async_offloads_via_subprocess_executor(self, monkeypatch):
         """Same offload contract as kill_pid_async but for the /T variant."""
         monkeypatch.setattr(pc, "IS_POSIX", False)
         monkeypatch.setattr(pc, "IS_WINDOWS", True)
@@ -1406,9 +1472,7 @@ class TestKillAsyncVariants:
         monkeypatch.setattr(
             pc.subprocess,
             "run",
-            lambda *_a, **_kw: types.SimpleNamespace(
-                returncode=0, stdout=b"", stderr=b""
-            ),
+            lambda *_a, **_kw: types.SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
         )
         monkeypatch.setattr(pc, "subprocess_executor", lambda: sentinel)
 
