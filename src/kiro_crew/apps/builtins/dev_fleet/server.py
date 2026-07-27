@@ -509,6 +509,12 @@ else:
 _TRUSTED_PATH = os.pathsep.join(_TRUSTED_BIN_DIRS)
 _TRUSTED_BIN_CACHE: dict[str, str | None] = {}
 
+# Upper bound on a propagated "sandbox unavailable" message. Wide enough to
+# carry the sandbox layer's remedy sentence (the actionable half, appended after
+# a ~180-char preamble) into the Discovery Error banner, while still bounding an
+# arbitrarily long stderr.
+_SANDBOX_ERR_MAX = 900
+
 
 def _trusted_bin(name: str) -> str | None:
     """Resolve *name* to a canonical executable in a system or Homebrew bin dir.
@@ -571,7 +577,7 @@ def _trusted_bin(name: str) -> str | None:
 
 async def _run_cmd(
     cmd: list[str], *, cwd: str | None = None, env: dict | None = None,
-    timeout: int = 30, mode: str = "standard"
+    timeout: int = 30, mode: str = "standard", repo_controlled: bool = False,
 ) -> tuple[int, str, str]:
     """Run a subprocess asynchronously, return (returncode, stdout, stderr).
 
@@ -583,6 +589,16 @@ async def _run_cmd(
     ``_GIT_ENV_NEUTRALIZERS`` pins transports AND neutralizes every
     repo-controlled execution vector (fsmonitor/hooks/credential
     helper/sshCommand) for every git this handler ever runs.
+
+    ``repo_controlled=True`` marks an invocation that executes content from the
+    worktree (a rebase applying its commits) and therefore must NOT receive the
+    operator's git credential helpers. It is a separate flag from ``mode``
+    deliberately: this handler runs inside the app-backend sandbox, which is
+    spawned at ``"standard"``, and a sandboxed process cannot tighten the sandbox
+    it is already in — so ``mode="strict"`` here was never honoured and is now
+    refused outright by ``wrap_argv`` rather than silently downgraded. Gating the
+    helpers on ``mode`` alone would have quietly handed them to exactly the
+    invocations that must not have them once the tier claim was corrected.
     """
     base_env = dict(env) if env is not None else dict(os.environ)
     # Pin executable + PATH to trusted system dirs: the inherited service
@@ -595,10 +611,9 @@ async def _run_cmd(
         cmd = [trusted, *cmd[1:]]
     base_env["PATH"] = _TRUSTED_PATH
     base_env.update(_GIT_ENV_NEUTRALIZERS)
-    # Credential helpers only for gateway-controlled commands at "standard"
-    # (background fetch, PR queries). "strict" invocations run in the
-    # repo-controlled tier (rebase applying worktree commits) and get none.
-    if mode == "standard" and _GIT_TRUSTED_HELPERS:
+    # Credential helpers only for gateway-controlled commands (background fetch,
+    # PR queries). Invocations that run worktree content get none.
+    if not repo_controlled and _GIT_TRUSTED_HELPERS:
         base_env.update(_GIT_TRUSTED_HELPERS)
     cleanup: str | None = None
     try:
@@ -1221,9 +1236,16 @@ async def _discover_worktrees() -> list[dict]:
     if rc != 0:
         # Propagate sandbox/git failures as a RuntimeError so callers can
         # surface the real reason instead of returning silent empty lists.
-        err_detail = (stderr or stdout or "").strip()[:200]
-        if "sandbox unavailable" in err_detail:
-            raise RuntimeError(err_detail)  # already prefixed by _run_cmd
+        raw = (stderr or stdout or "").strip()
+        if "sandbox unavailable" in raw:
+            # Do NOT clip to the generic git-error length here. The sandbox
+            # layer puts the *remedy* (which opt-in to set, or that an EPERM is
+            # a Seatbelt nesting artifact rather than a missing backend) AFTER a
+            # ~180-char preamble, so the old 200-char cap surfaced the diagnosis
+            # and swallowed the fix — the Discovery Error banner ended mid-word
+            # at "Probe". Keep a generous bound purely to stop an unbounded
+            # stderr reaching the UI.
+            raise RuntimeError(raw[:_SANDBOX_ERR_MAX])  # already prefixed by _run_cmd
         return []
     entries = _parse_worktree_porcelain(stdout)
     # `git worktree list --porcelain` always lists the primary checkout
@@ -1236,12 +1258,16 @@ async def _discover_worktrees() -> list[dict]:
 
 
 async def _git(
-    git_dir: str, *args: str, timeout: int = 6, mode: str = "standard"
+    git_dir: str, *args: str, timeout: int = 6, mode: str = "standard",
+    repo_controlled: bool = False,
 ) -> str | None:
     # Repo-controlled execution vectors are neutralized centrally in
     # _run_cmd via _GIT_ENV_NEUTRALIZERS — no per-call-site flags needed.
+    # ``repo_controlled`` additionally withholds the operator's credential
+    # helpers from invocations that execute worktree content (see _run_cmd).
     rc, stdout, _ = await _run_cmd(
-        ["git", "-C", git_dir, *args], timeout=timeout, mode=mode
+        ["git", "-C", git_dir, *args], timeout=timeout, mode=mode,
+        repo_controlled=repo_controlled,
     )
     return stdout.strip() if rc == 0 else None
 
@@ -1805,11 +1831,13 @@ async def _pod_provision(name: str) -> dict:
             if running:
                 return {"ok": False, "error": "provision already running", "run_id": prev}
         loop = asyncio.get_running_loop()
+        # "standard": the tier this app backend actually runs at (see the sync
+        # steps' note). Credentials are governed by _pod_env(), not the tier.
         p_argv, p_env, p_cleanup = await loop.run_in_executor(
             subprocess_executor(),
             functools.partial(
                 sandboxed_spawn_argv,
-                _find_cli() + ["pod", "provision", name], "strict", env=_pod_env(),
+                _find_cli() + ["pod", "provision", name], "standard", env=_pod_env(),
             ),
         )
         rid = await _start_run(
@@ -2091,13 +2119,23 @@ async def _sync_start_locked() -> dict:
         return {"ok": False, "error": (
             f"no trusted executable for {missing!r} in {_TRUSTED_PATH}"
         )}
+    # Every tier below is "standard" — the tier this process actually has. An app
+    # backend is spawned at "standard" (apps/backend.py), and a sandboxed process
+    # cannot tighten the sandbox it is already in, so the "strict" these steps
+    # used to request was never honoured; sandbox.wrap_argv now refuses such a
+    # request outright rather than downgrade it silently. Credential suppression
+    # is unaffected: it rides on `_build_env()` (no `with_credentials=True`), not
+    # on the tier, so only the network fetch step carries the operator's helpers.
     raw_steps: list[tuple[list[str], str, dict, str]] = [
         ([git_bin, "fetch", remote, BASE_BRANCH], "standard",
          _build_env(with_credentials=True), "Pull"),
-        ([git_bin, "merge", "--ff-only", f"{remote}/{BASE_BRANCH}"], "strict", _build_env(), "Pull"),
-        ([str(target_py), "-m", "pip", "install", "-e", "."], "strict", _build_env(), "pip install"),
-        ([npm_bin, "ci", "--prefix", "website"], "strict", _build_env(), "npm ci"),
-        ([npm_bin, "run", "build", "--prefix", "website"], "strict", _build_env(), "npm build"),
+        ([git_bin, "merge", "--ff-only", f"{remote}/{BASE_BRANCH}"], "standard",
+         _build_env(), "Pull"),
+        ([str(target_py), "-m", "pip", "install", "-e", "."], "standard",
+         _build_env(), "pip install"),
+        ([npm_bin, "ci", "--prefix", "website"], "standard", _build_env(), "npm ci"),
+        ([npm_bin, "run", "build", "--prefix", "website"], "standard",
+         _build_env(), "npm build"),
     ]
     cleanups: list[str] = []
     wrapped_steps: list[dict] = []
@@ -2161,14 +2199,26 @@ async def _rebase_locked(target: dict) -> dict:
     remote = await _upstream_remote()
     if await _git(path, "fetch", remote, BASE_BRANCH, timeout=90) is None:
         return {"ok": False, "error": f"git fetch {remote} {BASE_BRANCH} failed"}
+    # "standard" tier, but repo_controlled: this code runs INSIDE the app-backend
+    # sandbox, which is spawned at "standard" (apps/backend.py). A sandboxed
+    # process cannot tighten the sandbox it is already in — a nested wrap is
+    # impossible by design — so the previous "strict" request was never honoured;
+    # it silently ran at "standard", and sandbox.wrap_argv now refuses such a
+    # request outright rather than downgrade it silently. The controls that
+    # actually matter here are preserved: _GIT_ENV_NEUTRALIZERS pins
+    # core.hooksPath to /dev/null and clears core.fsmonitor and
+    # credential.helper, and repo_controlled withholds the operator's git
+    # credential helpers from this rebase (previously gated on mode="strict").
     rc, stdout, stderr = await _run_cmd(
         ["git", "-C", path, "rebase", f"{remote}/{BASE_BRANCH}"],
-        timeout=180, mode="strict",
+        timeout=180, mode="standard", repo_controlled=True,
     )
     if rc == 0:
         g = await _git_info(path)
         return {"ok": True, "rebased": True, "head": g["head"], "behind": g["behind"]}
-    abort_res = await _git(path, "rebase", "--abort", timeout=30, mode="strict")
+    abort_res = await _git(
+        path, "rebase", "--abort", timeout=30, mode="standard", repo_controlled=True
+    )
     tail = _redact((stdout + stderr).strip()[-200:])
     if abort_res is None:
         # Abort itself failed/timed out — the worktree is still mid-rebase.

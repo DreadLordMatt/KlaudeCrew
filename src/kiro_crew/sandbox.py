@@ -471,12 +471,36 @@ def _probe_sandbox_exec() -> bool:
             timeout=5,
         )
         if r.returncode != 0:
-            logger.warning(
-                "sandbox-exec probe failed (exit %d): %s",
-                r.returncode,
-                r.stderr.decode(errors="replace").strip(),
-            )
-        return r.returncode == 0
+            stderr_text = r.stderr.decode(errors="replace").strip()
+            if _inside_macos_sandbox():
+                # Not a host capability verdict: Seatbelt cannot nest, so this
+                # EPERM says "we are already sandboxed", not "this host has no
+                # sandbox". The caller passes through on this condition rather
+                # than fail-closing — log the real cause so the misleading
+                # "no backend on this host" reading dies here.
+                #
+                # NB: do not name the spawn-wrapping helper in this function's
+                # source. test_spawn_audit.py classifies a spawn as
+                # sandbox-routed by scanning the enclosing function's text
+                # (comments included) for that token, and this probe is
+                # deliberately an unrouted fixed-argv spawn listed in
+                # BENIGN_SPAWNS.
+                logger.info(
+                    "sandbox-exec probe failed inside an existing Seatbelt "
+                    "sandbox (exit %d: %s) — nesting is impossible; this host's "
+                    "sandbox-exec is NOT broken and spawns pass through the "
+                    "outer sandbox",
+                    r.returncode,
+                    stderr_text,
+                )
+            else:
+                logger.warning(
+                    "sandbox-exec probe failed (exit %d): %s",
+                    r.returncode,
+                    stderr_text,
+                )
+            return False
+        return True
     except Exception as exc:
         logger.debug("sandbox-exec probe failed: %s", exc)
         return False
@@ -582,6 +606,7 @@ def _build_launcher_script(
     files_json = json.dumps([os.path.join(home, f) for f in files])
     expose_json = json.dumps([(os.path.join(home, f), f.split("/")[-1]) for f in expose_files])
     env_prefixes_json = json.dumps(env_prefixes)
+    sandbox_level_json = json.dumps(sandbox_level)
     ssh_dir = json.dumps(os.path.join(home, ".ssh"))
     ssh_known_hosts = json.dumps(os.path.join(home, ".ssh", "known_hosts"))
     strict_host_key_opt = (
@@ -784,7 +809,10 @@ def main():
         # Mark the sandboxed tree so in-sandbox wrap_argv calls know OS
         # isolation is already active (nested unshare is seccomp-denied).
         # Set AFTER the scrub loop so a scrubbed prefix cannot delete it.
-        os.environ["KIROCREW_SANDBOX_ACTIVE"] = "1"
+        # The VALUE is the tier this sandbox was built at, so an in-sandbox
+        # wrap_argv call can record whether the isolation it inherits is as
+        # strict as the one it asked for (older builds wrote a bare "1").
+        os.environ["KIROCREW_SANDBOX_ACTIVE"] = {sandbox_level_json}
 
         # Fix /etc/ssh/ssh_config.d/ ownership issue: root-owned files
         # appear as nobody:nobody inside the user namespace because UID 0
@@ -1314,7 +1342,17 @@ def sandbox_exec_argv(
     # additionally scrub agent-denied credential keys (Slack tokens, owner id)
     # since loader.py seeds them into os.environ for trusted children only.
     unset_args = _sandbox_env_unset_args(sandbox_level, strip_python_env)
-    return ["env", *unset_args, "sandbox-exec", "-f", path, *resolved_argv], path
+    # Mark the sandboxed tree, exactly as the Linux launcher does after its own
+    # scrub loop (see the export beside KIROCREW_HOST_PID): an in-sandbox
+    # wrap_argv call must pass through rather than attempt a nested wrap, which
+    # Seatbelt refuses with EPERM. Set as an `env` assignment so it lands AFTER
+    # the -u flags and cannot be dropped by them. The value carries the tier so
+    # the passthrough can record the isolation it actually inherits.
+    marker = f"{_IN_SANDBOX_MARKER}={sandbox_level}"
+    return (
+        ["env", *unset_args, marker, "sandbox-exec", "-f", path, *resolved_argv],
+        path,
+    )
 
 
 def _sandbox_env_unset_args(sandbox_level: str, strip_python_env: bool) -> list[str]:
@@ -1497,32 +1535,253 @@ def _allow_unsandboxed_exec() -> bool:
 
 
 # The single environment marker that proves this process is already INSIDE a
-# KiroCrew namespace sandbox. Deny-by-default: the gate keys ONLY on the
-# explicit, single-purpose ``KIROCREW_SANDBOX_ACTIVE``, which is exported at
-# exactly one site — the namespace launcher main() (see the export beside
-# ``KIROCREW_HOST_PID``). We deliberately do NOT key on ``KIROCREW_HOST_PID``:
-# it is dual-purpose session-identity plumbing, and gating a security-relevant
-# passthrough on a variable set for other reasons is a latent bypass. Since the
-# launcher sets ``KIROCREW_SANDBOX_ACTIVE`` at the same site, no fallback marker
-# is needed. No unsandboxed code path sets this marker.
+# KiroCrew OS sandbox. Deny-by-default: the gate keys ONLY on the explicit,
+# single-purpose ``KIROCREW_SANDBOX_ACTIVE``, exported at exactly two sites —
+# the namespace launcher main() (see the export beside ``KIROCREW_HOST_PID``)
+# and the macOS ``env`` prefix built by :func:`sandbox_exec_argv`. Both sites
+# set it immediately after applying that platform's credential-env scrub, so a
+# marked process is one whose environment KiroCrew already sanitised. We
+# deliberately do NOT key on ``KIROCREW_HOST_PID``: it is dual-purpose
+# session-identity plumbing, and gating a security-relevant passthrough on a
+# variable set for other reasons is a latent bypass. No unsandboxed code path
+# sets this marker, and ``cli.main()`` drops any inherited value.
 _IN_SANDBOX_MARKER = "KIROCREW_SANDBOX_ACTIVE"
+
+# Isolation tiers, weakest to strongest. The marker's VALUE is one of these
+# names; a sandbox created by a build predating the tier record wrote "1".
+_SANDBOX_TIER_RANK: dict[str, int] = {"standard": 0, "cc": 1, "strict": 2}
+_UNKNOWN_TIER = "unknown"
+
+
+def _active_sandbox_tier() -> str | None:
+    """Tier of the KiroCrew sandbox already confining this process, if any.
+
+    Returns the tier name, ``"unknown"`` when the marker is set but carries a
+    value this build does not recognise (an older KiroCrew wrote ``"1"``), or
+    ``None`` when no marker is present.
+    """
+    raw = os.environ.get(_IN_SANDBOX_MARKER)
+    if not raw:
+        return None
+    return raw if raw in _SANDBOX_TIER_RANK else _UNKNOWN_TIER
+
+
+def _tier_downgrade(active: str, requested: str) -> bool:
+    """True when *active* isolation is demonstrably weaker than *requested*.
+
+    Only ever claims a downgrade it can prove: an unrecognised tier on either
+    side yields False, because "cannot compare" is not "is weaker".
+    """
+    if active not in _SANDBOX_TIER_RANK or requested not in _SANDBOX_TIER_RANK:
+        return False
+    return _SANDBOX_TIER_RANK[active] < _SANDBOX_TIER_RANK[requested]
 
 
 def _inside_kirocrew_sandbox() -> bool:
     """True when this process already runs inside a KiroCrew OS sandbox.
 
-    Nested sandboxing is impossible by design: the launcher's seccomp filter
-    denies ``unshare``/``setns`` precisely so the sandboxed tree cannot
-    manipulate namespaces. An in-sandbox wrap_argv call must therefore pass
-    through rather than fail closed — the outer namespace still confines every
-    descendant, so this is NOT the fail-open path. Failing closed here bricked
-    every in-sandbox MCP spawn with unshare EPERM: the probe error was raised on
-    every ctx.call_tool and silently swallowed by the caller.
+    Nested sandboxing is impossible on both backends: the Linux launcher's
+    seccomp filter denies ``unshare``/``setns`` precisely so the sandboxed tree
+    cannot manipulate namespaces, and macOS Seatbelt refuses ``sandbox_apply``
+    with EPERM from inside an existing sandbox even under an ``(allow default)``
+    outer profile. An in-sandbox wrap_argv call must therefore pass through
+    rather than fail closed — the outer sandbox still confines every descendant,
+    so this is NOT the fail-open path. Failing closed here bricked every
+    in-sandbox MCP spawn with unshare EPERM (the probe error was raised on every
+    ctx.call_tool and silently swallowed by the caller), and on macOS it bricked
+    every app-backend spawn (Dev Fleet's ``git worktree list``, Files' ``git
+    status``/search) plus ~40 MCP probes at gateway boot.
 
     Detection is deny-by-default: gated solely on the explicit, launcher-only
     ``KIROCREW_SANDBOX_ACTIVE`` marker (see ``_IN_SANDBOX_MARKER``).
     """
-    return bool(os.environ.get(_IN_SANDBOX_MARKER))
+    return _active_sandbox_tier() is not None
+
+
+@functools.lru_cache(maxsize=1)
+def _macos_sandbox_state() -> bool | None:
+    """Kernel verdict on whether THIS macOS process is Seatbelt-confined.
+
+    ``True``
+        Confined — ``sandbox_check(pid, NULL, SANDBOX_FILTER_NONE)`` returned 1.
+    ``False``
+        Definitely not confined — the kernel answered 0.
+    ``None``
+        Unanswerable — non-darwin, or the symbol could not be loaded or called.
+
+    Three states rather than a bool because the two negatives carry opposite
+    security meanings. A definite ``False`` alongside a present
+    ``KIROCREW_SANDBOX_ACTIVE`` marker proves the marker was forged or inherited
+    into an unsandboxed process, and must NOT grant a passthrough. An
+    unanswerable probe says nothing at all, and must not retroactively
+    invalidate a marker the Linux path honours unconditionally.
+
+    Cached for the process lifetime — a process cannot leave its sandbox.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        libpath = ctypes.util.find_library("System") or "/usr/lib/libSystem.dylib"
+        lib = ctypes.CDLL(libpath, use_errno=True)
+        check = lib.sandbox_check
+        # sandbox_check(pid_t, const char *operation, enum sandbox_filter_type, ...)
+        # A NULL operation with SANDBOX_FILTER_NONE (0) asks the generic
+        # "is this pid sandboxed at all?" question. The path-scoped form that
+        # could identify WHICH paths the profile denies is variadic and returns
+        # -1 through ctypes on arm64, so it is not usable here.
+        check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+        check.restype = ctypes.c_int
+        rc = check(os.getpid(), None, 0)
+        if rc < 0:
+            return None
+        return rc == 1
+    except Exception as exc:  # missing symbol, ABI change, restricted dyld, ...
+        logger.debug("sandbox_check unavailable (%s); sandbox state unknown", exc)
+        return None
+
+
+def _inside_macos_sandbox() -> bool:
+    """True when the kernel confirms a Seatbelt sandbox confines this process.
+
+    Diagnostic-grade view of :func:`_macos_sandbox_state`, used to tell a
+    *nesting* EPERM apart from a genuinely missing backend so the fail-closed
+    error names the real cause. Without it, :func:`_probe_sandbox_exec`'s EPERM
+    is reported as "this host has no sandbox backend" — on a host whose
+    ``sandbox-exec`` works perfectly when not nested.
+
+    Unlike :data:`_IN_SANDBOX_MARKER` this is OS-authoritative: it cannot be
+    spoofed through an agent-influenced environment, and it sees sandboxes
+    KiroCrew did NOT create — notably kiro-cli >= 2.13's own internal seatbelt
+    (see ``_KIRO_INTERNAL_SETTINGS_PATH``), or an operator-wrapped gateway. It
+    is therefore NOT sufficient on its own to grant a passthrough: it proves
+    *some* sandbox is active, not that KiroCrew built it or scrubbed the
+    environment. The marker supplies that half; see :func:`wrap_argv`.
+    """
+    return _macos_sandbox_state() is True
+
+
+def _nested_passthrough_audit(
+    argv: list[str],
+    mode: str,
+    *,
+    active_tier: str,
+    requested_tier: str,
+) -> None:
+    """Log (once) + SEL-audit (every time) a nested-sandbox passthrough.
+
+    Reached when ``KIROCREW_SANDBOX_ACTIVE`` shows this process already runs
+    inside a KiroCrew sandbox — a Linux namespace (seccomp denies the ``unshare``
+    a nested backend needs) or a macOS Seatbelt profile (``sandbox_apply``
+    returns EPERM from inside a sandbox, even under ``(allow default)``).
+
+    This is not fail-open: the outer sandbox still confines the spawn and every
+    descendant, and both marker sites set the marker only after applying that
+    platform's credential-env scrub, so the inherited environment is already
+    sanitised. The audit event records the decision to spawn without a *fresh*
+    wrap, mirroring the ``denied`` event on the fail-closed path; outcome is
+    ``allowed`` (a permission grant, not a denial) and ``critical=True`` gives it
+    the same synchronous write reliability, so a wedged background writer cannot
+    silently drop passthrough records.
+
+    ``active_tier``/``requested_tier`` make the inherited isolation explicit. A
+    passthrough runs at the OUTER sandbox's tier, so a request for a *stricter*
+    tier than the host sandbox is refused before reaching here (see
+    :func:`_nested_downgrade_denied`) — it cannot be satisfied and must not be
+    silently downgraded. Recording both tiers keeps that decision auditable, and
+    lets an auditor see when a spawn ran at a *stricter* tier than it requested
+    (harmless, and common: a ``standard`` spawn inside a ``cc`` cron sandbox).
+
+    A SEL write failure does NOT become a deny: a nested passthrough has no safe
+    alternative, so failing the spawn would couple every in-sandbox call to SEL
+    health and reintroduce a prior in-sandbox spawn outage. The child is confined
+    either way, so we log loudly and proceed.
+    """
+    if not getattr(wrap_argv, "_nested_passthrough_logged", False):
+        wrap_argv._nested_passthrough_logged = True  # type: ignore[attr-defined]
+        logger.info(
+            "wrap_argv: already inside a KiroCrew sandbox (tier=%s) — nested OS "
+            "sandboxing is impossible by design (Linux seccomp denies unshare; "
+            "macOS Seatbelt refuses sandbox_apply with EPERM), so spawning "
+            "within the existing isolation boundary rather than fail-closing on "
+            "a nesting artifact",
+            active_tier,
+        )
+    try:
+        # circular import (see the fail-closed branch for the full rationale):
+        # sandbox.py is a low-level leaf; defer the sel import.
+        from kiro_crew.sel import sel
+
+        sel().log_tool_invocation(
+            session_key="sandbox",
+            agent="system",
+            source="sandbox.wrap_argv",
+            tool_name=argv[0] if argv else "unknown",
+            tool_kind="subprocess",
+            outcome="allowed",
+            metadata={
+                "reason": "nested_sandbox_passthrough",
+                "active_tier": active_tier,
+                "requested_tier": requested_tier,
+                "mode": mode,
+            },
+            critical=True,
+        )
+    except Exception:
+        logger.warning(
+            "SEL audit failed for nested-sandbox passthrough (tier=%s) — "
+            "proceeding unaudited: the outer sandbox still confines this spawn, "
+            "and denying it would brick in-sandbox spawns whenever SEL is down",
+            active_tier,
+            exc_info=True,
+        )
+
+
+def _nested_downgrade_denied(argv: list[str], active_tier: str, requested_tier: str) -> None:
+    """Log + SEL-audit a refusal to satisfy a stricter tier from inside a weaker one.
+
+    Mirrors the ``denied`` event on the no-backend fail-closed path so both
+    refusals are tamper-evidently recorded. A SEL failure here does not swallow
+    the denial: the caller raises regardless, so the safe outcome holds even if
+    the record does not land.
+    """
+    logger.warning(
+        "SECURITY: refusing to spawn %r — it requested %r isolation from inside a "
+        "%r sandbox, and a nested wrap cannot tighten the sandbox it is already "
+        "in. Passing through would have run repo- or agent-influenced code at the "
+        "weaker tier with the stricter tier's hides absent.",
+        argv[0] if argv else "unknown",
+        requested_tier,
+        active_tier,
+    )
+    try:
+        # circular import (see the fail-closed branch for the full rationale):
+        # sandbox.py is a low-level leaf; defer the sel import.
+        from kiro_crew.sel import sel
+
+        sel().log_tool_invocation(
+            session_key="sandbox",
+            agent="system",
+            source="sandbox.wrap_argv",
+            tool_name=argv[0] if argv else "unknown",
+            tool_kind="subprocess",
+            outcome="denied",
+            error=(
+                f"requested {requested_tier} isolation inside a {active_tier} "
+                "sandbox (nested wrap cannot tighten)"
+            ),
+            metadata={
+                "reason": "nested_sandbox_tier_downgrade_denied",
+                "active_tier": active_tier,
+                "requested_tier": requested_tier,
+            },
+            critical=True,
+        )
+    except Exception:
+        logger.warning(
+            "SEL audit failed for nested-sandbox tier-downgrade denial — the "
+            "spawn is refused regardless",
+            exc_info=True,
+        )
 
 
 def _warn_no_isolation(mode: str) -> None:
@@ -1701,63 +1960,6 @@ def wrap_argv(
     if mode == "off":
         return argv, None
 
-    # Already inside a KiroCrew sandbox (script cron, sandboxed agent child):
-    # the outer namespace + seccomp confine every descendant, and that seccomp
-    # filter denies the unshare a nested backend would need. Pass through
-    # within the existing isolation boundary.
-    if _inside_kirocrew_sandbox():
-        if not getattr(wrap_argv, "_nested_passthrough_logged", False):
-            wrap_argv._nested_passthrough_logged = True  # type: ignore[attr-defined]
-            logger.info(
-                "wrap_argv: already inside a KiroCrew sandbox — nested OS "
-                "sandboxing is unavailable by design (seccomp denies unshare); "
-                "spawning within the existing isolation boundary"
-            )
-        # Emit an SEL audit event for this security-relevant passthrough so the
-        # decision to spawn without a *fresh* wrap is tamper-evidently recorded,
-        # mirroring the ``denied`` event on the fail-closed path. Outcome is
-        # ``allowed`` (a permission grant, not a denial). Fires on EVERY
-        # passthrough so the audit trail is complete.
-        #
-        # critical=True gives this the same write reliability as the fail-closed
-        # ``denied`` audit and the ``delegated`` audit: the event is written
-        # SYNCHRONOUSLY after draining the async backlog (sel.log), so a
-        # slow/wedged background writer can NOT silently drop passthrough
-        # records. What it does NOT do is re-raise into a *deny*: unlike
-        # _delegate_to_kiro_internal_sandbox — which on audit failure falls back
-        # to KiroCrew's own seatbelt, an equally-safe audited layer — a nested
-        # passthrough has no safe alternative (seccomp denies the re-wrap by
-        # design). Failing the spawn on a SEL filesystem error would couple every
-        # in-sandbox MCP call to SEL health and reintroduce a prior in-sandbox
-        # spawn outage. The child is confined by the outer namespace + seccomp
-        # whether or not the record lands, so on a hard write failure we log
-        # loudly and proceed: availability of the confinement over a best-effort
-        # audit gap during an already-degraded FS.
-        try:
-            # circular import (see the fail-closed branch below for the full
-            # rationale): sandbox.py is a low-level leaf; defer the sel import.
-            from kiro_crew.sel import sel
-
-            sel().log_tool_invocation(
-                session_key="sandbox",
-                agent="system",
-                source="sandbox.wrap_argv",
-                tool_name=argv[0] if argv else "unknown",
-                tool_kind="subprocess",
-                outcome="allowed",
-                metadata={"reason": "nested_sandbox_passthrough", "mode": mode},
-                critical=True,
-            )
-        except Exception:
-            logger.warning(
-                "SEL audit failed for nested-sandbox passthrough — proceeding "
-                "unaudited: the outer namespace + seccomp still confine this "
-                "spawn, and denying it would brick in-sandbox MCP calls whenever "
-                "SEL is down",
-                exc_info=True,
-            )
-        return argv, None
-
     # "auto"/"standard" allows git-over-SSH, AWS CLI, kubectl.
     # "cc" hides .aws (exposes only .aws/config for Bedrock credential_process).
     # "strict" hides everything.
@@ -1767,6 +1969,59 @@ def wrap_argv(
         sandbox_level = "cc"
     else:
         sandbox_level = "standard"
+
+    # Already inside a KiroCrew sandbox (script cron, sandboxed agent child, app
+    # backend, pooled MCP server): the outer sandbox confines every descendant,
+    # and a nested wrap is impossible by design — Linux seccomp denies the
+    # unshare, macOS Seatbelt refuses sandbox_apply with EPERM. Pass through
+    # within the existing isolation boundary. Checked BEFORE backend detection
+    # because a cached "namespace" verdict would otherwise send us into a re-wrap
+    # seccomp denies, and on macOS because the nested probe's EPERM would
+    # otherwise be misread as "this host has no sandbox backend".
+    #
+    # Two facts must agree, and they cover each other's blind spot:
+    #   * the marker proves KiroCrew built the outer sandbox and scrubbed the
+    #     credential env on the way in (both marker sites set it right after
+    #     that scrub) — but an env var alone could be forged or inherited;
+    #   * on macOS the kernel independently confirms a sandbox IS active — but
+    #     it cannot say whose profile it is, so it can never grant this alone.
+    # A definite kernel "not sandboxed" therefore vetoes the marker. An
+    # *unanswerable* probe does not: that says nothing, and must not invalidate a
+    # marker the Linux path honours unconditionally.
+    active_tier = _active_sandbox_tier()
+    if active_tier is not None and _macos_sandbox_state() is not False:
+        # A passthrough runs at the OUTER tier — it cannot tighten a sandbox it
+        # is already inside. Refuse rather than silently hand a caller weaker
+        # isolation than it asked for: at "standard" the credential directories
+        # are deliberately visible, so a spawn that asked for "cc"/"strict"
+        # because it runs repo-controlled code must not proceed as if it got it.
+        # This closes a pre-existing gap on BOTH platforms — the marker check
+        # used to sit above the sandbox_level derivation and was therefore
+        # tier-blind, so an in-sandbox "strict" request silently ran at the
+        # host sandbox's tier.
+        if _tier_downgrade(active_tier, sandbox_level):
+            _nested_downgrade_denied(argv, active_tier, sandbox_level)
+            raise RuntimeError(
+                f"Cannot obtain {sandbox_level!r} isolation from inside a "
+                f"{active_tier!r} sandbox: a nested wrap is impossible by design "
+                "(Linux seccomp denies unshare; macOS Seatbelt refuses "
+                "sandbox_apply), and passing through would run this spawn at the "
+                f"weaker {active_tier!r} tier without the hides it asked for. "
+                f"Spawn it from a process confined at {sandbox_level!r} or "
+                "stricter, or request the tier this process actually has."
+            )
+        _nested_passthrough_audit(
+            argv, mode, active_tier=active_tier, requested_tier=sandbox_level
+        )
+        return argv, None
+    if active_tier is not None:
+        logger.warning(
+            "SECURITY: %s is set but the kernel reports this process is NOT "
+            "sandboxed — refusing the nested-sandbox passthrough and falling "
+            "back to a normal wrap. A marker without a real sandbox can only be "
+            "forged or inherited into an unconfined process.",
+            _IN_SANDBOX_MARKER,
+        )
 
     # macOS sandbox mutual exclusion: kiro-cli >= 2.13's internal sandbox cannot
     # initialize nested inside KiroCrew's seatbelt (kernel EPERM even under an
@@ -1827,6 +2082,22 @@ def wrap_argv(
         )
 
     if backend == "none":
+        # Reaching here while nested means the outer sandbox is NOT one KiroCrew
+        # built: a KiroCrew-built one carries KIROCREW_SANDBOX_ACTIVE and was
+        # already passed through above, before detection ran. So the remaining
+        # nested case is a foreign confiner — kiro-cli's own internal seatbelt,
+        # or an operator-wrapped gateway — whose profile macOS gives us no
+        # supported way to identify (the path-scoped ``sandbox_check`` form is
+        # variadic and returns -1 through ctypes on arm64). We therefore do NOT
+        # pass through: whether that profile hides credential paths is unknown,
+        # and a settings file claiming kiro's sandbox is enabled is a
+        # configuration claim, not evidence about the active profile.
+        #
+        # What we DO fix is the diagnosis. The probe's EPERM is a nesting
+        # artifact, not a host verdict, so the error must not claim this host
+        # lacks a sandbox backend — that sent operators hunting for a missing
+        # backend on hosts where sandbox-exec works perfectly unnested.
+        #
         # FAIL-CLOSED: refuse to execute without sandbox unless explicitly opted in.
         # This addresses a penetration-test finding — the previous behavior silently
         # returned unmodified argv, allowing the agent subprocess to access all
@@ -1842,6 +2113,25 @@ def wrap_argv(
                     "pressure) — it is not cached and the next spawn re-probes "
                     "automatically. Do NOT disable the sandbox for this; retry "
                     "instead. "
+                )
+            elif _inside_macos_sandbox():
+                # Nesting under a FOREIGN sandbox — say so, and point at the
+                # config-level fix that hands isolation back to KiroCrew's own
+                # profile, not at sandbox_allow_unsandboxed_exec (which would
+                # disable isolation everywhere to fix a case where a sandbox
+                # demonstrably exists).
+                guidance = (
+                    "This host's sandbox is NOT broken: the kernel reports this "
+                    "process is already inside a macOS Seatbelt sandbox that "
+                    "KiroCrew did not create, and Seatbelt cannot nest, so "
+                    "sandbox-exec fails with EPERM. Spawns under KiroCrew's OWN "
+                    "sandbox are unaffected — they carry an isolation marker and "
+                    "pass through. The usual cause is kiro-cli's internal "
+                    "sandbox: set {\"sandbox\": false} in "
+                    "~/.kiro/settings/amazon-internal.json so KiroCrew's own "
+                    "profile owns isolation (that profile is the one that hides "
+                    "~/.aws and ~/.ssh, so this keeps isolation rather than "
+                    "weakening it), then restart the gateway. "
                 )
             else:
                 guidance = (

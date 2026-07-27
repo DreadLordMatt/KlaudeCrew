@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import kiro_crew.sandbox as sandbox_mod
 from kiro_crew.sandbox import (
     _CC_FILES,
     _SENSITIVE_ENV_PREFIXES,
@@ -128,6 +129,10 @@ class TestWrapArgv:
         # Deny-by-default: the passthrough is gated SOLELY on the explicit
         # KIROCREW_SANDBOX_ACTIVE marker (not the dual-purpose KIROCREW_HOST_PID).
         monkeypatch.setenv("KIROCREW_SANDBOX_ACTIVE", "1")
+        # Fix the macOS kernel cross-check explicitly: unanswerable (None) is the
+        # platform-neutral input, so this assertion holds on a sandboxed dev
+        # machine and an unsandboxed CI runner alike.
+        monkeypatch.setattr(sandbox_mod, "_macos_sandbox_state", lambda: None)
         argv = ["kiro-cli", "acp"]
         with patch("kiro_crew.sel.sel") as mock_sel:
             result, cleanup = wrap_argv(argv, mode="strict")
@@ -149,6 +154,7 @@ class TestWrapArgv:
         # spawn outage (every in-sandbox MCP spawn bricked). The spawn is
         # confined by the outer namespace regardless, so we log and proceed.
         monkeypatch.setenv("KIROCREW_SANDBOX_ACTIVE", "1")
+        monkeypatch.setattr(sandbox_mod, "_macos_sandbox_state", lambda: None)
         argv = ["kiro-cli", "acp"]
         with patch("kiro_crew.sel.sel", side_effect=OSError("SEL transport down")):
             result, cleanup = wrap_argv(argv, mode="strict")
@@ -177,6 +183,217 @@ class TestWrapArgv:
         with patch("kiro_crew.sandbox._allow_unsandboxed_exec", return_value=True):
             result, cleanup = wrap_argv(["kiro-cli"], mode="strict")
         mock_detect.assert_called_once()
+
+
+class TestNestedSandboxPassthrough:
+    """A nested wrap is impossible on both backends, so wrap_argv passes through.
+
+    Regression cover for app-backend spawns (Dev Fleet's ``git worktree list``,
+    Files' ``git status`` / search) and ~40 gateway-boot MCP probes failing with
+    "sandbox unavailable ... no OS-level sandbox backend is available on this
+    host" on a macOS host whose ``sandbox-exec`` works perfectly when NOT nested
+    — because KiroCrew's own seatbelt had already confined the process tree.
+
+    The gate needs the marker AND (on macOS) a non-negative kernel verdict, so
+    every test below fixes both inputs explicitly rather than inheriting whatever
+    the test host happens to be: these assertions must not flip between a
+    sandboxed dev machine and an unsandboxed CI runner.
+    """
+
+    @patch("kiro_crew.sandbox.detect_backend")
+    def test_marker_plus_kernel_confirmation_passes_through(self, mock_detect, monkeypatch):
+        monkeypatch.setenv("KIROCREW_SANDBOX_ACTIVE", "standard")
+        monkeypatch.setattr(sandbox_mod, "_macos_sandbox_state", lambda: True)
+        argv = ["git", "worktree", "list", "--porcelain"]
+        with patch("kiro_crew.sel.sel") as mock_sel:
+            result, cleanup = wrap_argv(argv, mode="standard")
+        assert result == argv
+        assert cleanup is None
+        # Passthrough short-circuits BEFORE detection: a nested sandbox-exec
+        # probe necessarily EPERMs, and reading that as a host verdict is the
+        # bug this fixes.
+        mock_detect.assert_not_called()
+        kwargs = mock_sel.return_value.log_tool_invocation.call_args.kwargs
+        assert kwargs["outcome"] == "allowed"
+        assert kwargs["critical"] is True
+        assert kwargs["metadata"]["active_tier"] == "standard"
+        assert kwargs["metadata"]["requested_tier"] == "standard"
+
+    @patch("kiro_crew.sandbox.detect_backend", return_value="none")
+    def test_forged_marker_without_kernel_confirmation_is_refused(
+        self, mock_detect, monkeypatch
+    ):
+        # The kernel is authoritative: a marker on a process the kernel says is
+        # NOT sandboxed can only have been forged or inherited into an unconfined
+        # process, so it must not open the passthrough.
+        monkeypatch.setenv("KIROCREW_SANDBOX_ACTIVE", "strict")
+        monkeypatch.setattr(sandbox_mod, "_macos_sandbox_state", lambda: False)
+        monkeypatch.setattr(sandbox_mod, "_inside_macos_sandbox", lambda: False)
+        monkeypatch.setattr(sandbox_mod, "kiro_internal_sandbox_enabled", lambda: False)
+        monkeypatch.setattr(sandbox_mod, "_allow_unsandboxed_exec", lambda: False)
+        sandbox_mod._last_unshare_failure = (False, "EPERM: kernel refuses userns")
+        with pytest.raises(RuntimeError, match="Sandbox backend unavailable"):
+            wrap_argv(["kiro-cli", "acp"], mode="strict")
+        mock_detect.assert_called_once()
+
+    @patch("kiro_crew.sandbox.detect_backend")
+    def test_unanswerable_kernel_probe_still_honours_marker(self, mock_detect, monkeypatch):
+        # "Cannot answer" is not "not sandboxed". A missing symbol / ABI change
+        # must not retroactively invalidate a marker the Linux path honours
+        # unconditionally — that would brick in-sandbox spawns on any host where
+        # the probe is unavailable.
+        monkeypatch.setenv("KIROCREW_SANDBOX_ACTIVE", "strict")
+        monkeypatch.setattr(sandbox_mod, "_macos_sandbox_state", lambda: None)
+        argv = ["kiro-cli", "acp"]
+        with patch("kiro_crew.sel.sel"):
+            result, cleanup = wrap_argv(argv, mode="strict")
+        assert result == argv
+        mock_detect.assert_not_called()
+
+    @patch("kiro_crew.sandbox.detect_backend")
+    def test_stricter_request_from_weaker_sandbox_is_refused(self, mock_detect, monkeypatch):
+        """A passthrough must never silently hand back weaker isolation.
+
+        A nested wrap cannot tighten the sandbox it is already in, so a "strict"
+        request from inside a "standard" sandbox is unsatisfiable. Passing it
+        through would run repo- or agent-influenced code with the credential
+        directories still visible (they are deliberately exposed at "standard"),
+        which is precisely what the caller asked to avoid. Refuse, and audit the
+        refusal like the other fail-closed path.
+        """
+        monkeypatch.setenv("KIROCREW_SANDBOX_ACTIVE", "standard")
+        monkeypatch.setattr(sandbox_mod, "_macos_sandbox_state", lambda: True)
+        with patch("kiro_crew.sel.sel") as mock_sel:
+            with pytest.raises(RuntimeError) as ei:
+                wrap_argv(["git", "rebase", "origin/main"], mode="strict")
+        msg = str(ei.value)
+        assert "'strict'" in msg and "'standard'" in msg
+        kwargs = mock_sel.return_value.log_tool_invocation.call_args.kwargs
+        assert kwargs["outcome"] == "denied"
+        assert kwargs["metadata"]["reason"] == "nested_sandbox_tier_downgrade_denied"
+
+    @patch("kiro_crew.sandbox.detect_backend")
+    def test_refusal_holds_even_when_the_audit_write_fails(self, mock_detect, monkeypatch):
+        # Unlike the passthrough (which has no safe alternative), the refusal DOES
+        # have one: refusing. A SEL outage must not turn it into an allow.
+        monkeypatch.setenv("KIROCREW_SANDBOX_ACTIVE", "standard")
+        monkeypatch.setattr(sandbox_mod, "_macos_sandbox_state", lambda: True)
+        with patch("kiro_crew.sel.sel", side_effect=OSError("SEL transport down")):
+            with pytest.raises(RuntimeError):
+                wrap_argv(["git", "rebase", "origin/main"], mode="strict")
+
+    @patch("kiro_crew.sandbox.detect_backend")
+    def test_weaker_request_from_stricter_sandbox_passes_through(
+        self, mock_detect, monkeypatch
+    ):
+        # The common, harmless direction: a "standard" spawn from inside a "cc"
+        # cron sandbox already has MORE isolation than it asked for. Refusing
+        # here would brick script crons for no security gain.
+        monkeypatch.setenv("KIROCREW_SANDBOX_ACTIVE", "cc")
+        monkeypatch.setattr(sandbox_mod, "_macos_sandbox_state", lambda: True)
+        with patch("kiro_crew.sel.sel") as mock_sel:
+            result, _ = wrap_argv(["git", "status"], mode="standard")
+        assert result == ["git", "status"]
+        meta = mock_sel.return_value.log_tool_invocation.call_args.kwargs["metadata"]
+        assert meta["active_tier"] == "cc"
+        assert meta["requested_tier"] == "standard"
+
+    @patch("kiro_crew.sandbox.detect_backend")
+    def test_legacy_marker_value_is_honoured_without_claiming_a_downgrade(
+        self, mock_detect, monkeypatch
+    ):
+        # A sandbox created by a build predating the tier record wrote "1". It
+        # still confines the tree, so it must still pass through; and since the
+        # tier is unknown, no downgrade may be claimed either way.
+        monkeypatch.setenv("KIROCREW_SANDBOX_ACTIVE", "1")
+        monkeypatch.setattr(sandbox_mod, "_macos_sandbox_state", lambda: True)
+        with patch("kiro_crew.sel.sel") as mock_sel:
+            result, _ = wrap_argv(["kiro-cli", "acp"], mode="strict")
+        assert result == ["kiro-cli", "acp"]
+        meta = mock_sel.return_value.log_tool_invocation.call_args.kwargs["metadata"]
+        assert meta["active_tier"] == "unknown"
+
+    @patch("kiro_crew.sandbox.detect_backend", return_value="none")
+    def test_foreign_outer_sandbox_fails_closed_with_actionable_guidance(
+        self, mock_detect, monkeypatch
+    ):
+        # Nested under a sandbox KiroCrew did NOT create (no marker): its profile
+        # is unidentifiable and its env was never scrubbed by us, so passthrough
+        # is refused. The error must still name the REAL cause and the remedy
+        # that keeps isolation, not repeat the false "this host has no sandbox
+        # backend" claim.
+        monkeypatch.delenv("KIROCREW_SANDBOX_ACTIVE", raising=False)
+        monkeypatch.setattr(sandbox_mod, "_macos_sandbox_state", lambda: True)
+        monkeypatch.setattr(sandbox_mod, "_inside_macos_sandbox", lambda: True)
+        monkeypatch.setattr(sandbox_mod, "kiro_internal_sandbox_enabled", lambda: False)
+        monkeypatch.setattr(sandbox_mod, "_allow_unsandboxed_exec", lambda: False)
+        sandbox_mod._last_unshare_failure = (False, "sandbox_apply: Operation not permitted")
+        with pytest.raises(RuntimeError) as ei:
+            wrap_argv(["git", "status"], mode="standard")
+        msg = str(ei.value)
+        assert "NOT broken" in msg
+        assert "amazon-internal.json" in msg
+        # Must not steer the operator at the blunt flag that disables isolation
+        # even where no sandbox exists at all.
+        assert "sandbox_allow_unsandboxed_exec=true" not in msg
+
+    @patch("kiro_crew.sandbox.detect_backend", return_value="none")
+    def test_not_nested_still_fails_closed(self, mock_detect, monkeypatch):
+        # The passthrough must not weaken the fail-closed guarantee on a host
+        # that genuinely has no backend. kiro delegation is off here so this
+        # exercises the fail-closed branch rather than the delegation path.
+        monkeypatch.delenv("KIROCREW_SANDBOX_ACTIVE", raising=False)
+        monkeypatch.setattr(sandbox_mod, "_macos_sandbox_state", lambda: False)
+        monkeypatch.setattr(sandbox_mod, "_inside_macos_sandbox", lambda: False)
+        monkeypatch.setattr(sandbox_mod, "kiro_internal_sandbox_enabled", lambda: False)
+        monkeypatch.setattr(sandbox_mod, "_allow_unsandboxed_exec", lambda: False)
+        sandbox_mod._last_unshare_failure = (False, "EPERM: kernel refuses userns")
+        with pytest.raises(RuntimeError, match="Sandbox backend unavailable"):
+            wrap_argv(["kiro-cli", "acp"], mode="standard")
+
+    @patch("kiro_crew.sandbox.detect_backend", return_value="sandbox-exec")
+    def test_available_backend_still_wraps(self, mock_detect, monkeypatch):
+        # With no marker, a working backend must still wrap — the passthrough is
+        # not a bypass. Uses a NON-kiro argv so the kiro-delegation path does not
+        # intercept.
+        monkeypatch.delenv("KIROCREW_SANDBOX_ACTIVE", raising=False)
+        monkeypatch.setattr(sandbox_mod, "_macos_sandbox_state", lambda: True)
+        with patch("kiro_crew.sandbox.sandbox_exec_argv") as mock_sb:
+            mock_sb.return_value = (["sandbox-exec", "-f", "/tmp/p.sb", "git"], "/tmp/p.sb")
+            wrap_argv(["git", "status"], mode="standard")
+        mock_sb.assert_called_once()
+
+    def test_kernel_state_is_none_off_darwin(self, monkeypatch):
+        # Linux namespace isolation must be unaffected by the macOS-only probe,
+        # and "not darwin" is unanswerable rather than "not sandboxed".
+        monkeypatch.setattr(sandbox_mod.sys, "platform", "linux")
+        sandbox_mod._macos_sandbox_state.cache_clear()
+        try:
+            assert sandbox_mod._macos_sandbox_state() is None
+            assert sandbox_mod._inside_macos_sandbox() is False
+        finally:
+            sandbox_mod._macos_sandbox_state.cache_clear()
+
+    def test_kernel_state_is_none_when_probe_raises(self, monkeypatch):
+        # An unanswerable probe is None, NOT False — False is a positive claim
+        # that would veto a legitimate marker.
+        monkeypatch.setattr(sandbox_mod.sys, "platform", "darwin")
+        monkeypatch.setattr(
+            sandbox_mod.ctypes, "CDLL", lambda *a, **k: (_ for _ in ()).throw(OSError("nope"))
+        )
+        sandbox_mod._macos_sandbox_state.cache_clear()
+        try:
+            assert sandbox_mod._macos_sandbox_state() is None
+        finally:
+            sandbox_mod._macos_sandbox_state.cache_clear()
+
+    def test_tier_downgrade_only_claims_what_it_can_prove(self):
+        assert sandbox_mod._tier_downgrade("standard", "strict") is True
+        assert sandbox_mod._tier_downgrade("strict", "standard") is False
+        assert sandbox_mod._tier_downgrade("cc", "cc") is False
+        # Unknown on either side: "cannot compare" is not "is weaker".
+        assert sandbox_mod._tier_downgrade("unknown", "strict") is False
+        assert sandbox_mod._tier_downgrade("standard", "nonsense") is False
 
 
 class TestBuildSeatbeltProfile:
@@ -254,6 +471,17 @@ class TestBuildSeatbeltProfile:
 
 
 class TestBuildLauncherScript:
+    def test_launcher_marker_carries_the_tier(self):
+        """Cross-platform parity: the Linux launcher records its tier too.
+
+        Both marker sites must agree on the value's meaning, or an in-sandbox
+        passthrough can compare a tier name against a bare "1" and mis-report the
+        isolation it inherited.
+        """
+        for level in ("standard", "cc", "strict"):
+            script = _build_launcher_script(level)
+            assert f'os.environ["KIROCREW_SANDBOX_ACTIVE"] = "{level}"' in script
+
     def test_strict_script_contains_dirs(self):
         script = _build_launcher_script("strict")
         assert "SENSITIVE_DIRS" in script
@@ -551,6 +779,26 @@ class TestSandboxExecArgv:
             if profile_path:
                 os.unlink(profile_path)
 
+    def test_exports_in_sandbox_marker_carrying_the_tier(self):
+        """The seatbelt wrap must mark the tree, mirroring the Linux launcher.
+
+        Without this marker an in-sandbox ``wrap_argv`` call cannot tell that
+        KiroCrew's own sandbox already confines it, tries to nest, and gets EPERM
+        — which then fail-closes every app-backend and MCP spawn. The marker must
+        land AFTER the ``-u`` flags (an assignment, not something ``-u`` can drop)
+        and BEFORE ``sandbox-exec``, and carry the tier so the passthrough can
+        record the isolation it inherits.
+        """
+        argv, profile_path = sandbox_exec_argv(["git", "status"], "cc")
+        try:
+            marker = f"{sandbox_mod._IN_SANDBOX_MARKER}=cc"
+            assert marker in argv
+            assert argv.index(marker) < argv.index("sandbox-exec")
+            assert argv[0] == "env"
+        finally:
+            if profile_path:
+                os.unlink(profile_path)
+
     @patch.dict(os.environ, {"PYTHONPATH": "/opt/kirocrew/site-packages", "PYTHONHOME": "/opt/py"})
     def test_strips_python_env_when_requested(self):
         # A foreign Python subprocess (kiro-cli's MCP servers, e.g. ord-mcp) must
@@ -687,8 +935,13 @@ class TestSandboxNoWarningWhenExpected:
 
         if hasattr(wrap_argv, "_warned"):
             del wrap_argv._warned  # type: ignore[attr-defined]
-        with caplog.at_level(logging.DEBUG, logger="kiro_crew.sandbox"):
-            wrap_argv(["kiro-cli", "acp"], mode="auto")
+        # Assert the genuinely-no-backend path: a process that is itself
+        # sandboxed takes the audited nesting passthrough instead, which logs a
+        # different message. Pin it so the outcome does not depend on whether
+        # the suite happens to run inside a Seatbelt sandbox.
+        with patch("kiro_crew.sandbox._inside_macos_sandbox", return_value=False):
+            with caplog.at_level(logging.DEBUG, logger="kiro_crew.sandbox"):
+                wrap_argv(["kiro-cli", "acp"], mode="auto")
         warning_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
         info_msgs = [
             r

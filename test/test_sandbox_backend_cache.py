@@ -187,6 +187,9 @@ def test_off_mode_short_circuits_without_probing(monkeypatch):
 def test_fail_closed_transient_message_advises_retry_not_optout(monkeypatch):
     monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
     monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: False)
+    # Assert the genuinely-no-backend path: if this process were itself
+    # sandboxed, wrap_argv would (correctly) pass through instead of raising.
+    monkeypatch.setattr(sb, "_inside_macos_sandbox", lambda: False)
     sb._last_unshare_failure = (True, _EAGAIN_REASON)
     with pytest.raises(RuntimeError) as excinfo:
         sb.wrap_argv(["kiro-cli", "acp"], mode="standard")
@@ -201,6 +204,7 @@ def test_fail_closed_transient_message_advises_retry_not_optout(monkeypatch):
 def test_fail_closed_permanent_message_includes_optout_and_detail(monkeypatch):
     monkeypatch.setattr(sb, "detect_backend", lambda config_mode="auto": "none")
     monkeypatch.setattr(sb, "_allow_unsandboxed_exec", lambda: False)
+    monkeypatch.setattr(sb, "_inside_macos_sandbox", lambda: False)
     sb._last_unshare_failure = (False, _EPERM_REASON)
     with pytest.raises(RuntimeError) as excinfo:
         sb.wrap_argv(["kiro-cli", "acp"], mode="standard")

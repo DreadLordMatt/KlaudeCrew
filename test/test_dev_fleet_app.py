@@ -1,6 +1,7 @@
 """Tests for the dev-fleet native dashboard handler."""
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import hmac as _hmac  # noqa: F401
@@ -1066,11 +1067,17 @@ async def test_start_run_readline_overrun_kills_process_tree(monkeypatch):
 
 # --- Codex R35 regressions ---
 @pytest.mark.asyncio
-async def test_sync_fetch_standard_merge_strict(monkeypatch):
-    """The sync runner never uses `git pull`: the network fetch runs at
-    "standard" while the checkout-performing ff-merge (which executes
-    repo-controlled smudge filters / merge drivers) runs "strict" with
-    credential dirs hidden, like the pip/npm build steps."""
+async def test_sync_never_pulls_and_only_fetch_gets_credentials(monkeypatch):
+    """The sync runner never uses `git pull`, and only the network fetch is
+    credentialed.
+
+    Every step declares "standard" — the tier this app backend actually runs at.
+    The ff-merge and the pip/npm steps used to declare "strict", but an app
+    backend is itself spawned at "standard" and a sandboxed process cannot
+    tighten the sandbox it is already in, so that request was never honoured (it
+    silently ran at "standard") and `sandbox.wrap_argv` now refuses it outright.
+    What actually keeps the checkout-performing steps safe is unchanged: they get
+    `_build_env()` without credentials, while only the fetch gets them."""
     import kiro_crew.apps.builtins.dev_fleet.server as mod
 
     captured: list[tuple[list, str]] = []
@@ -1095,10 +1102,10 @@ async def test_sync_fetch_standard_merge_strict(monkeypatch):
     fetch = [m for argv, m in captured if "fetch" in argv]
     merge = [m for argv, m in captured if "merge" in argv]
     assert fetch == ["standard"]
-    assert merge == ["strict"]
+    assert merge == ["standard"]
     for argv, m in captured:
         if "pip" in " ".join(map(str, argv)) or argv[0] == "npm":
-            assert m == "strict"
+            assert m == "standard"
 
 
 @pytest.mark.asyncio
@@ -1323,6 +1330,45 @@ async def test_discover_worktrees_normal_failure_returns_empty():
     )):
         result = await mod._discover_worktrees()
         assert result == []
+
+
+@pytest.mark.asyncio
+async def test_discover_worktrees_sandbox_error_keeps_remedy():
+    """The actionable remedy must survive into the propagated message.
+
+    The sandbox layer appends its guidance AFTER a ~180-char preamble, so an
+    over-eager length cap here delivered the diagnosis and dropped the fix (the
+    Discovery Error banner used to end mid-word at "Probe"). Guard the tail, not
+    just the prefix.
+    """
+    stderr = (
+        "sandbox unavailable: Sandbox backend unavailable and "
+        "allow_unsandboxed_exec is not set. No OS-level sandbox backend is "
+        "available on this host, and the agent subprocess cannot be safely "
+        "isolated. Probe detail: sandbox-exec probe failed (exit 71). This "
+        "host's sandbox is NOT broken: the kernel reports this process is "
+        "already inside a macOS Seatbelt sandbox that KiroCrew did not create. "
+        "Set {\"sandbox\": false} in ~/.kiro/settings/amazon-internal.json so "
+        "KiroCrew's own profile owns isolation, then restart the gateway."
+    )
+    assert len(stderr) > 200, "fixture must exceed the old cap to be meaningful"
+    with patch.object(mod, "_run_cmd", new=AsyncMock(return_value=(-1, "", stderr))):
+        with pytest.raises(RuntimeError) as exc:
+            await mod._discover_worktrees()
+    msg = str(exc.value)
+    assert "amazon-internal.json" in msg
+    assert not msg.endswith("Probe")
+    assert len(msg) <= mod._SANDBOX_ERR_MAX
+
+
+@pytest.mark.asyncio
+async def test_discover_worktrees_sandbox_error_is_still_bounded():
+    """An unbounded stderr is still clipped before reaching the UI."""
+    stderr = "sandbox unavailable: " + ("x" * 5000)
+    with patch.object(mod, "_run_cmd", new=AsyncMock(return_value=(-1, "", stderr))):
+        with pytest.raises(RuntimeError) as exc:
+            await mod._discover_worktrees()
+    assert len(str(exc.value)) == mod._SANDBOX_ERR_MAX
 
 
 # =============================================================================
@@ -2431,6 +2477,48 @@ def test_build_env_credentials_only_when_requested(monkeypatch):
     plain = mod._build_env()
     assert f"GIT_CONFIG_KEY_{base}" not in plain
     assert plain["GIT_CONFIG_COUNT"] == str(base)
+
+
+@pytest.mark.asyncio
+async def test_rebase_withholds_credential_helpers_at_standard_tier(monkeypatch):
+    """The rebase must stay credential-free after its tier claim was corrected.
+
+    It used to be gated on ``mode="strict"``, which did double duty: sandbox tier
+    AND credential-helper suppression. That "strict" was never honoured — this
+    handler runs inside the app-backend sandbox, spawned at "standard", and a
+    nested wrap cannot tighten the sandbox it is already in — so the tier is now
+    declared honestly and the helper suppression rides on an explicit
+    ``repo_controlled`` flag instead. Without that split, correcting the tier
+    would have quietly handed the operator's helpers to a rebase applying
+    worktree commits, which could mint tokens via `git credential fill`.
+    """
+    base, helpers = _fake_helpers()
+    monkeypatch.setattr(mod, "_GIT_TRUSTED_HELPERS", helpers)
+    captured: list[tuple[str, dict]] = []
+
+    def fake_sandbox(argv, mode, *, env=None, **kw):
+        captured.append((mode, dict(env or {})))
+        return list(argv), dict(env or {}), None
+
+    with patch.object(mod, "_trusted_bin", side_effect=lambda n: f"/usr/bin/{n}"), \
+         patch.object(mod, "sandboxed_spawn_argv", fake_sandbox), \
+         patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as spawn:
+        proc = AsyncMock()
+        proc.communicate.return_value = (b"", b"")
+        proc.returncode = 0
+        spawn.return_value = proc
+        await mod._run_cmd(["git", "rebase", "origin/main"], repo_controlled=True)
+        await mod._run_cmd(["git", "fetch", "origin"])
+
+    rebase_mode, rebase_env = captured[0]
+    fetch_mode, fetch_env = captured[1]
+    key = f"GIT_CONFIG_KEY_{base}"
+    # The repo-controlled invocation gets no helpers...
+    assert key not in rebase_env
+    # ...while a gateway-controlled fetch still does.
+    assert key in fetch_env
+    # Both run at the tier this process can actually provide.
+    assert rebase_mode == "standard" and fetch_mode == "standard"
 
 
 @pytest.mark.asyncio
@@ -3971,3 +4059,48 @@ def test_health_registered_on_proxied_api_path():
     }
     assert "/health" in paths        # gateway-internal liveness poll (exempt)
     assert "/api/health" in paths    # proxied path the dashboard actually polls
+
+
+# =============================================================================
+# Static guard: this backend may never request a tier it cannot be granted
+# =============================================================================
+
+
+def test_no_spawn_requests_a_tier_stricter_than_this_backend_runs_at():
+    """Dev Fleet runs inside an app backend spawned at "standard".
+
+    A sandboxed process cannot tighten the sandbox it is already in, so any
+    ``"cc"``/``"strict"`` spawn from here is unsatisfiable — ``sandbox.wrap_argv``
+    refuses it, and on the paths that do not wrap the call
+    (``_sync_start_locked``, pod provision) the refusal escapes as an HTTP 500
+    rather than the graceful error ``_run_cmd`` returns. Those requests were
+    silently downgraded before the refusal existed, which is why they looked fine.
+
+    The scan is AST-based on purpose. A keyword-only grep for ``mode="strict"``
+    misses the positional ``sandboxed_spawn_argv(argv, "strict")`` form — which is
+    how five of the six sites were written, and how they were missed on the first
+    pass. Walking the tree catches every spelling while ignoring comments and
+    docstrings that legitimately discuss the tiers.
+    """
+    tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    }
+    offenders = sorted(
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and node.value in ("cc", "strict")
+        and id(node) not in docstrings
+    )
+    assert not offenders, (
+        "dev_fleet requested a sandbox tier stricter than the app backend it runs "
+        'in; declare "standard" and carry any credential-suppression intent on an '
+        f"explicit flag instead: {offenders}"
+    )

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 import kiro_crew.sandbox as sb
 
 
@@ -17,6 +19,18 @@ def _reset_warned():
     # wrap_argv caches a one-shot "_warned" flag on the function object.
     if hasattr(sb.wrap_argv, "_warned"):
         delattr(sb.wrap_argv, "_warned")
+
+
+@pytest.fixture(autouse=True)
+def _not_nested(monkeypatch):
+    """Pin "this process is not itself sandboxed" for every test in this file.
+
+    These tests assert the semantics of a host with NO sandbox backend. Without
+    this pin the outcome would depend on whether the developer's machine happens
+    to run the suite inside a Seatbelt sandbox (where ``wrap_argv`` correctly
+    passes through instead of warning) — green in CI, red locally.
+    """
+    monkeypatch.setattr(sb, "_inside_macos_sandbox", lambda: False)
 
 
 def test_no_backend_emits_security_warning(monkeypatch, caplog):
