@@ -10,7 +10,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { configureStore } from '@reduxjs/toolkit'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ThemeProvider } from '../hooks/useTheme'
-import chatReducer, { setActiveSlot, switchSlot, createSlot } from '../store/chatSlice'
+import chatReducer, { setActiveSlot, switchSlot, createSlot, appendQueuedMessage } from '../store/chatSlice'
 import dashboardReducer from '../store/dashboardSlice'
 import notificationsReducer from '../store/notificationsSlice'
 
@@ -37,6 +37,7 @@ vi.mock('../api/client', () => ({
     setSlotColor: vi.fn().mockResolvedValue({ ok: true }),
     setSlotFolder: vi.fn().mockResolvedValue({ ok: true }),
     chatSlotProject: vi.fn().mockResolvedValue({ ok: true }),
+    cancelQueuedMessage: vi.fn().mockResolvedValue({ ok: true }),
   },
   SEARCH_MIN_CHARS: 2,
 }))
@@ -421,6 +422,331 @@ describe('ChatPage draft persistence', { timeout: 15_000 }, () => {
       expect(pasteDrafts['slot-a']).toBeTruthy()
       expect(pasteDrafts['slot-a'][0].content).toBe(pasted)
     })
+  })
+
+  it('preserves the user content when slot creation is rejected mid-send', async () => {
+    // Two-phase commit contract: a send PAUSES draft persistence for the origin
+    // slot before clearing the live composer, and destroys nothing until the
+    // send commits. A rejected createSlot therefore needs no restore logic --
+    // the draft store was never touched -- and the live composer is re-filled
+    // as a courtesy when the user is still there.
+    //
+    // Driven through the chat-launch intent (useChatLauncher writes
+    // window.__mc_chat_launch; ChatPage consumes it on mount and sets
+    // newSessionRef), the app's own seam for "create a slot and send this".
+    const { api } = await import('../api/client')
+    const createMock = vi.mocked(api.createChatSlot)
+    createMock.mockRejectedValueOnce(new Error('slot creation failed'))
+
+    const launchWindow = window as Window & {
+      __mc_chat_launch?: { ts: number; message: string }
+    }
+    launchWindow.__mc_chat_launch = { ts: Date.now(), message: 'text I do not want to lose' }
+
+    // A file staged in the origin slot's draft BEFORE the send. An uncommitted
+    // send must leave it untouched (no clear runs for an optionText send, and
+    // commit never runs on rejection).
+    sessionStorage.setItem('mc-chat-file-drafts', JSON.stringify({ 'slot-a': ['/staged/keep.png'] }))
+
+    const store = makeStore('slot-a', [{ key: 'slot-a' }])
+    await renderAndWaitForInput(store)
+    await waitFor(() => expect(createMock).toHaveBeenCalled())
+
+    // The rejection leaves the text visible in the live composer (the courtesy
+    // re-fill: same slot, nothing typed since).
+    await waitFor(() => {
+      expect(
+        (screen.getByLabelText('Message input') as HTMLTextAreaElement).value,
+        'a rejected slot creation must leave the text visible for retry',
+      ).toBe('text I do not want to lose')
+    })
+    // ...and the file draft was never destroyed: no commit ran, so the draft
+    // store was never touched. Under snapshot-and-restore this assertion was
+    // impossible to make meaningful -- restores raced the persist effects.
+    const fd = JSON.parse(sessionStorage.getItem('mc-chat-file-drafts') || '{}')
+    expect(
+      fd['slot-a'],
+      'the staged file draft must survive an uncommitted send',
+    ).toEqual(['/staged/keep.png'])
+  })
+
+  it('a rejection landing after a slot switch leaves the origin draft intact', async () => {
+    // Send from slot-a, switch to slot-b while the create is pending, THEN the
+    // rejection lands. The courtesy re-fill is correctly suppressed (user is on
+    // slot-b), and slot-a's drafts must be byte-identical to pre-send.
+    //
+    // COVERAGE NOTE, stated honestly: this drives an optionText (auto-send)
+    // send, which never clears the composer, so the persistence PAUSE is a
+    // no-op on this path and deleting it does not fail this test. The pause
+    // protects normal composer sends, whose createSlot branch requires the New
+    // Chat intent -- not reachable from this harness. What this test DOES lock
+    // in: an uncommitted send destroys nothing, even when the rejection lands
+    // on a different slot than it started from.
+    const { api } = await import('../api/client')
+    let rejectCreate!: (e: Error) => void
+    const deferred = new Promise<{ key: string; title: string; messages: number; running: boolean }>(
+      (_r, rej) => { rejectCreate = rej },
+    )
+    vi.mocked(api.createChatSlot).mockReturnValueOnce(deferred as ReturnType<typeof api.createChatSlot>)
+
+    const launchWindow = window as Window & {
+      __mc_chat_launch?: { ts: number; message: string }
+    }
+    launchWindow.__mc_chat_launch = { ts: Date.now(), message: 'origin slot text' }
+    sessionStorage.setItem('mc-chat-file-drafts', JSON.stringify({ 'slot-a': ['/origin/file.png'] }))
+
+    const store = makeStore('slot-a', [{ key: 'slot-a' }, { key: 'slot-b' }])
+    await renderAndWaitForInput(store)
+    await waitFor(() => expect(api.createChatSlot).toHaveBeenCalled())
+
+    // User gives up and switches to slot-b while the create is still pending.
+    await act(async () => { await store.dispatch(switchSlot('slot-b')) })
+
+    // Now the rejection lands.
+    await act(async () => {
+      rejectCreate(new Error('slot creation failed'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // slot-a's text and file drafts must be exactly what they were pre-send.
+    await waitFor(() => {
+      const fd = JSON.parse(sessionStorage.getItem('mc-chat-file-drafts') || '{}')
+      expect(
+        fd['slot-a'],
+        'the origin file draft must survive a rejection that lands after a switch',
+      ).toEqual(['/origin/file.png'])
+    })
+    const td = JSON.parse(localStorage.getItem('mc-chat-drafts') || '{}')
+    expect(
+      td['slot-a'] ?? 'origin slot text',
+      'the origin text draft must not have been overwritten with the empty clear',
+    ).toBe('origin slot text')
+  })
+
+  it('a rejected COMPOSER send preserves the persisted text, files and pastes', async () => {
+    // This is the path the persistence PAUSE actually protects, and the one the
+    // first two rejection tests could not reach: an ordinary composer send
+    // (no optionText) CLEARS the composer, so without the pause the persist
+    // effects — and the slot-switch flush — write that empty state straight
+    // into the draft store and the user's text/files/pastes are gone for good.
+    //
+    // Reaching it needs `newSessionRef` armed on a composer send. The seam is
+    // the app's own behavior: a REJECTED new-session send leaves the one-shot
+    // intent armed on purpose (that is the two-phase-commit contract), so the
+    // user's next keystroke-driven send still takes the createSlot branch.
+    // First rejection arms it; the second (deferred) rejection is under test.
+    //
+    // The user then switches AWAY before the rejection lands, which suppresses
+    // the courtesy live re-fill. That matters for falsifiability: with the
+    // re-fill in play the restored text is re-persisted, masking the loss. With
+    // the user on another slot, only the pause stands between the composer
+    // clear and the draft store.
+    //
+    // Revert-verified: removing the pause guard from the slot-switch /
+    // unmount / beforeunload flushes fails this test, as does removing all six
+    // guards. Removing ONLY the live text-persist-effect guard still passes —
+    // on this path the outgoing-slot flush is the write that destroys the
+    // draft. The live-effect guards are defence for other orderings and are
+    // not claimed as covered here.
+    const { api } = await import('../api/client')
+    const createMock = vi.mocked(api.createChatSlot)
+    // Call counts are cumulative across this file (no global clearMocks), so
+    // assert on the delta from where this test starts.
+    const baseCalls = createMock.mock.calls.length
+    createMock.mockRejectedValueOnce(new Error('slot creation failed'))
+    let rejectSecond!: (e: Error) => void
+    const deferred = new Promise<{ key: string; title: string; messages: number; running: boolean }>(
+      (_r, rej) => { rejectSecond = rej },
+    )
+    createMock.mockReturnValueOnce(deferred as ReturnType<typeof api.createChatSlot>)
+
+    const launchWindow = window as Window & {
+      __mc_chat_launch?: { ts: number; message: string }
+    }
+    launchWindow.__mc_chat_launch = { ts: Date.now(), message: 'arming send' }
+
+    const store = makeStore('slot-a', [{ key: 'slot-a' }, { key: 'slot-b' }])
+    await renderAndWaitForInput(store)
+    await waitFor(() => expect(createMock.mock.calls.length).toBe(baseCalls + 1))
+
+    const input = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    // Clear the courtesy re-fill from the arming send, then compose fresh:
+    // typed text plus a pasted block.
+    fireEvent.change(input, { target: { value: '' } })
+    await act(async () => {
+      fireEvent.paste(input, {
+        clipboardData: { items: [], getData: (t: string) => (t === 'text' ? 'p1\np2\np3\np4' : '') },
+      })
+    })
+    await waitFor(() => expect(input.value).toMatch(/\[ Paste #1 · 4 lines \]/))
+    fireEvent.change(input, { target: { value: `keep this text ${input.value}` } })
+    // Let the debounced persist land the composed draft before the send.
+    await waitFor(() => {
+      const td = JSON.parse(localStorage.getItem('mc-chat-drafts') || '{}')
+      expect(td['slot-a'] ?? '').toContain('keep this text')
+    }, { timeout: 3000 })
+
+    // Second send: keystroke-driven, so the composer clear runs.
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+    await waitFor(() => expect(createMock.mock.calls.length).toBe(baseCalls + 2))
+    expect(
+      (screen.getByLabelText('Message input') as HTMLTextAreaElement).value,
+      'a composer send must clear the live composer (this is the destructive path)',
+    ).toBe('')
+
+    // User switches away while the create is still pending, then it rejects.
+    await act(async () => { await store.dispatch(switchSlot('slot-b')) })
+    await act(async () => {
+      rejectSecond(new Error('slot creation failed again'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // slot-a's persisted text and paste drafts must be exactly what they were
+    // before the send: the clear was never allowed to reach the draft store.
+    const td = JSON.parse(localStorage.getItem('mc-chat-drafts') || '{}')
+    expect(
+      td['slot-a'] ?? '',
+      'the pause must stop the composer clear from erasing the persisted text draft',
+    ).toContain('keep this text')
+    const pd = JSON.parse(localStorage.getItem('mc-chat-paste-drafts') || '{}')
+    expect(
+      pd['slot-a']?.[0]?.content,
+      'the pasted block backing the preserved token must survive',
+    ).toBe('p1\np2\np3\np4')
+  })
+
+  it('a rejection keeps a file staged DURING the slow create', async () => {
+    // The composer stays usable while a create is pending, so the user can
+    // attach another file. Re-filling with the payload snapshot wholesale
+    // replaced the live list and that newer attachment vanished — silently, with
+    // no undo. The re-fill must MERGE: snapshot order first, then anything
+    // staged since.
+    const { api } = await import('../api/client')
+    const createMock = vi.mocked(api.createChatSlot)
+    const baseCalls = createMock.mock.calls.length
+    let rejectCreate!: (e: Error) => void
+    const deferred = new Promise<{ key: string; title: string; messages: number; running: boolean }>(
+      (_r, rej) => { rejectCreate = rej },
+    )
+    createMock.mockReturnValueOnce(deferred as ReturnType<typeof api.createChatSlot>)
+    vi.mocked(api.uploadFiles).mockResolvedValueOnce({ paths: ['/uploaded/during.png'] } as Awaited<ReturnType<typeof api.uploadFiles>>)
+
+    const launchWindow = window as Window & {
+      __mc_chat_launch?: { ts: number; message: string }
+    }
+    launchWindow.__mc_chat_launch = { ts: Date.now(), message: 'send with attachment' }
+    // A file staged before the send — part of this send's payload.
+    sessionStorage.setItem('mc-chat-file-drafts', JSON.stringify({ 'slot-a': ['/staged/before.png'] }))
+
+    const store = makeStore('slot-a', [{ key: 'slot-a' }])
+    await renderAndWaitForInput(store)
+    await waitFor(() => expect(createMock.mock.calls.length).toBe(baseCalls + 1))
+
+    // While the create hangs, the user attaches another file.
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    expect(fileInput, 'the attach control must exist to stage a file mid-create').toBeTruthy()
+    await act(async () => {
+      fireEvent.change(fileInput, {
+        target: { files: [new File(['x'], 'during.png', { type: 'image/png' })] },
+      })
+    })
+    await waitFor(() => {
+      const fd = JSON.parse(sessionStorage.getItem('mc-chat-file-drafts') || '{}')
+      expect(fd['slot-a']).toContain('/uploaded/during.png')
+    }, { timeout: 3000 })
+
+    // Now the create rejects.
+    await act(async () => {
+      rejectCreate(new Error('slot creation failed'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // Live composer chips are the falsifiable assertion: the re-fill writes
+    // pendingFiles directly, and the draft store would keep the mid-create file
+    // either way (nothing destroys it). Both chips must be present, snapshot
+    // first.
+    await waitFor(() => {
+      const alts = Array.from(document.querySelectorAll('img[data-lightbox-image]'))
+        .map(el => el.getAttribute('alt'))
+      expect(
+        alts,
+        'the mid-create attachment must not be replaced by the older snapshot',
+      ).toEqual(['/staged/before.png', '/uploaded/during.png'])
+    }, { timeout: 3000 })
+  })
+
+  it('a second send during a slow create does not spawn a hidden second slot', async () => {
+    // The new-session intent is only consumed at COMMIT, so while a slow create
+    // awaits it is still armed: a second send took the create branch again and
+    // made a SECOND slot. Only the first is activated, so the second prompt ran
+    // in a session the user never sees. The send is rejected instead — and,
+    // because it bails before the composer clear, it loses nothing.
+    const { api } = await import('../api/client')
+    const createMock = vi.mocked(api.createChatSlot)
+    const baseCalls = createMock.mock.calls.length
+    let resolveCreate!: (v: { key: string; title: string; messages: number; running: boolean }) => void
+    const deferred = new Promise<{ key: string; title: string; messages: number; running: boolean }>(
+      r => { resolveCreate = r },
+    )
+    createMock.mockReturnValueOnce(deferred as ReturnType<typeof api.createChatSlot>)
+
+    const launchWindow = window as Window & {
+      __mc_chat_launch?: { ts: number; message: string }
+    }
+    launchWindow.__mc_chat_launch = { ts: Date.now(), message: 'first send' }
+
+    const store = makeStore('slot-a', [{ key: 'slot-a' }])
+    await renderAndWaitForInput(store)
+    await waitFor(() => expect(createMock.mock.calls.length).toBe(baseCalls + 1))
+
+    // Second send while the first create is still pending.
+    const input = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'second send' } })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+
+    expect(
+      createMock.mock.calls.length,
+      'the overlapping send must not start a second slot creation',
+    ).toBe(baseCalls + 1)
+    expect(
+      (screen.getByLabelText('Message input') as HTMLTextAreaElement).value,
+      'the rejected send must leave the typed text in place',
+    ).toBe('second send')
+
+    // Let the first create finish so the component settles.
+    await act(async () => {
+      resolveCreate({ key: 'new-slot', title: 'new-slot', messages: 0, running: false })
+      await Promise.resolve()
+    })
+  })
+
+  it('cancelling a card WITHOUT ordered files leaves the content verbatim', async () => {
+    // An edited card intentionally has no ordered list (the retyped text's
+    // markers no longer line up with the old paths). Falling back to a
+    // whitespace-bounded scan would mangle the text and stage a phantom
+    // attachment, so the raw marker is left visible for the user to fix by hand.
+    const store = makeStore('slot-a', [{ key: 'slot-a' }])
+    await renderAndWaitForInput(store)
+
+    const content = 'review [attached_file 1] /docs/quarterly report.pdf please'
+    act(() => {
+      store.dispatch(appendQueuedMessage({
+        slot: 'slot-a', content, ts: 't1', queue_id: 'q1',
+      }))
+    })
+
+    const cancelBtn = await waitFor(() => screen.getByLabelText('Cancel queued message'))
+    await act(async () => { fireEvent.click(cancelBtn) })
+
+    const input = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    await waitFor(() => expect(input.value).toContain('review'))
+    expect(
+      input.value,
+      'without a trustworthy ordered list the content is restored verbatim',
+    ).toBe(content)
   })
 
   it('slow New Chat that resolves after a slot switch does not steal the typed text', async () => {

@@ -149,4 +149,39 @@ describe('ChatPage widget action pre-fill', { timeout: 15_000 }, () => {
     const metaArg = vi.mocked(api.sendChat).mock.calls[0][4]
     expect(metaArg === undefined || metaArg.origin !== 'widget').toBe(true)
   })
+
+  it('releases the widget seed when a knowledge interception consumes the composer', async () => {
+    // The provenance seed is consumed at COMMIT so a failed slot creation leaves
+    // a retry still attributable to the widget. But an INTERCEPTION (slash
+    // command, @knowledge prefix) consumes the composer and returns before
+    // commit — leaving the seed armed there meant a later, unrelated prompt
+    // that merely CONTAINED the widget's text was falsely tagged widget-origin.
+    const store = makeStore('slot-w', [{ key: 'slot-w' }])
+    await renderAndWaitForInput(store)
+
+    // Widget pre-fills, then the user replaces it with a knowledge query that
+    // still contains the seeded text. The interception eats this send.
+    act(() => {
+      window.dispatchEvent(new CustomEvent('mc-widget-send', { detail: { text: 'deploy' } }))
+    })
+    const ta = await waitFor(() => screen.getByLabelText('Message input') as HTMLTextAreaElement)
+    await waitFor(() => expect(ta.value).toContain('deploy'))
+    fireEvent.change(ta, { target: { value: '@knowledge deploy' } })
+    await act(async () => { fireEvent.keyDown(ta, { key: 'Enter' }) })
+    expect(api.sendChat, 'a knowledge query must not reach the server').not.toHaveBeenCalled()
+
+    // A genuinely user-authored follow-up that happens to contain 'deploy'.
+    fireEvent.change(
+      screen.getByLabelText('Message input'),
+      { target: { value: 'now deploy it for real' } },
+    )
+    await act(async () => { fireEvent.keyDown(screen.getByLabelText('Message input'), { key: 'Enter' }) })
+
+    await waitFor(() => expect(api.sendChat).toHaveBeenCalled())
+    const metaArg = vi.mocked(api.sendChat).mock.calls[0][4]
+    expect(
+      metaArg === undefined || metaArg.origin !== 'widget',
+      'a plain user turn after an interception must not inherit widget provenance',
+    ).toBe(true)
+  })
 })

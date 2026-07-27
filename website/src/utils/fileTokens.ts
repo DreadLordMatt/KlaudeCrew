@@ -16,6 +16,40 @@ export function parseFiles(content: string, meta?: Record<string, unknown>): str
     : (content.match(/\[attached_file \d+\] (\S+)/g) || []).map(s => s.replace(/\[attached_file \d+\] /, ''))
 }
 
+/**
+ * Attachment paths for a message plus whether they are TRUSTWORTHY.
+ *
+ * `parseFiles` silently falls back to scanning `[attached_file N] (\S+)` out of
+ * the content when metadata is absent. That fallback is whitespace-bounded, so a
+ * path containing a space is truncated at the first space -- and feeding a
+ * truncated path to `stripAttachmentMarkers` is actively harmful: the marker's
+ * exact-match boundary is satisfied by that same space, so the marker is
+ * half-stripped (leaving `report.pdf` behind) and the truncated prefix is staged
+ * as an attachment pointing at a file that does not exist.
+ *
+ * A truncated path is NOT distinguishable from a complete one: `[attached_file 1]
+ * /a/b.txt ok` and `[attached_file 1] /a/quarterly report.pdf` have the same
+ * shape, so any "does the remainder look like a path" heuristic misfires on
+ * ordinary prose. Rather than guess, the content fallback is reported as
+ * `exact: false` unconditionally -- only real `meta.files` is trustworthy.
+ *
+ * Callers that MUTATE state from these paths must do nothing when `exact` is
+ * false: a raw marker the user can fix by hand beats mangled text plus a phantom
+ * attachment.
+ */
+export function parseFilesChecked(
+  content: string,
+  meta?: Record<string, unknown>,
+): { files: string[]; exact: boolean } {
+  const metaFiles = metaFileList(meta?.files)
+  // `metaFileList` blanks invalid members in place to keep the index space
+  // aligned, so an all-invalid array (`[null]`, `['', '']`) still has length.
+  // Treating that as exact let the cancel path clear unrelated staged files
+  // while stripping nothing -- worse than falling back.
+  if (metaFiles.some(Boolean)) return { files: metaFiles, exact: true }
+  return { files: parseFiles(content, undefined), exact: false }
+}
+
 /** Per-path display label: the shortest trailing path segments that make the
  *  label unique across `paths` (e.g. two `report.docx` in different dirs become
  *  `q3/report.docx` and `q4/report.docx`).
@@ -190,6 +224,67 @@ export function buildRelMap(paths: string[], text: string): Map<string, string> 
     }
   }
   return map
+}
+
+/** Replace @rel tokens in text using a replacer function. */
+/** Escape a literal string for safe embedding in a RegExp. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Validate an untrusted `meta.files` value into a list of strings.
+ *
+ * `meta` arrives from a server payload, so the value may be any type. A blank
+ * placeholder is kept for a non-string member so later indices still line up
+ * with their `[attached_file N]` markers.
+ */
+export function metaFileList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.map(p => (typeof p === 'string' ? p : ''))
+}
+
+/**
+ * Remove `[attached_file N] path` pairs from text.
+ *
+ * Used when a queued card is cancelled back into the composer: the card stores
+ * the SERIALIZED text, so inserting it verbatim showed the raw marker and
+ * re-serialized it on the next send.
+ *
+ * Strips by exact `marker + path` using the card's own ordered list rather than
+ * by pattern, so a path containing spaces or brackets is removed exactly.
+ * A trailing boundary is required or the marker would match a PREFIX of a
+ * longer path (`/d` inside `/dossier`). Whitespace is repaired only at each
+ * removal site, so indentation and column alignment elsewhere survive.
+ */
+export function stripAttachmentMarkers(content: string, files?: unknown): string {
+  const paths = metaFileList(files)
+  if (!content || !paths.length) return content
+  let out = content
+  paths.forEach((p, i) => {
+    if (!p) return
+    const marker = escapeRegExp(`[attached_file ${i + 1}] ${p}`)
+    const bound = '(?=\\s|$)'
+    // A marker alone on its line takes the whole line, so no blank line is left.
+    out = out.replace(new RegExp(`^[ \\t]*${marker}${bound}[ \\t]*\\n?`, 'gm'), '')
+    // Otherwise the marker plus the whitespace hugging it becomes one space.
+    out = out.replace(new RegExp(`[ \\t]*${marker}${bound}[ \\t]*`, 'g'), ' ')
+    out = out.replace(/[ \t]+$/gm, '')
+  })
+  return out.trim()
+}
+
+/**
+ * Union of two staged-attachment lists, `first` order preserved, de-duplicated.
+ *
+ * Used when re-filling the composer after an uncommitted send: the payload's
+ * snapshot comes first (it is the order the user assembled), then anything
+ * staged while the send was in flight. Assigning the snapshot wholesale
+ * silently discarded a file the user attached during a slow slot creation.
+ * Falsy members are dropped -- an empty path is not a stageable attachment.
+ */
+export function mergeStagedFiles(first: string[], second: string[]): string[] {
+  return [...new Set([...first, ...second])].filter(Boolean)
 }
 
 /** Replace @rel tokens in text using a replacer function. */

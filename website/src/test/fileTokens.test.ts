@@ -1,5 +1,52 @@
 import { describe, it, expect } from 'vitest'
-import { prepareSendPayload, buildFileLabels, resolveFileSegment } from '../utils/fileTokens'
+import { prepareSendPayload, buildFileLabels, resolveFileSegment, stripAttachmentMarkers, metaFileList, parseFilesChecked, mergeStagedFiles } from '../utils/fileTokens'
+
+describe('stripAttachmentMarkers', () => {
+  it('removes a marker and its path, closing the gap', () => {
+    expect(
+      stripAttachmentMarkers('look at [attached_file 1] /repo/my notes.txt please', ['/repo/my notes.txt']),
+    ).toBe('look at please')
+  })
+
+  it('handles a path containing spaces', () => {
+    // The whole point of the ordered list: a whitespace-bounded scan would stop
+    // at the first space and leave `notes.txt` behind.
+    expect(
+      stripAttachmentMarkers('[attached_file 1] /a/quarterly report.pdf', ['/a/quarterly report.pdf']),
+    ).toBe('')
+  })
+
+  it('does not strip a longer path that shares the marker path as a prefix', () => {
+    // Without an end boundary, `/d` matched inside `/dossier` and left `ossier`.
+    expect(
+      stripAttachmentMarkers('see [attached_file 1] /dossier now', ['/d']),
+    ).toBe('see [attached_file 1] /dossier now')
+  })
+
+  it('preserves indentation and column alignment away from the marker', () => {
+    const code = 'def f():\n    x=1\n    [attached_file 1] /d\n    y=2'
+    expect(stripAttachmentMarkers(code, ['/d'])).toBe('def f():\n    x=1\n    y=2')
+    expect(stripAttachmentMarkers('col1    col2 [attached_file 1] /d', ['/d'])).toBe('col1    col2')
+  })
+
+  it('leaves marker indices the list does not cover', () => {
+    expect(
+      stripAttachmentMarkers('a [attached_file 1] /d b [attached_file 2] /other', ['/d']),
+    ).toBe('a b [attached_file 2] /other')
+  })
+
+  it('ignores a non-array files value instead of throwing', () => {
+    for (const bad of ['oops', 42, { 0: 'x' }, null, undefined]) {
+      expect(() => stripAttachmentMarkers('keep me', bad)).not.toThrow()
+      expect(stripAttachmentMarkers('keep me', bad)).toBe('keep me')
+    }
+  })
+
+  it('keeps the index space when a member is not a string', () => {
+    expect(metaFileList([null, '/d'])).toEqual(['', '/d'])
+    expect(stripAttachmentMarkers('a [attached_file 2] /d', [null, '/d'])).toBe('a')
+  })
+})
 
 describe('buildFileLabels uniqueness', () => {
   it('disambiguates paths that share a basename', () => {
@@ -136,3 +183,64 @@ describe('prepareSendPayload', () => {
     expect(result.filePaths).toEqual(['/tmp/data.csv', '/tmp/extra.log'])
   })
 })
+
+describe('parseFilesChecked', () => {
+  it('trusts real meta.files', () => {
+    const r = parseFilesChecked('see [attached_file 1] /a/q report.pdf', {
+      files: ['/a/q report.pdf'],
+    })
+    expect(r).toEqual({ files: ['/a/q report.pdf'], exact: true })
+  })
+
+  it('refuses the content fallback, which cannot recover spaced paths', () => {
+    // The `\S+` scan truncates at the first space. Feeding that to
+    // stripAttachmentMarkers half-strips the marker (leaving `report.pdf`) AND
+    // stages a phantom `/a/quarterly` attachment, so callers must not mutate.
+    const r = parseFilesChecked('see [attached_file 1] /a/quarterly report.pdf ok')
+    expect(r.exact, 'the content fallback is never trustworthy').toBe(false)
+    expect(r.files).toEqual(['/a/quarterly'])
+  })
+
+  it('refuses an all-invalid meta array instead of trusting it', () => {
+    // `metaFileList` blanks invalid members in place to keep the index space
+    // aligned, so `[null]` still has length 1. Trusting that let the cancel path
+    // clear unrelated staged files while stripping nothing.
+    for (const bad of [[null], [null, null], ['', '']]) {
+      const r = parseFilesChecked('see [attached_file 1] /a/b.txt', { files: bad })
+      expect(r.exact, `all-invalid meta ${JSON.stringify(bad)} must not be exact`).toBe(false)
+    }
+    // One valid member is enough to trust the ordered list.
+    expect(parseFilesChecked('see [attached_file 1] /a/b.txt', { files: [null, '/a/b.txt'] }).exact).toBe(true)
+  })
+
+  it('refuses the fallback even when no path contains a space', () => {
+    // A truncated path is indistinguishable from a complete one followed by
+    // prose, so there is no safe heuristic -- the fallback is always inexact.
+    expect(parseFilesChecked('see [attached_file 1] /a/b.txt').exact).toBe(false)
+  })
+})
+
+describe('mergeStagedFiles', () => {
+  it('keeps the first list order and appends the newer additions', () => {
+    // Used when re-filling the composer after an uncommitted send: the payload
+    // snapshot comes first (it is the order the user assembled), then anything
+    // staged while the send was in flight.
+    expect(mergeStagedFiles(['/a.png', '/b.png'], ['/a.png', '/c.png']))
+      .toEqual(['/a.png', '/b.png', '/c.png'])
+  })
+
+  it('de-duplicates rather than double-staging a path present in both', () => {
+    expect(mergeStagedFiles(['/a.png'], ['/a.png'])).toEqual(['/a.png'])
+  })
+
+  it('drops falsy members', () => {
+    expect(mergeStagedFiles(['', '/a.png'], ['/b.png', ''])).toEqual(['/a.png', '/b.png'])
+  })
+
+  it('handles either side being empty', () => {
+    expect(mergeStagedFiles([], ['/a.png'])).toEqual(['/a.png'])
+    expect(mergeStagedFiles(['/a.png'], [])).toEqual(['/a.png'])
+    expect(mergeStagedFiles([], [])).toEqual([])
+  })
+})
+

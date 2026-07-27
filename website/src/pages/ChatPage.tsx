@@ -43,7 +43,7 @@ import ThinkingBlock from './chat/ThinkingBlock'
 import type { DisplayItem, TurnItem } from './chat/types'
 import { useScrollManager } from './chat/useScrollManager'
 import { useVirtualChat } from '../hooks/virtualizer/useVirtualChat'
-import { parseFiles, prepareSendPayload, resolveFileSegment, buildFileLabels, findUnreferencedAttachments } from '../utils/fileTokens'
+import { parseFiles, parseFilesChecked, prepareSendPayload, resolveFileSegment, buildFileLabels, findUnreferencedAttachments, stripAttachmentMarkers, mergeStagedFiles } from '../utils/fileTokens'
 import { type PasteBlock, expandAll as expandPasteTokens, findTokenRanges, pruneBlocks as pruneBlocksUtil, saveStoredPaste, recollapsePastes } from '../utils/pasteTokens'
 import { extractPromptFromToken, extractSlackContextFromToken } from '../utils/tokenPrompt'
 // Roles that fold into a collapsible group in the turn view. Thinking is NOT
@@ -615,6 +615,20 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   // declared AFTER those effects so a batched keystroke+switch can't smear one
   // slot's draft onto another. See that advance effect for the full rationale.
   const composerSlotRef = useRef(activeSlot)
+  // Slot whose draft persistence is PAUSED because a send from it is in flight
+  // (two-phase commit). While set, the persist effects and the slot-switch /
+  // unmount / beforeunload flushes must not write this slot's draft: the
+  // composer has been cleared for UX, and persisting that empty state would
+  // destroy the draft copy that a failed slot creation relies on. The draft is
+  // deleted explicitly at commit (send succeeded) and left untouched on
+  // failure -- there is no "restore" step, because nothing was destroyed.
+  const pausedPersistSlotRef = useRef<string | null>(null)
+  // True for exactly the duration of the deferred `createSlot` await in send().
+  // Distinct from sendingRef (which also gates the welcome view and stays set
+  // through the HTTP POST): this one exists solely to serialize the create
+  // window, because the one-shot new-session intent is still armed while it is
+  // pending and a concurrent send would create a second, hidden slot.
+  const creatingSlotRef = useRef(false)
   const [input, setInput] = useState(() => activeSlot ? drafts.current[activeSlot] ?? '' : '')
 
   // History suggestions ("Continue a previous chat?") shown above the input on the welcome screen.
@@ -951,7 +965,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
 
   // Persist the composer text against the slot it BELONGS to (composerSlotRef),
   // not the live activeSlot (see the composerSlotRef note above).
-  useEffect(() => { inputRef.current = input; const s = composerSlotRef.current; if (s) { setDraft(drafts.current, s, input); saveDraftsDebounced() } }, [input, saveDraftsDebounced]) // eslint-disable-line react-hooks/exhaustive-deps -- draft key is composerSlotRef; slot-change effect handles the transition
+  useEffect(() => { inputRef.current = input; const s = composerSlotRef.current; if (s && s !== pausedPersistSlotRef.current) { setDraft(drafts.current, s, input); saveDraftsDebounced() } }, [input, saveDraftsDebounced]) // eslint-disable-line react-hooks/exhaustive-deps -- draft key is composerSlotRef; slot-change effect handles the transition
   // Per-slot draft: save current → restore target (persisted to localStorage)
   useEffect(() => {
     // Re-hydrate from localStorage — only pull in keys we don't already have
@@ -962,9 +976,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     for (const [k, v] of Object.entries(storedFiles)) { if (!(k in fileDrafts.current)) fileDrafts.current[k] = v }
     const storedPastes = loadPasteDrafts()
     for (const [k, v] of Object.entries(storedPastes)) { if (!(k in pasteDrafts.current)) pasteDrafts.current[k] = v }
-    if (prevSlot.current) setDraft(drafts.current, prevSlot.current, inputRef.current)
-    if (prevSlot.current) setFileDraft(fileDrafts.current, prevSlot.current, pendingFilesRef.current)
-    if (prevSlot.current) setPasteDraft(pasteDrafts.current, prevSlot.current, pasteBlocksRef.current)
+    if (prevSlot.current && prevSlot.current !== pausedPersistSlotRef.current) {
+      setDraft(drafts.current, prevSlot.current, inputRef.current)
+      setFileDraft(fileDrafts.current, prevSlot.current, pendingFilesRef.current)
+      setPasteDraft(pasteDrafts.current, prevSlot.current, pasteBlocksRef.current)
+    }
     prevSlot.current = activeSlot
     const raw = sessionStorage.getItem(PREFILL_STORAGE_KEY)
     const draftFallback = activeSlot ? drafts.current[activeSlot] ?? '' : ''
@@ -993,17 +1009,21 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   // Persist drafts on unmount (navigating away from chat page)
   useEffect(() => () => {
     if (saveDraftsTimer.current) { clearTimeout(saveDraftsTimer.current); saveDraftsTimer.current = null }
-    if (prevSlot.current) setDraft(drafts.current, prevSlot.current, inputRef.current)
-    if (prevSlot.current) setFileDraft(fileDrafts.current, prevSlot.current, pendingFilesRef.current)
-    if (prevSlot.current) setPasteDraft(pasteDrafts.current, prevSlot.current, pasteBlocksRef.current)
+    if (prevSlot.current && prevSlot.current !== pausedPersistSlotRef.current) {
+      setDraft(drafts.current, prevSlot.current, inputRef.current)
+      setFileDraft(fileDrafts.current, prevSlot.current, pendingFilesRef.current)
+      setPasteDraft(pasteDrafts.current, prevSlot.current, pasteBlocksRef.current)
+    }
     flushDrafts()
   }, [flushDrafts])
   // Flush pending draft save on tab close / refresh (debounce may not fire)
   useEffect(() => {
     const h = () => {
-      if (prevSlot.current) setDraft(drafts.current, prevSlot.current, inputRef.current)
-      if (prevSlot.current) setFileDraft(fileDrafts.current, prevSlot.current, pendingFilesRef.current)
-      if (prevSlot.current) setPasteDraft(pasteDrafts.current, prevSlot.current, pasteBlocksRef.current)
+      if (prevSlot.current && prevSlot.current !== pausedPersistSlotRef.current) {
+        setDraft(drafts.current, prevSlot.current, inputRef.current)
+        setFileDraft(fileDrafts.current, prevSlot.current, pendingFilesRef.current)
+        setPasteDraft(pasteDrafts.current, prevSlot.current, pasteBlocksRef.current)
+      }
       flushDrafts()
     }
     window.addEventListener('beforeunload', h)
@@ -1039,7 +1059,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     pendingFilesRef.current = pendingFiles
     // Key off composerSlotRef, not activeSlot (see the composerSlotRef note).
     const s = composerSlotRef.current
-    if (s) {
+    if (s && s !== pausedPersistSlotRef.current) {
       setFileDraft(fileDrafts.current, s, pendingFiles)
       saveDraftsDebounced()
     }
@@ -1057,7 +1077,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     // them alongside the text draft (mirrors the pendingFiles effect above).
     // Key off composerSlotRef, not activeSlot (see the composerSlotRef note).
     const s = composerSlotRef.current
-    if (s) {
+    if (s && s !== pausedPersistSlotRef.current) {
       setPasteDraft(pasteDrafts.current, s, pasteBlocks)
       saveDraftsDebounced()
     }
@@ -1947,12 +1967,25 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     // message with no recovery path is the offline-UX regression we're
     // guarding against. Cheap belt-and-braces.
     if (!connected) return
+    // Re-entrancy guard for the deferred-create window. `forceNew` is read in
+    // Phase 1 and only consumed at COMMIT, so while a slow createSlot is
+    // awaiting, newSessionRef is still armed: a second send during that window
+    // took the create branch again and spawned a SECOND slot. Only the first
+    // one is activated, so the second prompt executed in a hidden, contextless
+    // session the user never sees. Serialize instead: creatingSlotRef covers
+    // exactly the create window and is cleared on both outcomes, so this
+    // rejects only an overlapping send, never an ordinary back-to-back one.
+    // Bail BEFORE the composer clear so the rejected attempt loses nothing --
+    // the text stays put and Enter works again once the slot exists.
+    if (creatingSlotRef.current) return
     const raw = (optionText || inputRef.current).trim()
- // Capture + clear the widget-origin tag: attribute this
+ // Capture the widget-origin tag: attribute this
     // turn to a widget only if the composer still carries the exact text a
-    // widget action pre-filled. Cleared on every send so it can't go stale.
+    // widget action pre-filled. CONSUMED AT COMMIT, not here -- a failed slot
+    // creation must leave the provenance armed so the retry still carries
+    // meta.origin='widget' (dropping it silently upgraded a widget-driven
+    // prompt to an unattended user prompt).
     const widgetOrigin = !!widgetPrefillRef.current && raw.includes(widgetPrefillRef.current)
-    widgetPrefillRef.current = null
     if (!raw && !pendingFilesRef.current.length) return
 
     // The session actually on screen at send time. Read from the ref (fresh
@@ -1968,6 +2001,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     const slashResult = await interceptSlashCommand(raw, uiSlot, dispatch)
     if (slashResult.intercepted) {
       if (!optionText) { setInput(''); setPasteBlocks([]) }
+      // An interception CONSUMES the composer without reaching commit, so the
+      // widget-origin seed must be released here too. Leaving it armed meant a
+      // later, unrelated prompt that happened to contain the widget's text was
+      // falsely attributed to a widget.
+      if (widgetOrigin) widgetPrefillRef.current = null
       return
     }
 
@@ -1976,6 +2014,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     if (kq && !optionText) {
       knowledgeFetchRef.current.searchKnowledge(kq)
       setInput('')
+      if (widgetOrigin) widgetPrefillRef.current = null
       return
     }
 
@@ -1991,13 +2030,38 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
       knowledgeBlock = knowledgeFetchRef.current.pendingKnowledge
       llmTxt = expandKnowledgeBlock(knowledgeBlock) + '\n' + llmTxt
     }
-    knowledgeFetchRef.current.clearPending()
+    // NOTE: `clearPending()` is deliberately NOT called here. It used to run
+    // before the snapshot below, so a rejected slot creation restored the prompt
+    // WITHOUT its selected knowledge context -- the chip was already gone and the
+    // user had to re-pick it. It is cleared only once the send is committed.
     const bubblePastes = pruneBlocksUtil(displayTxt, activePastes)
     if (bubblePastes.length) saveStoredPaste(llmTxt, displayTxt, bubblePastes, filePaths)
 
     setPrefillHint(false)
+    // ── Two-phase commit ────────────────────────────────────────────────────
+    // Phase 1 (here, before any await): consume NOTHING destructive. The live
+    // composer is cleared for UX, but draft persistence for the origin slot is
+    // PAUSED first, so the clear cannot propagate into the draft store. The
+    // one-shot refs (newSessionRef, knowledge pending) are READ here but only
+    // consumed at commit. On failure there is nothing to restore -- the draft
+    // store and one-shot state were never touched.
+    //
+    // This replaces a snapshot-and-restore approach that went through five
+    // review rounds of races: every restore had to compare against LIVE state
+    // (activeSlotRef, drafts.current) which moves during the await -- slot
+    // switches, typing, persist effects, slot activation. Not destroying state
+    // removes the reconstruction problem instead of guarding it.
+    const pendingSend = {
+      originSlot: uiSlot,
+      raw,
+      files: pendingFilesRef.current.slice(),
+      pastes: activePastes.map(b => ({ ...b })),
+      // Read, not consumed: reset only at commit.
+      forceNew: !targetSlot && newSessionRef.current,
+    }
+    if (!optionText && uiSlot) pausedPersistSlotRef.current = uiSlot
     if (!optionText) {
-      setInput(''); setPendingFiles([]); setPasteBlocks([]); if (uiSlot) { delete drafts.current[uiSlot]; delete fileDrafts.current[uiSlot]; delete pasteDrafts.current[uiSlot]; saveDrafts() }
+      setInput(''); setPendingFiles([]); setPasteBlocks([])
       // The challenge-handoff prompt is seeded into PREFILL_STORAGE_KEY and the
       // slot-restore effect re-applies it on slot changes. Once that prompt is
       // sent, clear the seed so a later slot-restore can't re-fill the (now
@@ -2008,23 +2072,86 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     // not the stale closure `activeSlot`. See the uiSlot note above.
     let slot = targetSlot ?? uiSlot
     // Only a normal (non-targeted) send consumes the one-shot "new session"
-    // intent. A targeted send — e.g. submitting document comments to the
-    // document's origin slot — must leave it intact for the user's next send.
-    let forceNew = false
-    if (!targetSlot) {
-      forceNew = newSessionRef.current
-      newSessionRef.current = false
-    }
+    // intent -- and only at COMMIT (below), never here: a failed create must
+    // leave the intent armed, without any give-it-back logic that could re-arm
+    // it for the wrong slot.
+    const forceNew = pendingSend.forceNew
     if (!slot || forceNew) {
       sendingRef.current = true;
-      const result = await dispatch(createSlot({ agent: pendingAgentRef.current || defaultAgent || undefined, model: pendingModelRef.current || undefined, mode: modeRef.current })).unwrap();
+      creatingSlotRef.current = true;
+      let result: { key: string }
+      try {
+        result = await dispatch(createSlot({ agent: pendingAgentRef.current || defaultAgent || undefined, model: pendingModelRef.current || undefined, mode: modeRef.current })).unwrap();
+      } catch (e: unknown) {
+        // Slot creation failed. NOTHING was destroyed: the draft store still
+        // holds the origin slot's text/files/pastes (persistence was paused
+        // before the clear, so the empty composer never overwrote it), and the
+        // one-shot refs (newSessionRef, knowledge pending, widget prefill seed)
+        // were never consumed. Un-pause and re-fill the live composer as a
+        // courtesy when the user is still there and has not typed anything new;
+        // otherwise the ordinary draft-hydration on slot return recovers it.
+        sendingRef.current = false
+        creatingSlotRef.current = false
+        pausedPersistSlotRef.current = null
+        const stillThere = pendingSend.originSlot === activeSlotRef.current
+        // "Untouched" = the user typed nothing new since the send. Staged files
+        // do NOT count as touching: an option/auto send leaves pendingFiles
+        // uncleared (they were part of THIS send's payload), so checking them
+        // here wrongly suppressed the re-fill for exactly those sends. New text
+        // is the only thing the re-fill could clobber; files are re-staged from
+        // the pending send itself.
+        const untouched = !inputRef.current.trim()
+        if (stillThere && untouched) {
+          setInput(optionText || pendingSend.raw)
+          // MERGE, not replace: a slow create leaves the composer usable, so
+          // the user can stage another attachment while it is pending.
+          // Assigning the snapshot wholesale dropped that newer file. Snapshot
+          // order first (it is the payload's order), then anything staged since,
+          // de-duplicated by path.
+          setPendingFiles(mergeStagedFiles(pendingSend.files, pendingFilesRef.current))
+          setPasteBlocks(pendingSend.pastes)
+        }
+        // Do NOT re-throw. send() has FIVE call sites (onSend, follow-up send,
+        // quick-send, comment submit, auto-send effect) and most are
+        // fire-and-forget, so re-throwing produced unhandled promise rejections
+        // -- which is what broke CI on 42a22a0c. Nothing was lost, so there is
+        // nothing a caller could usefully do with the error.
+        // eslint-disable-next-line no-console -- surface the swallowed failure
+        console.error('slot creation failed; draft preserved', e)
+        return
+      }
       slot = result.key;
+      creatingSlotRef.current = false
       if (pendingProjectRef.current) {
         await api.chatSlotProject(result.key, pendingProjectRef.current).catch(e => {
           // eslint-disable-next-line no-console -- surface project-assign failures for debugging
           console.error('chatSlotProject failed', e)
         })
       }
+    }
+    // Phase 2 -- COMMIT. Slot creation succeeded (or was not needed): now, and
+    // only now, consume everything Phase 1 staged. All actions key off
+    // pendingSend.originSlot, never live state -- clearing the origin slot's
+    // draft and knowledge selection is correct whether or not the user has
+    // switched away, and keying off live state is what produced both wrong-slot
+    // bugs in review.
+    if (forceNew) newSessionRef.current = false
+    // Consume the widget-origin seed now that the send is committed (see the
+    // capture note at the top of send()).
+    widgetPrefillRef.current = null
+    // Consume the knowledge block only if it is still the SAME selection we
+    // serialized into this send (identity check). If the user picked fresh
+    // knowledge while the create was awaiting, that selection belongs to their
+    // NEXT send and must survive this commit.
+    if (knowledgeFetchRef.current.pendingKnowledge === knowledgeBlock) {
+      knowledgeFetchRef.current.clearPending()
+    }
+    if (!optionText && pendingSend.originSlot) {
+      pausedPersistSlotRef.current = null
+      delete drafts.current[pendingSend.originSlot]
+      delete fileDrafts.current[pendingSend.originSlot]
+      delete pasteDrafts.current[pendingSend.originSlot]
+      saveDrafts()
     }
     setPendingAgent(''); setPendingModel(''); setPendingProject('')
     // Build meta for persistence (knowledge, files, pastes)
@@ -2107,11 +2234,16 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   const submitComments = useCallback((message: string) => {
     const target = tabsCtl.activeTab?.slot ?? null
     if (target && target !== activeSlot) dispatch(switchSlot(target))
-    send(message, target ?? undefined)
+    void send(message, target ?? undefined)
   }, [tabsCtl.activeTab, activeSlot, dispatch, send])
 
   // Auto-send when navigated with ?autoSend=1 or ?token= with prompt
-  useEffect(() => { if (connected && autoSendRef.current) { const txt = autoSendRef.current; autoSendRef.current = null; send(txt) } }, [send, connected, autoSendTick])  
+  useEffect(() => {
+    if (!connected || !autoSendRef.current) return
+    const txt = autoSendRef.current
+    autoSendRef.current = null
+    void send(txt)
+  }, [send, connected, autoSendTick])
 
   // Widget interactivity: when a mcwidget iframe fires an action, PRE-FILL the
  // composer instead of auto-submitting. Auto-send was a
@@ -2668,7 +2800,42 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   const handleCancelQueued = useCallback((queueId: string) => {
     if (!activeSlot) return
     const msg = messagesRef.current.find(m => m.role === 'queued' && (m.meta?.queueId as string) === queueId)
-    if (msg?.content) setInput(msg.content)
+    if (msg?.content) {
+      // The card holds the SERIALIZED text (`[attached_file N] /path`), so
+      // dropping it straight into the composer shows the raw marker and
+      // re-serializes it on resend, doubling the marker.
+      //
+      // De-tokenizing needs the ORDERED attachment list, and a queued card does
+      // not have one: every producer sets `meta` to exactly `{ queueId }` (the
+      // backend `queue` payload carries only `{id, content}`). Recovering the
+      // paths by scanning the marker text is whitespace-bounded and therefore
+      // lossy -- a spaced path is truncated, the marker half-strips, and the
+      // truncated prefix would be staged as a phantom attachment.
+      //
+      // So: strip ONLY when the paths are exact (real `meta.files`). Otherwise
+      // leave the content verbatim -- a visible raw marker the user can edit is
+      // strictly better than mangled text plus an attachment pointing nowhere.
+      // The real fix is propagating `meta.files` through queue storage, the WS
+      // payload and hydration; that is a backend change and is #505's scope.
+      // This branch is already correct for the day that lands: it consumes
+      // whatever ordered list the card carries and gates on its exactness, so
+      // #505 widens the contract without touching this code.
+      const { files, exact } = parseFilesChecked(
+        msg.content,
+        msg.meta as Record<string, unknown> | undefined,
+      )
+      if (exact) {
+        setInput(stripAttachmentMarkers(msg.content, files))
+        // Replace rather than merge: restoring a cancelled message takes over the
+        // composer's attachments, so keeping the current ones made them ride
+        // along on the resend. Only reached when `files` is non-empty.
+        setPendingFiles(files.filter(Boolean))
+      } else {
+        // Never clear staged attachments here: the user may have staged unrelated
+        // files while the turn was running, and dropping them has no undo.
+        setInput(msg.content)
+      }
+    }
     // Optimistically remove the card; WS event is a no-op if already gone
     dispatch(cancelQueuedMessage({ slot: activeSlot, queue_id: queueId }))
     api.cancelQueuedMessage(activeSlot, queueId).catch(() => {})
