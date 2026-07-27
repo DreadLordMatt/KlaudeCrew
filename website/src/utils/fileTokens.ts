@@ -16,6 +16,51 @@ export function parseFiles(content: string, meta?: Record<string, unknown>): str
     : (content.match(/\[attached_file \d+\] (\S+)/g) || []).map(s => s.replace(/\[attached_file \d+\] /, ''))
 }
 
+/** Remove the trailing `[attached_file N] <path>` block that `prepareSendPayload`
+ *  APPENDS to serialized content, leaving everything else byte-identical.
+ *
+ *  `prepareSendPayload` builds `txt` as `[llmRaw, unreferencedTokens].join('\n')`,
+ *  so the markers for attachments the user did not @-mention form a contiguous
+ *  run of whole lines at the very END of the message. Only that trailing run is
+ *  removed, and only when every line in it is a marker.
+ *
+ *  Three properties this deliberately guarantees, each learned from a way an
+ *  earlier version broke:
+ *
+ *  1. **Marker-free content is returned byte-identical.** No trimming, no
+ *     trailing-whitespace stripping, no blank-line collapsing. Queued content is
+ *     the LLM-facing text with paste blocks already expanded, so cosmetic
+ *     normalisation would silently rewrite pasted code and drop Markdown hard
+ *     breaks -- and since cancel deletes the queue entry, the composer holds the
+ *     only copy.
+ *
+ *  2. **A marker that shares its line with user text is never touched.** An
+ *     @-mention is substituted IN PLACE, so `@report.pdf summarize this` becomes
+ *     `[attached_file 1] /docs/report.pdf summarize this` -- marker-shaped at the
+ *     start of the line, with the user's words after it. A line-anchored
+ *     "consume to end of line" rule ate the whole prompt. Requiring the line to
+ *     contain nothing but the marker is what makes this safe.
+ *
+ *  3. **Never returns empty for non-empty input.** An attachment-only message is
+ *     ALL marker lines; stripping them would leave a blank composer and, with
+ *     the queue entry already gone, no trace of which file was queued. In that
+ *     case the content is returned unchanged so the path stays visible.
+ *
+ *  Paths containing spaces are handled by construction: the line is matched as a
+ *  whole, so nothing is parsed out of it and nothing can truncate at a space.
+ */
+export function stripAppendedFileMarkers(content: string): string {
+  if (!content) return content
+  const MARKER_LINE = /^[ \t]*\[attached_file \d+\][ \t]+\S.*$/
+  const lines = content.split('\n')
+  // Walk back over the trailing run of pure-marker lines.
+  let cut = lines.length
+  while (cut > 0 && MARKER_LINE.test(lines[cut - 1])) cut -= 1
+  // No trailing markers, or the message is nothing BUT markers (property 3).
+  if (cut === lines.length || cut === 0) return content
+  return lines.slice(0, cut).join('\n')
+}
+
 /** Per-path display label: the shortest trailing path segments that make the
  *  label unique across `paths` (e.g. two `report.docx` in different dirs become
  *  `q3/report.docx` and `q4/report.docx`).

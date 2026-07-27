@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { prepareSendPayload, buildFileLabels, resolveFileSegment } from '../utils/fileTokens'
+import { prepareSendPayload, buildFileLabels, resolveFileSegment, stripAppendedFileMarkers } from '../utils/fileTokens'
 
 describe('buildFileLabels uniqueness', () => {
   it('disambiguates paths that share a basename', () => {
@@ -134,5 +134,90 @@ describe('prepareSendPayload', () => {
     expect(result.txt).toContain('[attached_file 1] /tmp/data.csv')
     expect(result.txt).toContain('[attached_file 2] /tmp/extra.log')
     expect(result.filePaths).toEqual(['/tmp/data.csv', '/tmp/extra.log'])
+  })
+})
+
+describe('stripAppendedFileMarkers', () => {
+  it('removes an appended marker line and leaves the typed text', () => {
+    expect(stripAppendedFileMarkers('review this\n[attached_file 1] /home/u/docs/report.pdf'))
+      .toBe('review this')
+  })
+
+  it('removes a marker whose path contains spaces', () => {
+    // Rules out recovering paths by scanning `[attached_file N] (\S+)`: that
+    // yields '/home/u/docs/q3' and leaves 'report.pdf' behind as residue.
+    // Matching the whole line cannot truncate.
+    expect(stripAppendedFileMarkers('review this\n[attached_file 1] /home/u/docs/q3 report.pdf'))
+      .toBe('review this')
+  })
+
+  it('removes a trailing run of several markers', () => {
+    expect(stripAppendedFileMarkers('look\n[attached_file 1] /a/one.pdf\n[attached_file 2] /b/two 2.pdf'))
+      .toBe('look')
+  })
+
+  it('returns marker-free content BYTE-IDENTICAL', () => {
+    // Queued content is the LLM-facing text with paste blocks already expanded,
+    // so cosmetic normalisation would rewrite pasted code and drop Markdown hard
+    // breaks. Cancel deletes the queue entry, so the composer holds the only
+    // copy -- any rewrite is unrecoverable. An earlier version trimmed trailing
+    // whitespace, collapsed 3+ newlines and trimmed the ends; each is a silent
+    // edit of text the user typed.
+    for (const src of [
+      'a\n\n\nb  ',
+      '  leading and trailing  ',
+      'hard break at eol  \nnext line',
+      '```\ncode\n\n\nwith blank lines\n```',
+      'just a message',
+      '\n\nsurrounded by blanks\n\n',
+    ]) {
+      expect(stripAppendedFileMarkers(src), JSON.stringify(src)).toBe(src)
+    }
+  })
+
+  it('leaves a marker that SHARES its line with user text', () => {
+    // An @-mention is substituted in place, so `@report.pdf summarize this`
+    // serializes to a marker-shaped line START followed by the user's words. A
+    // line-anchored consume-to-EOL rule deleted the entire prompt.
+    const serialized = '[attached_file 1] /docs/report.pdf summarize this'
+    expect(stripAppendedFileMarkers(serialized)).toBe(serialized)
+  })
+
+  it('leaves an inline marker mid-line alone', () => {
+    const serialized = 'see [attached_file 1] /a/b.txt for context'
+    expect(stripAppendedFileMarkers(serialized)).toBe(serialized)
+  })
+
+  it('never empties an attachment-only message', () => {
+    // All-marker content: stripping would blank the composer while the queue
+    // entry is already deleted, destroying every trace of which file was queued.
+    // Returning it unchanged at least keeps the path visible.
+    const serialized = '[attached_file 1] /docs/report.pdf'
+    expect(stripAppendedFileMarkers(serialized)).toBe(serialized)
+    const multi = '[attached_file 1] /a/one.pdf\n[attached_file 2] /b/two.pdf'
+    expect(stripAppendedFileMarkers(multi)).toBe(multi)
+  })
+
+  it('only strips the TRAILING run, not markers followed by text', () => {
+    const serialized = 'intro\n[attached_file 1] /a/b.pdf\nmore prose the user typed'
+    expect(stripAppendedFileMarkers(serialized)).toBe(serialized)
+  })
+
+  it('handles empty input', () => {
+    expect(stripAppendedFileMarkers('')).toBe('')
+  })
+
+  it('round-trips prepareSendPayload output back to the typed text', () => {
+    // Strongest guard: build the serialized form the real send path produces,
+    // then assert the stripper recovers exactly what was typed.
+    const { txt } = prepareSendPayload('review this', ['/home/u/docs/q3 report.pdf'])
+    expect(txt).toContain('[attached_file 1] /home/u/docs/q3 report.pdf')
+    expect(stripAppendedFileMarkers(txt)).toBe('review this')
+  })
+
+  it('round-trips a multi-line prompt with internal blank lines', () => {
+    const typed = 'first para\n\nsecond para'
+    const { txt } = prepareSendPayload(typed, ['/a/b.pdf'])
+    expect(stripAppendedFileMarkers(txt)).toBe(typed)
   })
 })

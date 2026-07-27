@@ -10,7 +10,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { configureStore } from '@reduxjs/toolkit'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ThemeProvider } from '../hooks/useTheme'
-import chatReducer, { setActiveSlot, switchSlot, createSlot } from '../store/chatSlice'
+import chatReducer, { setActiveSlot, switchSlot, createSlot, appendQueuedMessage } from '../store/chatSlice'
 import dashboardReducer from '../store/dashboardSlice'
 import notificationsReducer from '../store/notificationsSlice'
 
@@ -34,6 +34,7 @@ vi.mock('../api/client', () => ({
     uploadFiles: vi.fn().mockResolvedValue({ paths: [] }),
     screenshot: vi.fn().mockResolvedValue({ path: null }),
     createChatSlot: vi.fn().mockResolvedValue({ key: 'new-slot', title: 'new-slot', messages: 0, running: false }),
+    cancelQueuedMessage: vi.fn().mockResolvedValue({ ok: true }),
     setSlotColor: vi.fn().mockResolvedValue({ ok: true }),
     setSlotFolder: vi.fn().mockResolvedValue({ ok: true }),
     chatSlotProject: vi.fn().mockResolvedValue({ ok: true }),
@@ -483,5 +484,35 @@ describe('ChatPage draft persistence', { timeout: 15_000 }, () => {
       const drafts = JSON.parse(localStorage.getItem('mc-chat-drafts') || '{}')
       expect(drafts['slot-a']).toBe('precious prompt')
     })
+  })
+})
+
+describe('ChatPage cancel queued message', () => {
+  it('restores the TYPED text, not the serialized marker form', async () => {
+    // Wiring test: the helper's own unit tests pass even if the call site is
+    // reverted to setInput(msg.content), so this drives the real cancel click.
+    const store = makeStore('slot-a', [{ key: 'slot-a' }])
+    await renderAndWaitForInput(store)
+
+    // A queued card as the server delivers it: the LLM-facing serialization,
+    // with meta carrying ONLY the queue id (no attachment list).
+    act(() => {
+      store.dispatch(appendQueuedMessage({
+        slot: 'slot-a',
+        content: 'review this\n[attached_file 1] /docs/q3 report.pdf',
+        ts: 't1',
+        queue_id: 'q1',
+      }))
+    })
+
+    const cancelBtn = await waitFor(() => screen.getByLabelText('Cancel queued message'))
+    await act(async () => { fireEvent.click(cancelBtn) })
+
+    const input = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    await waitFor(() => expect(input.value).toContain('review this'))
+    expect(input.value, 'the marker line must not reach the composer').toBe('review this')
+    expect(input.value).not.toContain('attached_file')
+    // The spaced path must not half-strip into a residue.
+    expect(input.value).not.toContain('report.pdf')
   })
 })

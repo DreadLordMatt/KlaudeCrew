@@ -43,7 +43,7 @@ import ThinkingBlock from './chat/ThinkingBlock'
 import type { DisplayItem, TurnItem } from './chat/types'
 import { useScrollManager } from './chat/useScrollManager'
 import { useVirtualChat } from '../hooks/virtualizer/useVirtualChat'
-import { parseFiles, prepareSendPayload, resolveFileSegment, buildFileLabels, findUnreferencedAttachments } from '../utils/fileTokens'
+import { parseFiles, prepareSendPayload, resolveFileSegment, buildFileLabels, findUnreferencedAttachments, stripAppendedFileMarkers } from '../utils/fileTokens'
 import { type PasteBlock, expandAll as expandPasteTokens, findTokenRanges, pruneBlocks as pruneBlocksUtil, saveStoredPaste, recollapsePastes } from '../utils/pasteTokens'
 import { extractPromptFromToken, extractSlackContextFromToken } from '../utils/tokenPrompt'
 // Roles that fold into a collapsible group in the turn view. Thinking is NOT
@@ -2668,7 +2668,21 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   const handleCancelQueued = useCallback((queueId: string) => {
     if (!activeSlot) return
     const msg = messagesRef.current.find(m => m.role === 'queued' && (m.meta?.queueId as string) === queueId)
-    if (msg?.content) setInput(msg.content)
+    // The queued card holds the SERIALIZED text sent to the model, not what the
+    // user typed: `prepareSendPayload` appends an `[attached_file N] <path>`
+    // line per attachment that the text does not @-mention. Restoring it raw
+    // dropped those machine lines into the composer, and sending again
+    // re-serialized them so the marker doubled.
+    //
+    // Strip the appended marker LINES. That needs no attachment metadata (the
+    // card carries only `{queueId}`), and unlike guessing paths out of the
+    // marker text it cannot truncate a path containing a space.
+    //
+    // The attachment itself is NOT re-staged -- the card has no ordered path
+    // list to re-stage from -- so the text comes back clean but unattached.
+    // That is the honest outcome here; re-attaching correctly needs the queue
+    // to carry its file list (see #505).
+    if (msg?.content) setInput(stripAppendedFileMarkers(msg.content))
     // Optimistically remove the card; WS event is a no-op if already gone
     dispatch(cancelQueuedMessage({ slot: activeSlot, queue_id: queueId }))
     api.cancelQueuedMessage(activeSlot, queueId).catch(() => {})
