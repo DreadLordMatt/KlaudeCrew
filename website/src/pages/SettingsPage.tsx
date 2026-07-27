@@ -1,4 +1,4 @@
-import { Bell, Code, Globe, Info, Keyboard, MessageSquare, Mic, Palette, PanelsTopLeft, Server, ShieldCheck } from 'lucide-react'
+import { Bell, Code, Globe, Import, Info, Keyboard, MessageSquare, Mic, Palette, PanelsTopLeft, Server, ShieldCheck } from 'lucide-react'
 import { SlackIcon } from '../components/SlackIcon'
 import { useAppSelector } from '../store'
 import SidePanelLayout from '../components/SidePanelLayout'
@@ -24,9 +24,11 @@ import { OverviewPanel } from './settings/OverviewPanel'
 import { NotificationsPanel } from './settings/NotificationsPanel'
 import { ShortcutsPanel } from './settings/ShortcutsPanel'
 import { AboutPanel } from './settings/AboutPanel'
+import { ImportPanel } from './settings/ImportPanel'
 
 const TABS = [
   { key: 'overview', label: 'Overview', icon: <PanelsTopLeft size={16} />, description: 'System status, memory, agent config, and usage metrics' },
+  { key: 'imports', label: 'Import', icon: <Import className="lucide-inline" />, description: 'Bring supported data from another AI agent into KiroCrew' },
   { key: 'chat', label: 'Chat', icon: <MessageSquare size={16} />, description: 'Message behavior, history, timestamps, and context' },
   { key: 'voice', label: 'Voice', icon: <Mic size={16} />, description: 'Text-to-speech and speech-to-text (dictation) settings' },
   { key: 'display', label: 'Display', icon: <Palette size={16} />, description: 'Zoom, font, and color theme preferences' },
@@ -64,6 +66,7 @@ export default function SettingsPage() {
     >
       {tab => <>
         {tab === 'overview' && <OverviewPanel />}
+        {tab === 'imports' && <ImportPanel />}
         {tab === 'chat' && <ChatPanel />}
         {tab === 'voice' && <VoicePanel />}
         {tab === 'display' && <DisplayPanel />}
@@ -79,7 +82,7 @@ export default function SettingsPage() {
         {tab === 'shortcuts' && <ShortcutsPanel />}
         {tab === 'developer' && <GeneralPanel />}
         {tab === 'about' && <AboutPanel />}
-        {tab !== 'overview' && tab !== 'chat' && tab !== 'voice' && tab !== 'display' && tab !== 'browser' && tab !== 'instances' && tab !== 'security' && tab !== 'notifications' && tab !== 'slack' && tab !== 'discord' && tab !== 'telegram' && tab !== 'webex' && tab !== 'wecom' && tab !== 'shortcuts' && tab !== 'developer' && tab !== 'about' && (
+        {tab !== 'overview' && tab !== 'imports' && tab !== 'chat' && tab !== 'voice' && tab !== 'display' && tab !== 'browser' && tab !== 'instances' && tab !== 'security' && tab !== 'notifications' && tab !== 'slack' && tab !== 'discord' && tab !== 'telegram' && tab !== 'webex' && tab !== 'wecom' && tab !== 'shortcuts' && tab !== 'developer' && tab !== 'about' && (
           <div className="text-muted text-sm py-12 text-center">
             {TABS.find(t => t.key === tab)?.label} settings — coming soon
           </div>

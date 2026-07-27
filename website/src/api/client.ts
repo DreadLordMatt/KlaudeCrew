@@ -525,11 +525,65 @@ export interface TunnelStatus {
   reconnect_attempt: number
 }
 
+export interface AgentImportCategory {
+  id: string
+  label: string
+  count: number
+  description?: string
+}
+
+export interface AgentImportSource {
+  id: string
+  name: string
+  detected: boolean
+  detail?: string
+  categories: AgentImportCategory[]
+}
+
+export interface AgentImportSkipped {
+  source: string
+  category: string
+  reason: string
+  count?: number
+}
+
+export interface AgentImportScanResponse {
+  sources: AgentImportSource[]
+  skipped?: AgentImportSkipped[]
+  merge_only: true
+}
+
+export interface AgentImportSelection {
+  id: string
+  categories: string[]
+}
+
+export interface AgentImportApplyRequest {
+  sources: AgentImportSelection[]
+}
+
+export interface AgentImportSummary {
+  imported: number
+  deduplicated: number
+  skipped: number
+}
+
+export interface AgentImportApplyResponse {
+  ok: true
+  summary: AgentImportSummary
+}
+
 export const api = {
   status: () => fetch('/api/status').then(j),
   tunnelStatus: () => fetch('/api/tunnel/status').then(j) as Promise<TunnelStatus>,
   system: () => fetch('/api/system').then(j),
   telemetryStartup: () => fetch('/api/telemetry/startup').then(j),
+  onboardingImportScan: () =>
+    get('/api/onboarding/import/scan').then(j) as Promise<AgentImportScanResponse>,
+  onboardingImportApply: (body: AgentImportApplyRequest) =>
+    post('/api/onboarding/import/apply', body).then(j) as Promise<AgentImportApplyResponse>,
+  onboardingImportState: (body: { completed: true }) =>
+    put('/api/onboarding/import/state', body).then(jNullable) as Promise<{ ok?: boolean } | null>,
   securityStats: () => fetch('/api/security/stats').then(j) as Promise<{ denied_commands: number; suspicious_patterns: number; tool_schemas: number; redaction_paths: number }>,
   // Denied commands (Settings → Security). Every endpoint returns the full
   // refreshed snapshot so callers can seed their query cache from the response.
