@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, useReducedMotion } from 'framer-motion'
 import {
@@ -25,13 +25,160 @@ import { Badge, Btn, Card, SendBtn, Skeleton } from './ui'
 
 const QUERY_KEY = ['kiro-prerequisite'] as const
 
+// The last SUCCESSFUL verdict is mirrored here so a cold reload during a
+// gateway restart re-seeds the query cache and behaves like the already-loaded
+// case, instead of falling through to the (children-rendering) fail-open path.
+export const VERDICT_STORAGE_KEY = 'kirocrew:kiro-prerequisite:last-verdict'
+
+// Structural guard: a persisted value is trusted only if it still looks like a
+// KiroPrerequisiteStatus. A corrupt or shape-drifted blob must never crash the
+// gate nor fabricate a `ready` verdict — it is simply ignored.
+//
+// The field lists below are EXHAUSTIVE against KiroPrerequisiteStatus /
+// KiroPrerequisiteOperation (api/client.ts) on purpose. Every field is rendered
+// somewhere downstream — `operation.error`/`message`/`detail` land in
+// ReauthenticationBanner and the setup panels, `operation.url` reaches
+// trustedLoginUrl(), `docs_url` becomes an href — and React throws outright when
+// asked to render an object. Spot-checking a few fields left the rest as a hole
+// that a hand-edited localStorage blob walks straight through, so the guard
+// enumerates the whole contract instead. Keep these lists in sync with the
+// interfaces; a field present in the type but absent here is a live crash path.
+const STATUS_STRING_FIELDS = ['platform', 'docs_url'] as const
+const STATUS_BOOLEAN_FIELDS = [
+  'installed', 'authenticated', 'ready', 'initial_setup_complete',
+  'can_auto_install', 'can_login', 'repair_required', 'setup_allowed',
+] as const
+const OPERATION_STRING_FIELDS = ['kind', 'status', 'message', 'detail', 'url', 'error'] as const
+
+function isKiroPrerequisiteStatus(value: unknown): value is KiroPrerequisiteStatus {
+  if (typeof value !== 'object' || value === null) return false
+  const v = value as Record<string, unknown>
+  if (!STATUS_STRING_FIELDS.every((k) => typeof v[k] === 'string')) return false
+  if (!STATUS_BOOLEAN_FIELDS.every((k) => typeof v[k] === 'boolean')) return false
+  const op = v.operation
+  if (typeof op !== 'object' || op === null) return false
+  const opRec = op as Record<string, unknown>
+  return OPERATION_STRING_FIELDS.every((k) => typeof opRec[k] === 'string')
+}
+
+// Read the last persisted verdict, defensively. Any failure — storage
+// unavailable (private mode / disabled), an absent key, invalid JSON, or a
+// shape mismatch — yields `undefined`, so the caller treats it as "no known
+// verdict" rather than trusting garbage.
+// The persisted verdict exists for ONE purpose: on a cold load during a gateway
+// blip, answer "render the app or the wall?" without waiting for a probe. Only
+// the booleans (plus the two operation ENUMS that drive the refetch cadence)
+// feed that decision. Every free-text/URL field — `operation.url` is a
+// device-flow sign-in URL, and message/detail/error/docs_url/platform carry host
+// and operation output — is irrelevant to it and is re-fetched within seconds.
+//
+// So none of it is stored. localStorage is origin-scoped, NOT subject-scoped: an
+// identity switch in the same browser would otherwise render the previous
+// subject's host details and sign-in URL for the moment before the refetch lands.
+// Redacting at the WRITE side means there is no sensitive payload to leak and
+// therefore nothing to bind to an authenticated subject. Redaction is applied
+// again on READ so a blob written by an older build — which stored the full
+// object — is neutralised on upgrade instead of being trusted as-is.
+export function redactVerdictForStorage(status: KiroPrerequisiteStatus): KiroPrerequisiteStatus {
+  return {
+    ...status,
+    platform: '',
+    docs_url: '',
+    operation: {
+      // Enums only: `status` drives the 1s running-poll cadence, `kind` selects
+      // which operation is in flight. Neither carries host or user data.
+      kind: status.operation.kind,
+      status: status.operation.status,
+      message: '',
+      detail: '',
+      url: '',
+      error: '',
+    },
+  }
+}
+
+export function readPersistedVerdict(): KiroPrerequisiteStatus | undefined {
+  if (typeof window === 'undefined') return undefined
+  let raw: string | null
+  try {
+    raw = window.localStorage.getItem(VERDICT_STORAGE_KEY)
+  } catch {
+    return undefined
+  }
+  if (!raw) return undefined
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (isKiroPrerequisiteStatus(parsed)) return redactVerdictForStorage(parsed)
+  } catch {
+    // Corrupt JSON — ignore.
+  }
+  return undefined
+}
+
+// Persist a verdict. Callers pass ONLY real, successfully-fetched verdicts here
+// (never an error/unknown state). Best-effort: a storage failure is swallowed.
+function writePersistedVerdict(status: KiroPrerequisiteStatus): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(
+      VERDICT_STORAGE_KEY,
+      JSON.stringify(redactVerdictForStorage(status)),
+    )
+  } catch {
+    // Storage full/unavailable — persistence is an optimization, not required.
+  }
+}
+
+// A failed probe either carries a real HTTP verdict from a reachable gateway,
+// or none at all:
+//   - 'missing-endpoint' (HTTP 404): an older gateway with no prerequisite API.
+//     Fail open — unchanged from before.
+//   - 'gateway-error' (any other real HTTP status, e.g. the 5xx from
+//     handlers/kiro_prerequisite.py): the gateway is reachable and reports it
+//     could not run the check. This is the ONLY case that keeps the wall.
+//   - 'unreachable' (a genuine transport failure — `fetch` rejects with a bare
+//     TypeError): the SPA never reached the gateway, so the failure says NOTHING
+//     about Kiro setup. Treat as UNKNOWN — fail open and let the app's own
+//     offline layer own the message.
+// `ApiError` (api/client.ts) is the discriminator for a real HTTP response: it
+// carries a numeric `status`. Below that, only a `TypeError` proves the request
+// never completed — `fetch` rejects with a TypeError for DNS/connection/CORS
+// failures. Anything else (most importantly the `SyntaxError` that
+// `kiroPrerequisite`'s `.then(j)` throws when a 200 carries a non-JSON body,
+// e.g. an HTML error page from a proxy) means we DID get a response and simply
+// could not understand it. That is not evidence the gateway is unreachable, so
+// it must NOT fail open: a user who genuinely needs setup would be dropped into
+// a broken app. Those classify as 'gateway-error' and keep the wall + retry.
+export type PrerequisiteProbeFailure = 'missing-endpoint' | 'gateway-error' | 'unreachable'
+
+export function classifyPrerequisiteError(error: unknown): PrerequisiteProbeFailure {
+  if (error instanceof ApiError) {
+    return error.status === 404 ? 'missing-endpoint' : 'gateway-error'
+  }
+  return error instanceof TypeError ? 'unreachable' : 'gateway-error'
+}
+
+// Backoff for the UNKNOWN/unreachable state: ~2s, then doubling, capped at 10s
+// (2s, 2s, 4s, 8s, 10s, 10s…). Replaces the old flat 30s wait so recovery is
+// automatic within seconds of the gateway port returning.
+export function kiroUnknownBackoff(failureCount: number): number {
+  const base = 2_000
+  const max = 10_000
+  const steps = Math.max(0, failureCount - 1)
+  return Math.min(max, base * 2 ** steps)
+}
+
 export function kiroPrerequisiteRefetchInterval(
   status: KiroPrerequisiteStatus | undefined,
+  failureCount = 0,
 ): number | false {
   if (status?.operation.status === 'running') return 1_000
   if (status?.ready) return 30_000
   if (status && status.setup_allowed === false) return 3_000
-  return 30_000
+  // Any other KNOWN verdict keeps the existing 30s cadence.
+  if (status) return 30_000
+  // No known verdict (unknown / gateway unreachable): back off 2s → 10s.
+  return kiroUnknownBackoff(failureCount)
 }
 
 function trustedLoginUrl(value: string): string | null {
@@ -455,8 +602,24 @@ export default function KiroPrerequisiteGate({ children }: { children: ReactNode
   const statusQuery = useQuery({
     queryKey: QUERY_KEY,
     queryFn: api.kiroPrerequisite,
-    refetchInterval: (query) => kiroPrerequisiteRefetchInterval(query.state.data),
+    // Seed from the last persisted verdict so a reload during a gateway restart
+    // renders like the already-loaded case instead of the fail-open path.
+    // `initialDataUpdatedAt: 0` marks the seed stale so a fresh probe still
+    // fires immediately on mount (the app default staleTime is 30s).
+    initialData: readPersistedVerdict,
+    initialDataUpdatedAt: 0,
+    refetchInterval: (query) =>
+      kiroPrerequisiteRefetchInterval(query.state.data, query.state.fetchFailureCount),
   })
+  // Mirror only real, successful verdicts to storage (never error/unknown):
+  // statusQuery.data is only ever a fetched/seeded status, and a failed
+  // background refetch leaves that data untouched — so this never overwrites a
+  // good verdict with an error state.
+  useEffect(() => {
+    if (statusQuery.isSuccess && statusQuery.data) {
+      writePersistedVerdict(statusQuery.data)
+    }
+  }, [statusQuery.isSuccess, statusQuery.data])
   const updateStatus = (status: KiroPrerequisiteStatus) => {
     queryClient.setQueryData(QUERY_KEY, status)
   }
@@ -474,20 +637,38 @@ export default function KiroPrerequisiteGate({ children }: { children: ReactNode
   const retryStatus = () => { void statusQuery.refetch() }
   const prerequisite = statusQuery.data
 
-  // An older gateway has no prerequisite API and must retain its existing
-  // dashboard behavior. A live gateway error is different: keep setup visible
-  // with a retry path so users do not fall through into broken chat sessions.
+  // A 404 says this gateway has no prerequisite API at all. That is a property
+  // of the GATEWAY, not of anything we cached, so it must fail open even when a
+  // persisted verdict exists — otherwise a stale `ready:false` verdict would
+  // make the `&& !prerequisite` guard below skip this branch and pin the setup
+  // wall up against a gateway that was rolled back to a version predating the
+  // API. Classified before the cached-data guard for that reason.
+  if (
+    statusQuery.isError
+    && classifyPrerequisiteError(statusQuery.error) === 'missing-endpoint'
+  ) {
+    return <KiroReadinessProvider ready>{children}</KiroReadinessProvider>
+  }
+
+  // An error with no prior verdict: keep the full-screen wall ONLY for a real
+  // HTTP error from a reachable gateway. A 404 (old gateway without the API)
+  // and an unreachable gateway (network-layer failure, no HTTP status) both
+  // fail open into the app, where the existing offline layer — not this gate —
+  // owns the "gateway offline" messaging. `ready` matches the 404 branch on
+  // purpose (see the PR's KiroReadinessProvider rationale): asserting a distinct
+  // not-ready value here would make consumers such as SideChat falsely claim
+  // "Finish Kiro CLI setup" when the truth is only that the gateway is offline.
   if (statusQuery.isError && !prerequisite) {
-    if (statusQuery.error instanceof ApiError && statusQuery.error.status === 404) {
-      return <KiroReadinessProvider ready>{children}</KiroReadinessProvider>
+    if (classifyPrerequisiteError(statusQuery.error) === 'gateway-error') {
+      return (
+        <SetupStatusError
+          message={statusQuery.error.message || 'The gateway returned an unexpected error.'}
+          retrying={retrying}
+          onRetry={retryStatus}
+        />
+      )
     }
-    return (
-      <SetupStatusError
-        message={statusQuery.error.message || 'The gateway returned an unexpected error.'}
-        retrying={retrying}
-        onRetry={retryStatus}
-      />
-    )
+    return <KiroReadinessProvider ready>{children}</KiroReadinessProvider>
   }
   if (!prerequisite) {
     return (
