@@ -2435,20 +2435,45 @@ async def start_dashboard(
     # fall off into History on every gateway restart. Closed tabs (meta.closed)
     # are still excluded by the rehydrate guard. restore_open_slots() logs
     # its own info line on success, so no caller-side log here.
-    chat.restore_open_slots(state)
+    #
+    # Only the first INLINE_RESTORE_LIMIT sessions are rehydrated inline: the
+    # loop-stall watchdog armed above _exit(1)s the gateway after 25s without a
+    # heartbeat, and rehydrating a large tab set synchronously here blows that
+    # budget outright (a home with ~70 open tabs + hundreds of sessions took
+    # >25s and killed the gateway mid-startup, every boot). The remainder is
+    # finished by a background task that yields between sessions, so the
+    # heartbeat keeps beating and nothing is dropped.
+    _deferred_keys: list[str] = []
+    _deferred_sessions: list[tuple[str, dict]] = []
+    _inline = chat.restore_open_slots(
+        state, limit=chat.INLINE_RESTORE_LIMIT, deferred=_deferred_keys
+    )
     restored = chat.restore_recent_sessions(
         state,
         cfg.dashboard.restore_window_minutes if cfg.dashboard.restore_sessions else 0,
         folders_only=not cfg.dashboard.restore_sessions,
+        limit=max(0, chat.INLINE_RESTORE_LIMIT - _inline),
+        deferred=_deferred_sessions,
     )
     if restored:
         logger.info("Restored %d session(s)", restored)
+    if _deferred_keys or _deferred_sessions:
+        _resume = asyncio.create_task(
+            chat.resume_deferred_restores(state, _deferred_keys, _deferred_sessions)
+        )
+        state._background_tasks.add(_resume)
+        _resume.add_done_callback(state._background_tasks.discard)
 
     # Both restore paths above rehydrate tabs under their original
     # "chat-<N>-<ts>" keys but leave _slot_counter at its boot value of 0.
     # Reseed it past the highest restored index so the next new chat can't
     # re-mint a colliding low index (which scrambles the tab -> session map).
-    state.reseed_slot_counter()
+    # Deferred names are included even though those slots do not exist yet —
+    # otherwise a new chat opened while the background pass is still running
+    # could take an index a returning tab is about to claim.
+    state.reseed_slot_counter(
+        [*_deferred_keys, *(name for name, _ in _deferred_sessions)]
+    )
 
     # Relaunch agents in non-archived channels
     from kiro_crew.channel import ChannelManager, run_channel_agent

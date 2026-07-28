@@ -1658,6 +1658,30 @@ class DashboardState:
         self._flush_task: asyncio.Task | None = None  # type: ignore[type-arg]
         # Update progress tracking (shared across all connected clients)
         self._update_progress: dict[str, str] | None = None  # {step, detail}
+        # Startup restores handed to the background deferred pass: named, but
+        # not in _slots yet. _persist_open_slots unions them into the snapshot
+        # so a flush (or a crash/restart) partway through the pass cannot
+        # rewrite open_slots.json down to just the inline set and permanently
+        # drop the tabs that had not come back yet.
+        #
+        # Rebound wholesale, never mutated in place: _persist_open_slots also
+        # runs from the 5s flush executor thread, and a tuple swap is atomic
+        # under the GIL, so a reader always sees a consistent snapshot.
+        self._pending_restore_keys: tuple[str, ...] = ()
+        # Slot keys whose deferred replay is IN FLIGHT. get_or_create_slot
+        # registers a slot in _slots before its ~500-message window is replayed
+        # into it, and the deferred pass yields to the loop, so the 5s flush
+        # executor (and a shutdown save) can observe a slot mid-replay: _dirty
+        # is already set but _disk_older_count / _disk_window_len are not, so a
+        # save would write a partial window with the wrong frozen-prefix
+        # accounting and the next flush would duplicate those lines. The
+        # persistence sweeps skip these keys; nothing is lost, because a
+        # restoring slot's window is read FROM disk and is already there.
+        #
+        # Membership tests only, never iterated: the loop mutates this while
+        # the flush executor thread reads it, and `in` is safe under a
+        # concurrent add/discard where iteration would raise.
+        self._restoring_keys: set[str] = set()
         # Restricted (incognito/temporary): session keys with memory writes disabled
         self._restricted_keys: set[str] = set()
         # Ephemeral: session keys with no memory writes at all
@@ -2129,6 +2153,11 @@ class DashboardState:
         from kiro_crew.dashboard.chat import _save_slot_to_history
 
         for slot in list(self._slots.values()):
+            # Skip before the _dirty check, not after: the branch below clears
+            # _dirty on the assumption the save ran, so `continue`-ing later
+            # would drop the flag without a write.
+            if slot.key in self._restoring_keys:
+                continue
             if not slot._dirty or not slot.messages:
                 continue
             try:
@@ -2163,6 +2192,14 @@ class DashboardState:
         """
         try:
             path = config_dir() / "open_slots.json"
+            # Read the pending-restore pins BEFORE enumerating _slots. The
+            # deferred pass inserts a restored slot and then clears its pin, so
+            # reading _slots first would let the final restore land in between
+            # the two reads: its key is absent from the _slots snapshot AND the
+            # pin tuple is already empty, and the tab drops out of the file.
+            # Reading the pins first can only ever over-report (a key that is
+            # about to appear in _slots too), which the de-dup below absorbs.
+            pending = self._pending_restore_keys
             # Only snapshot persistent-memory slots. Incognito/temporary tabs
             # are ephemeral by contract ("closes when I'm done", no
             # consolidation/lessons); persisting their keys would resurrect
@@ -2173,7 +2210,20 @@ class DashboardState:
                 name
                 for name, slot in list(self._slots.items())
                 if getattr(slot, "memory_mode", "persistent") == "persistent"
+                # A slot mid-replay has not had memory_mode applied yet, so it
+                # reads as "persistent" and an incognito session would be
+                # snapshotted. Every restoring key that DOES belong here is
+                # already pinned in _pending_restore_keys (deferral pins only
+                # persistent sessions), so skipping is lossless.
+                and name not in self._restoring_keys
             ]
+            # Union the still-pending deferred restores (see
+            # _pending_restore_keys). They are legitimately open tabs that the
+            # background pass has not replayed yet, so omitting them here would
+            # make this snapshot a truncation — and the next boot would restore
+            # only what happened to be back in _slots when it was written.
+            live = set(keys)
+            keys.extend(k for k in pending if k not in live)
             payload = json.dumps({"keys": keys, "ts": time.time()})
             # Use the canonical atomic_write helper, not a deterministic
             # ".json.tmp" name — _persist_open_slots can run concurrently from
@@ -2567,7 +2617,7 @@ class DashboardState:
         self.push_slots_update()
         return slot
 
-    def reseed_slot_counter(self) -> None:
+    def reseed_slot_counter(self, extra_keys: "list[str] | None" = None) -> None:
         """Advance ``_slot_counter`` past the highest index among live slots.
 
         ``__init__`` resets ``_slot_counter`` to 0 on every gateway boot, but
@@ -2584,9 +2634,15 @@ class DashboardState:
         observed index so subsequent auto-minted slots always get fresh,
         collision-proof indices. Monotonic: only ever advances the counter,
         never lowers it, so it is safe to call regardless of restore order.
+
+        *extra_keys* names slots that are known but not yet in ``_slots`` —
+        the restores deferred to the background pass. Counting them here rather
+        than reseeding again on completion means the counter is already past
+        them, so a new chat minted while the deferred pass is still running
+        cannot collide with a tab that is about to come back.
         """
         max_idx = self._slot_counter
-        for name in self._slots:
+        for name in (*self._slots, *(extra_keys or ())):
             # Parse via the shared helper so this stays in lock-step with the
             # key minter (_mint_slot_key). Custom keys return None and skip.
             idx = _slot_index_from_key(name)
