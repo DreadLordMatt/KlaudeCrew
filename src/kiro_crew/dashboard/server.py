@@ -2463,21 +2463,30 @@ async def start_dashboard(
     # Restore exactly the tabs the user had open at last shutdown — these
     # come back regardless of mtime, so long-running tabs don't silently
     # fall off into History on every gateway restart. Closed tabs (meta.closed)
-    # are still excluded by the rehydrate guard. restore_open_slots() logs
-    # its own info line on success, so no caller-side log here.
-    chat.restore_open_slots(state)
-    restored = chat.restore_recent_sessions(
+    # are still excluded by the rehydrate guard.
+    #
+    # This awaits only the eligibility SCAN, which runs in a worker thread; the
+    # replay itself is a background task that yields between sessions. The
+    # loop-stall watchdog armed above _exit(1)s the gateway after 25s without a
+    # heartbeat, and doing either of those on the loop blew that budget outright
+    # on a large home (~70 open tabs + hundreds of sessions killed the gateway
+    # mid-startup, every boot). Awaiting the scan — rather than backgrounding it
+    # too — is what lets reseed_slot_counter run past every known key before any
+    # client can mint a new chat. restore_sessions_at_startup logs its own
+    # progress lines, so no caller-side log here.
+    await chat.restore_sessions_at_startup(
         state,
         cfg.dashboard.restore_window_minutes if cfg.dashboard.restore_sessions else 0,
         folders_only=not cfg.dashboard.restore_sessions,
     )
-    if restored:
-        logger.info("Restored %d session(s)", restored)
 
     # Both restore paths above rehydrate tabs under their original
     # "chat-<N>-<ts>" keys but leave _slot_counter at its boot value of 0.
     # Reseed it past the highest restored index so the next new chat can't
     # re-mint a colliding low index (which scrambles the tab -> session map).
+    # restore_sessions_at_startup already reseeded past every key in its plan,
+    # including the ones the background replay has not reached; this call is the
+    # idempotent, monotonic backstop for anything created since.
     state.reseed_slot_counter()
 
     # Relaunch agents in non-archived channels

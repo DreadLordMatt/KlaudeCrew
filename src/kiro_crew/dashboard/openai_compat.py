@@ -21,6 +21,7 @@ from typing import Any
 
 from aiohttp import web
 
+from kiro_crew.dashboard.chat_persistence import ensure_pending_slot_restored
 from kiro_crew.dashboard.chat_runner import _run_chat
 from kiro_crew.dashboard.kiro_readiness import reject_if_kiro_not_ready
 from kiro_crew.dashboard.state import DashboardState, _normalize_slot_key
@@ -225,6 +226,12 @@ async def api_completions(request: web.Request) -> web.StreamResponse:
     completion_id = _make_id()
 
     if slot_id:
+        # Like /api/chat, this creates from a caller-supplied key without loading
+        # the window, so a key the startup replay has not reached must be
+        # restored before the create rather than materialized empty over it.
+        # Ordered BEFORE the freshly_created probe below: a slot this restores is
+        # a returning session, not a new one.
+        await ensure_pending_slot_restored(state, slot_id)
         # Membership must be checked on the canonical (filename-charset) key —
         # get_or_create_slot folds unsafe chars, so a raw slot_id may map to an
         # existing slot even when the raw string is absent from _slots.

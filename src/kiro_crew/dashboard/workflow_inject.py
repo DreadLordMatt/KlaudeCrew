@@ -17,6 +17,7 @@ import json
 import re
 from typing import Any, Callable, Optional
 
+from kiro_crew.dashboard.chat_persistence import ensure_restored_before_inject
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.history import append_if_absent_off_loop
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
@@ -136,7 +137,22 @@ def inject_workflow_result(
 
         # 2. Fall back to a dedicated workflow slot only if the chat is gone.
         if slot is None:
-            slot = state.get_or_create_slot(name=f"workflow-{run_id}")
+            fallback_key = f"workflow-{run_id}"
+            # Same hazard as the cron injector: this key can be one the startup
+            # replay still owns, and an empty slot under it would be flushed
+            # over that session's transcript. Deferred rather than read inline,
+            # because this runs on the loop and cannot await.
+            if ensure_restored_before_inject(
+                state,
+                fallback_key,
+                lambda: inject_workflow_result(
+                    state, run_id, snapshot, on_injected=on_injected
+                ),
+            ):
+                # Not injected yet — the deferred retry will report its own
+                # outcome. False keeps the "did I inject" contract truthful.
+                return False
+            slot = state.get_or_create_slot(name=fallback_key)
             if not getattr(slot, "linked_session_key", ""):
                 slot.linked_session_key = session_key
             slot.title = f"Workflow: {snapshot.get('name') or run_id}"

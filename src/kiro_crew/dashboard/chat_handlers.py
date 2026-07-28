@@ -31,6 +31,7 @@ from kiro_crew.dashboard.chat_persistence import (
     _attach_variants,
     _redact_meta,
     _redact_meta_for_role,
+    ensure_pending_slot_restored,
     get_reasoning_effort_values,
     save_slot_off_loop,
 )
@@ -157,6 +158,12 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     requested_memory_mode = body.get("memory_mode")
     if requested_memory_mode not in ("persistent", "incognito", "temporary"):
         requested_memory_mode = None
+
+    # This handler creates from a request-supplied key and never loads the
+    # session window itself, so a key the startup replay has not reached yet
+    # must be restored first — an empty slot registered under it would be
+    # flushed over that session's transcript.
+    await ensure_pending_slot_restored(state, slot_name)
 
     try:
         slot = state.get_or_create_slot(
@@ -697,6 +704,9 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
         memory_mode = body.get("memory_mode", "persistent")
         if memory_mode not in ("persistent", "incognito", "temporary"):
             return web.json_response({"error": "invalid memory_mode"}, status=400)
+        # Same reason as api_chat: creating under a key the startup replay still
+        # owns must restore it rather than register an empty slot over it.
+        await ensure_pending_slot_restored(state, name)
         slot = state.get_or_create_slot(
             name,
             agent=agent,

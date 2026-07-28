@@ -9,6 +9,11 @@ import re
 import time
 import uuid
 from collections import deque
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from aiohttp import web
 
 from kiro_crew import model_registry
 from kiro_crew.agent import KIRO_AGENTS_DIR
@@ -26,6 +31,11 @@ from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.validation import ARTIFACT_SLUG_RE
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from collections.abc import Callable, Iterator
+
+    from kiro_crew.history import ConversationLog
 
 
 def _redact_value(v):  # type: ignore[no-untyped-def]
@@ -174,6 +184,221 @@ def save_all_slots_to_history(state: DashboardState) -> None:
         logger.debug("Shutdown: open_slots snapshot failed", exc_info=True)
 
 
+def _kiro_model_map() -> dict[str, str]:
+    """Map kiro agent name/stem -> configured model, for restored slots."""
+    kiro_model_map: dict[str, str] = {}
+    try:
+        for f in KIRO_AGENTS_DIR.glob("*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                model = data.get("model", "")
+                if data.get("name"):
+                    kiro_model_map[data["name"]] = model
+                kiro_model_map[f.stem] = model
+            except (json.JSONDecodeError, OSError):
+                continue
+    except Exception:
+        logger.debug("Failed to build kiro model map", exc_info=True)
+    return kiro_model_map
+
+
+def _load_restore_cfg() -> "KiroCrewConfig | None":
+    try:
+        return KiroCrewConfig.load()
+    except Exception:
+        return None
+
+
+def _slot_name_from_history_key(key: str) -> str | None:
+    """Slot name for a ``list_sessions()`` key, or None if it is not a chat slot.
+
+    ``list_sessions()`` reports the FILENAME-folded form (``dashboard_x``) while
+    ``_history_key_for`` produces the canonical colon form (``dashboard:x``), so
+    anything keyed off one and looked up by the other silently misses. Both
+    prefixes are stripped here and every lookup goes through the slot name.
+
+    The result is folded through ``_normalize_slot_key`` — which also unwraps
+    STACKED ``dashboard_dashboard_x`` prefixes — so it equals the key
+    ``get_or_create_slot`` will actually register. Returning the unfolded name
+    would let a legacy stacked file miss the ``slot_name in state._slots`` dedup
+    guard and then replay its whole window onto the canonical slot that guard
+    was meant to protect, duplicating that session's messages on the next save.
+    """
+    if key.startswith("dashboard:"):
+        stripped = key.removeprefix("dashboard:")
+    elif key.startswith("dashboard_"):
+        stripped = key.removeprefix("dashboard_")
+    else:
+        return None
+    return _normalize_slot_key(stripped) or None
+
+
+@dataclass
+class RestorePlan:
+    """Everything a restore needs, read from disk with no state touched.
+
+    Produced by :func:`_collect_restore_plan` — deliberately a plain data
+    object built from a ``ConversationLog`` rather than a ``DashboardState``, so
+    the collect phase *cannot* mutate slots even by accident. That is what makes
+    it safe to run in a worker thread while the event loop keeps serving.
+    """
+
+    open_keys: list[str]
+    """Keys read from open_slots.json, validated and folded. Also the floor."""
+    listing: dict[str, dict]
+    """slot name -> list_sessions() row, so no applier re-walks the directory."""
+    sessions: list[tuple[str, dict, dict]]
+    """(slot_name, listing row, metadata) for eligible non-open-tab sessions."""
+    kiro_model_map: dict[str, str]
+    cfg: "KiroCrewConfig | None"
+
+    @property
+    def total(self) -> int:
+        return len(self.open_keys) + len(self.sessions)
+
+
+def _read_open_slots_keys() -> list[str]:
+    """Validated, folded keys from open_slots.json. Pure file read, no log needed.
+
+    Split out from :func:`_collect_open_keys` so the startup path can install the
+    snapshot floor from these keys BEFORE it yields to the loop. The file holds
+    one short string per open tab, so this read is bounded by the tab count
+    rather than by accumulated history.
+    """
+    keys: list[str] = []
+    path = config_dir() / "open_slots.json"
+    if not path.exists():
+        return keys
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.debug("open_slots.json unreadable; skipping", exc_info=True)
+        return keys
+    raw_keys = data.get("keys") if isinstance(data, dict) else None
+    if not isinstance(raw_keys, list):
+        return keys
+    for raw in raw_keys:
+        if not isinstance(raw, str) or not raw:
+            continue
+        # Defense-in-depth: slot keys flow into _history_key_for() ->
+        # filesystem path construction. open_slots.json is 0o600 so the threat
+        # is small, but a key smuggled in (symlink attack at write time or a
+        # separate vuln) could escape the sessions directory (e.g.
+        # "../../etc/passwd"). Live-gateway slot keys never contain path
+        # separators; reject any that do, warn so an attempted breakout is
+        # visible, and keep restoring the rest.
+        if "/" in raw or "\\" in raw:
+            logger.warning("restore_open_slots: rejecting key with path separators: %r", raw)
+            continue
+        # Fold to the canonical (filename-charset) key. Snapshots written
+        # before slot-key normalization landed may carry a raw display-style
+        # key (e.g. "Artifact: My Doc") alongside its sanitized twin — after
+        # folding, the second form is deduped here instead of restoring a
+        # duplicate sidebar session backed by the same transcript.
+        folded = _normalize_slot_key(raw)
+        if folded and folded not in keys:
+            keys.append(folded)
+    return keys
+
+
+def _collect_open_keys(
+    log: "ConversationLog", *, keys: list[str] | None = None
+) -> tuple[list[str], dict[str, dict]]:
+    """Open-tab keys plus the session listing, both read from disk.
+
+    The listing is ALWAYS built — a missing or malformed snapshot yields no open
+    keys but still returns the full listing, because the recent-session half of a
+    plan reads it too. Returning an empty listing here would silently reduce a
+    fresh home's restore to nothing. Pass *keys* to reuse an earlier read.
+    """
+    listing: dict[str, dict] = {}
+    for s in log.list_sessions():
+        name = _slot_name_from_history_key(s.get("key", ""))
+        if name:
+            listing[name] = s
+    return (keys if keys is not None else _read_open_slots_keys()), listing
+
+
+def _collect_recent_sessions(
+    log: "ConversationLog",
+    window_minutes: int,
+    *,
+    folders_only: bool,
+    listing: dict[str, dict] | None = None,
+    skip: set[str] | None = None,
+) -> list[tuple[str, dict, dict]]:
+    """Filter the session listing down to the sessions a restore should replay.
+
+    Pure I/O plus filtering: mtime cutoff, ``folders_only``, pinned/foldered
+    exemption and ``closed``. *skip* holds slot names already covered by the
+    open-tab list, so the two halves of a plan never collect the same session
+    twice.
+    """
+    cutoff = time.time() - (window_minutes * 60) if window_minutes > 0 else None
+    if listing is None:
+        rows = list(log.list_sessions())
+    else:
+        rows = list(listing.values())
+    out: list[tuple[str, dict, dict]] = []
+    for s in rows:
+        key = s.get("key", "")
+        slot_name = _slot_name_from_history_key(key)
+        if not slot_name:
+            continue
+        if skip and slot_name in skip:
+            continue
+        meta = log.get_metadata(key)
+        has_folder = bool(meta.get("folder_id"))
+        has_pin = bool(meta.get("pinned"))
+        if folders_only and not has_folder and not has_pin:
+            continue
+        if meta.get("closed"):
+            continue
+        if not has_folder and not has_pin:
+            if cutoff is not None and s.get("modified", 0) < cutoff:
+                continue
+        out.append((slot_name, s, meta))
+    return out
+
+
+def _collect_restore_plan(
+    log: "ConversationLog",
+    window_minutes: int,
+    *,
+    folders_only: bool,
+    open_keys: list[str] | None = None,
+) -> RestorePlan:
+    """Build the whole startup restore plan off the event loop.
+
+    One ``list_sessions()`` walk feeds both halves; the recent-session half
+    skips anything the open-tab half already covers.
+
+    *open_keys* reuses a read the caller already did: the startup path reads the
+    snapshot first so it can install the floor before it yields to the loop.
+    """
+    resolved_keys, listing = _collect_open_keys(log, keys=open_keys)
+    # No skip= against open_keys. Deduplication happens at APPLY time, against
+    # state._slots, and it has to: an open-tab key whose only file on disk is a
+    # legacy stacked "dashboard_dashboard_x.jsonl" cannot be resolved by the
+    # canonical rehydrate (it looks for dashboard_x.jsonl and finds nothing), so
+    # skipping it here as "already covered" would drop that tab from BOTH paths.
+    # Collecting it twice costs one extra metadata read off the loop; the
+    # open-tab half runs first, so the second pass hits the _slots guard.
+    sessions = _collect_recent_sessions(
+        log,
+        window_minutes,
+        folders_only=folders_only,
+        listing=listing,
+    )
+    return RestorePlan(
+        open_keys=resolved_keys,
+        listing=listing,
+        sessions=sessions,
+        kiro_model_map=_kiro_model_map(),
+        cfg=_load_restore_cfg(),
+    )
+
+
 def restore_open_slots(state: DashboardState) -> int:
     """Restore the tabs the user had open at the previous shutdown.
 
@@ -195,67 +420,50 @@ def restore_open_slots(state: DashboardState) -> int:
     """
     if not state.conversation_log:
         return 0
-    path = config_dir() / "open_slots.json"
-    if not path.exists():
-        return 0
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        logger.debug("open_slots.json unreadable; skipping", exc_info=True)
-        return 0
-    keys = data.get("keys") if isinstance(data, dict) else None
-    if not isinstance(keys, list):
-        return 0
+    keys, listing = _collect_open_keys(state.conversation_log)
+    kiro_model_map = _kiro_model_map()
+    restore_cfg = _load_restore_cfg()
     restored = 0
     for raw in keys:
-        if not isinstance(raw, str) or not raw:
-            continue
-        # Defense-in-depth: slot keys flow into _history_key_for() ->
-        # filesystem path construction. open_slots.json is 0o600 so the threat
-        # is small, but a key smuggled in (symlink attack at write time or a
-        # separate vuln) could escape the sessions directory (e.g.
-        # "../../etc/passwd"). Live-gateway slot keys never contain path
-        # separators; reject any that do, warn so an attempted breakout is
-        # visible, and keep restoring the rest.
-        if "/" in raw or "\\" in raw:
-            logger.warning(
-                "restore_open_slots: rejecting key with path separators: %r", raw
-            )
-            continue
-        # Fold to the canonical (filename-charset) key. Snapshots written
-        # before slot-key normalization landed may carry a raw display-style
-        # key (e.g. "Artifact: My Doc") alongside its sanitized twin — after
-        # folding, the second form hits the dedup guard below instead of
-        # restoring a duplicate sidebar session backed by the same transcript.
-        raw = _normalize_slot_key(raw)
         if raw in state._slots:
             continue
         try:
-            slot = _rehydrate_slot_from_history(state, raw)
+            slot = _rehydrate_slot_from_history(
+                state,
+                raw,
+                session_info=listing.get(raw, {}),
+                kiro_model_map=kiro_model_map,
+                restore_cfg=restore_cfg,
+            )
         except Exception:
             logger.debug("restore_open_slots: rehydrate failed for %s", raw, exc_info=True)
-            # Roll back any partial slot leaked by _rehydrate_slot_from_history.
-            # It calls state.get_or_create_slot() BEFORE its fallible work
-            # (read_messages, redaction, slot.append), so a failure there
-            # leaves an empty slot registered in state._slots. Without this
-            # pop, restore_recent_sessions runs next, hits its
-            # `if slot_name in state._slots: continue` dedup guard, and skips
-            # the proper restore — the user would see a tab with the right
-            # title/agent but empty or wrong message history.
-            state._slots.pop(raw, None)
-            # _rehydrate_slot_from_history also adds `dashboard:{slot_name}`
-            # to _restricted_keys before that fallible work for any
-            # non-persistent memory_mode. Roll it back too, else a later
-            # get_or_create_slot(slot_name) (default memory_mode='persistent')
-            # silently inherits restricted status, blocking
-            # consolidation/lessons for what should be a normal session.
-            state._restricted_keys.discard(f"dashboard:{raw}")
+            _rollback_partial_slot(state, raw)
             continue
         if slot is not None:
             restored += 1
     if restored:
         logger.info("Restored %d open tab(s) from open_slots.json", restored)
     return restored
+
+
+def _rollback_partial_slot(state: DashboardState, slot_name: str) -> None:
+    """Undo a slot registration leaked by a failed rehydrate.
+
+    ``_rehydrate_slot_from_history`` calls ``state.get_or_create_slot()`` BEFORE
+    its fallible work (read_messages, redaction, slot.append), so a failure
+    there leaves an empty slot registered in ``state._slots``. Without this pop,
+    the recent-session pass runs next, hits its ``if slot_name in state._slots``
+    dedup guard and skips the proper restore — the user would see a tab with the
+    right title/agent but empty or wrong message history.
+
+    It also adds ``dashboard:{slot_name}`` to ``_restricted_keys`` before that
+    fallible work for any non-persistent memory_mode. Roll that back too, else a
+    later ``get_or_create_slot(slot_name)`` (default ``memory_mode='persistent'``)
+    silently inherits restricted status, blocking consolidation/lessons for what
+    should be a normal session.
+    """
+    state._slots.pop(slot_name, None)
+    state._restricted_keys.discard(f"dashboard:{slot_name}")
 
 
 def _attach_variants(slot: _ChatSlot, m: dict) -> None:
@@ -272,7 +480,16 @@ def _attach_variants(slot: _ChatSlot, m: dict) -> None:
         slot.messages[-1]["variant_idx"] = m.get("variant_idx", 0)
 
 
-def _rehydrate_slot_from_history(state: DashboardState, slot_name: str) -> _ChatSlot | None:
+def _rehydrate_slot_from_history(
+    state: DashboardState,
+    slot_name: str,
+    *,
+    messages: list[dict] | None = None,
+    session_info: dict | None = None,
+    meta: dict | None = None,
+    kiro_model_map: dict[str, str] | None = None,
+    restore_cfg: "KiroCrewConfig | None" = None,
+) -> _ChatSlot | None:
     """Rehydrate a single dashboard slot from persisted history.
 
     Unlike ``state.get_or_create_slot`` (which creates a fresh, empty slot with
@@ -285,6 +502,18 @@ def _rehydrate_slot_from_history(state: DashboardState, slot_name: str) -> _Chat
 
     Intended for targeted resume paths (e.g. cron→origin injection after
     gateway restart). Bulk startup restore still uses ``restore_recent_sessions``.
+
+    *messages* and *session_info* let a caller supply the two large disk reads
+    this would otherwise do inline — the chained message window and this
+    session's ``list_sessions()`` row. *kiro_model_map* and *restore_cfg* supply
+    the two small but repeated ones: the config load and the agent-directory
+    glob, which are per-process facts, not per-session, and would otherwise be
+    redone for every key in a bulk restore. The async restore pass passes all
+    four — the windows read in a worker thread, the rest once per plan — keeping
+    the I/O off the event loop while the slot mutation (loop-affine:
+    ``slot.append`` sets an ``asyncio.Event`` and ``get_or_create_slot``
+    broadcasts through the SSE queues) still happens on it. Every one defaults
+    to the inline read, so standalone callers are unchanged.
     """
     if not state.conversation_log:
         return None
@@ -296,38 +525,38 @@ def _rehydrate_slot_from_history(state: DashboardState, slot_name: str) -> _Chat
     if slot_name in state._slots:
         return state._slots[slot_name]
     history_key = _history_key_for(slot_name)
-    meta = state.conversation_log.get_metadata(history_key)
-    # No metadata → session was never persisted. Don't create a phantom slot.
+    if meta is None:
+        # get_metadata reads the WHOLE file to take its first line, and the
+        # mtime cache is cold on the first read after boot — so on a large
+        # session this is a multi-megabyte synchronous read. A bulk restore
+        # passes it in, read off the loop alongside the message window.
+        meta = state.conversation_log.get_metadata(history_key)
+    # No metadata → session was never persisted, or it was deleted while a
+    # caller was reading its window. Don't create a phantom slot, and don't let
+    # the tab_id backfill below recreate a file the user just deleted.
     if not meta:
         return None
     if meta.get("closed"):
         return None
-    try:
-        _restore_cfg = KiroCrewConfig.load()
-    except Exception:
-        _restore_cfg = None
-    # Build the same kiro-agent model map as restore_recent_sessions so
-    # legacy sessions without persisted `model` still resolve correctly.
-    kiro_model_map: dict[str, str] = {}
-    try:
-        for f in KIRO_AGENTS_DIR.glob("*.json"):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                model = data.get("model", "")
-                if data.get("name"):
-                    kiro_model_map[data["name"]] = model
-                kiro_model_map[f.stem] = model
-            except (json.JSONDecodeError, OSError):
-                continue
-    except Exception:
-        logger.debug("Failed to build kiro model map", exc_info=True)
+    _restore_cfg = restore_cfg if restore_cfg is not None else _load_restore_cfg()
+    # The same kiro-agent model map restore_recent_sessions builds, so legacy
+    # sessions without a persisted `model` still resolve correctly. Both this and
+    # the config load above are per-process facts: a bulk restore passes them in
+    # once rather than reloading the config and re-globbing the agent directory
+    # on the event loop for every single key.
+    if kiro_model_map is None:
+        kiro_model_map = _kiro_model_map()
     slot = state.get_or_create_slot(slot_name, app=meta.get("app", ""))
     # Pull display fields from session listing for title parity with bulk restore.
-    sessions = state.conversation_log.list_sessions()
-    session_info = next(
-        (s for s in sessions if s.get("key") == history_key),
-        {},
-    )
+    if session_info is None:
+        session_info = next(
+            (
+                s
+                for s in state.conversation_log.list_sessions()
+                if s.get("key") == history_key
+            ),
+            {},
+        )
     # Titles may have been auto-generated by an LLM (_generate_title_via_kiro)
     # and are surfaced on the dashboard, so apply the same redaction passes
     # used on assistant content before setting. Defence-in-depth — the title
@@ -413,7 +642,11 @@ def _rehydrate_slot_from_history(state: DashboardState, slot_name: str) -> _Chat
     # read_messages alone caps visible history at 200 lines from THIS file and
     # drops the ancestor chain — long-running forked sessions would lose 200+
     # messages of context on every gateway restart.
-    messages = state.conversation_log.read_messages_chained(history_key)
+    messages = (
+        state.conversation_log.read_messages_chained(history_key)
+        if messages is None
+        else messages
+    )
     # Only the recent window is loaded into memory; older on-disk lines become
     # the FROZEN PREFIX that saves never rewrite. _disk_older_count must
     # therefore count those older lines so the save model preserves them.
@@ -446,157 +679,625 @@ def _rehydrate_slot_from_history(state: DashboardState, slot_name: str) -> _Chat
     return slot
 
 
+def _apply_recent_session(
+    state: DashboardState,
+    s: dict,
+    slot_name: str,
+    meta: dict,
+    kiro_model_map: dict[str, str],
+    _restore_cfg: "KiroCrewConfig | None",
+    *,
+    messages: list[dict] | None = None,
+) -> _ChatSlot:
+    """Materialize one listed session as a chat slot (metadata + message window).
+
+    The expensive half of a recent-session restore, split out so the async pass
+    replays the *same* code path as the sync wrapper rather than a parallel copy.
+    Callers own filtering, the restored counter and the log line.
+
+    *messages* lets the caller supply the chained window instead of reading it
+    here, so the async pass can do that read in a worker thread while the slot
+    mutation (loop-affine) stays on the event loop.
+    """
+    key = s.get("key", "")
+    log = state.conversation_log
+    if log is None:
+        # Unreachable via either caller (both guard on conversation_log), but the
+        # attribute is Optional and this function reads through it twice.
+        raise RuntimeError("restore requires a conversation log")
+    slot = state.get_or_create_slot(slot_name, app=meta.get("app", ""))
+    # Titles can be LLM-generated (auto-title) and are surfaced on the
+    # dashboard — apply the same redaction as assistant content. Matches
+    # the treatment in _rehydrate_slot_from_history above.
+    raw_title = s.get("title", slot_name)
+    raw_title, _ = redact_exfiltration_urls(raw_title)
+    raw_title, _ = redact_credentials(raw_title)
+    slot.title = raw_title
+    slot._titled = bool(s.get("title"))
+    if meta.get("created_at"):
+        slot.created_at = meta["created_at"]
+    if meta.get("agent"):
+        slot.agent = meta["agent"]
+    if meta.get("model"):
+        # Canonicalize a pre-migration claude_code provider id to the
+        # canonical dropdown key (no-op for other providers); reuse the
+        # already-loaded _restore_cfg provider.
+        _prov = _restore_cfg.agent.provider if _restore_cfg else ""
+        slot.model = model_registry.canonicalize_for_provider(
+            _normalize_model(meta["model"]), _prov
+        )
+    elif slot.agent:
+        try:
+            mc = _restore_cfg.agents.get(slot.agent) if _restore_cfg else None
+            kiro_name = mc.kiro_agent if mc and mc.kiro_agent else slot.agent
+            slot.model = kiro_model_map.get(kiro_name, "")
+        except Exception:
+            logger.debug(
+                "Failed to resolve model for restored slot %s", slot_name, exc_info=True
+            )
+    if meta.get("reasoning_effort"):
+        slot.reasoning_effort = _validate_reasoning_effort(meta["reasoning_effort"])
+    if meta.get("workspace"):
+        slot.workspace = meta["workspace"]
+    if meta.get("project"):
+        slot.project = meta["project"]
+    if meta.get("mode"):
+        slot.mode = meta["mode"]
+    if meta.get("folder_id"):
+        slot.folder_id = meta["folder_id"]
+    if meta.get("app"):
+        slot._app = meta["app"]
+    # Same tamper gate as _rehydrate_slot_from_history: re-validate the
+    # companion binding against the slug grammar before it reaches
+    # to_dict()/WS broadcasts.
+    _artifact_meta = meta.get("artifact")
+    if isinstance(_artifact_meta, str) and ARTIFACT_SLUG_RE.match(_artifact_meta):
+        slot._artifact = _artifact_meta
+    if meta.get("pinned"):
+        slot.pinned = True
+    if meta.get("color_index") is not None:
+        slot.color_index = meta["color_index"]
+    if meta.get("color_theme"):
+        slot.color_theme = meta["color_theme"]
+    raw_tags = meta.get("tags")
+    if isinstance(raw_tags, list):
+        slot.tags = [str(t) for t in raw_tags if isinstance(t, str) and t]
+    mm = meta.get("memory_mode", "persistent")
+    slot.memory_mode = mm
+    if mm != "persistent":
+        state._restricted_keys.add(f"dashboard:{slot_name}")
+    if meta.get("forked_from") is not None:
+        slot.forked_from = meta["forked_from"]
+    tab_id = meta.get("tab_id")
+    if not tab_id:
+        tab_id = uuid.uuid4().hex[:12]
+        # This runs with the event loop live, and update_metadata enters
+        # _locked (flock + os.close) — a blocking-on-loop-prohibited op, so
+        # backfill the tab_id off the loop rather than on it.
+        update_metadata_off_loop(log, key, {"tab_id": tab_id})
+    slot._tab_id = tab_id
+    if messages is None:
+        messages = log.read_messages_chained(key)
+    slot._disk_older_count = max(0, len(messages) - 500)
+    for m in messages[-500:]:
+        role = m.get("role", "assistant")
+        cls = m.get("cls") or ("msg msg-u" if role == "user" else "msg msg-a")
+        content = m.get("content", "")
+        if role != "user":
+            content, _ = redact_exfiltration_urls(content)
+            content, _ = redact_credentials(content)
+        slot.append(
+            role,
+            content,
+            cls,
+            ts=m.get("ts", ""),
+            meta=(
+                _redact_meta_for_role(role, m["meta"])
+                if isinstance(m.get("meta"), dict)
+                else None
+            ),
+        )
+        _attach_variants(slot, m)
+    slot.drain()
+    slot._resumed_count = len(slot.messages)
+    # Loaded window is the on-disk window region; older lines (counted in
+    # _disk_older_count above) are the frozen prefix saves never rewrite.
+    slot._disk_window_len = len(slot.messages)
+    slot._dirty = False
+    return slot
+
+
 def restore_recent_sessions(
     state: DashboardState, window_minutes: int = 30, *, folders_only: bool = False
 ) -> int:
-    """Restore sessions as chat slots."""
+    """Restore sessions as chat slots (synchronous, restores everything).
+
+    Startup uses :func:`restore_sessions_at_startup` instead, which does the
+    same work with the reads off the event loop. This wrapper stays for targeted
+    and test callers that want the whole thing done by the time it returns.
+    """
     if not state.conversation_log:
         return 0
-    cutoff = time.time() - (window_minutes * 60) if window_minutes > 0 else None
+    kiro_model_map = _kiro_model_map()
+    _restore_cfg = _load_restore_cfg()
     restored = 0
-
-    kiro_model_map: dict[str, str] = {}
-    try:
-
-        for f in KIRO_AGENTS_DIR.glob("*.json"):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                model = data.get("model", "")
-                if data.get("name"):
-                    kiro_model_map[data["name"]] = model
-                kiro_model_map[f.stem] = model
-            except (json.JSONDecodeError, OSError):
-                continue
-    except Exception:
-        logger.debug("Failed to build kiro model map", exc_info=True)
-    try:
-        _restore_cfg = KiroCrewConfig.load()
-    except Exception:
-        _restore_cfg = None
-    for s in state.conversation_log.list_sessions():
-        key = s.get("key", "")
-        if key.startswith("dashboard:"):
-            slot_name = key.removeprefix("dashboard:")
-        elif key.startswith("dashboard_"):
-            slot_name = key.removeprefix("dashboard_")
-        else:
-            continue
+    for slot_name, s, meta in _collect_recent_sessions(
+        state.conversation_log, window_minutes, folders_only=folders_only
+    ):
         if slot_name in state._slots:
             continue
-        meta = state.conversation_log.get_metadata(key)
-        has_folder = bool(meta.get("folder_id"))
-        has_pin = bool(meta.get("pinned"))
-        if folders_only and not has_folder and not has_pin:
-            continue
-        if meta.get("closed"):
-            continue
-        if not has_folder and not has_pin:
-            if cutoff is not None and s.get("modified", 0) < cutoff:
-                continue
-        slot = state.get_or_create_slot(slot_name, app=meta.get("app", ""))
-        # Titles can be LLM-generated (auto-title) and are surfaced on the
-        # dashboard — apply the same redaction as assistant content. Matches
-        # the treatment in _rehydrate_slot_from_history above.
-        raw_title = s.get("title", slot_name)
-        raw_title, _ = redact_exfiltration_urls(raw_title)
-        raw_title, _ = redact_credentials(raw_title)
-        slot.title = raw_title
-        slot._titled = bool(s.get("title"))
-        if meta.get("created_at"):
-            slot.created_at = meta["created_at"]
-        if meta.get("agent"):
-            slot.agent = meta["agent"]
-        if meta.get("model"):
-            # Canonicalize a pre-migration claude_code provider id to the
-            # canonical dropdown key (no-op for other providers); reuse the
-            # already-loaded _restore_cfg provider.
-            _prov = _restore_cfg.agent.provider if _restore_cfg else ""
-            slot.model = model_registry.canonicalize_for_provider(
-                _normalize_model(meta["model"]), _prov
-            )
-        elif slot.agent:
-            try:
-                mc = _restore_cfg.agents.get(slot.agent) if _restore_cfg else None
-                kiro_name = mc.kiro_agent if mc and mc.kiro_agent else slot.agent
-                slot.model = kiro_model_map.get(kiro_name, "")
-            except Exception:
-                logger.debug(
-                    "Failed to resolve model for restored slot %s", slot_name, exc_info=True
-                )
-        if meta.get("reasoning_effort"):
-            slot.reasoning_effort = _validate_reasoning_effort(meta["reasoning_effort"])
-        if meta.get("workspace"):
-            slot.workspace = meta["workspace"]
-        if meta.get("project"):
-            slot.project = meta["project"]
-        if meta.get("mode"):
-            slot.mode = meta["mode"]
-        if meta.get("folder_id"):
-            slot.folder_id = meta["folder_id"]
-        if meta.get("app"):
-            slot._app = meta["app"]
-        # Same tamper gate as _rehydrate_slot_from_history: re-validate the
-        # companion binding against the slug grammar before it reaches
-        # to_dict()/WS broadcasts.
-        _artifact_meta = meta.get("artifact")
-        if isinstance(_artifact_meta, str) and ARTIFACT_SLUG_RE.match(_artifact_meta):
-            slot._artifact = _artifact_meta
-        if meta.get("pinned"):
-            slot.pinned = True
-        if meta.get("color_index") is not None:
-            slot.color_index = meta["color_index"]
-        if meta.get("color_theme"):
-            slot.color_theme = meta["color_theme"]
-        raw_tags = meta.get("tags")
-        if isinstance(raw_tags, list):
-            slot.tags = [str(t) for t in raw_tags if isinstance(t, str) and t]
-        mm = meta.get("memory_mode", "persistent")
-        slot.memory_mode = mm
-        if mm != "persistent":
-            state._restricted_keys.add(f"dashboard:{slot_name}")
-        if meta.get("forked_from") is not None:
-            slot.forked_from = meta["forked_from"]
-        tab_id = meta.get("tab_id")
-        if not tab_id:
-            tab_id = uuid.uuid4().hex[:12]
-            # restore_recent_sessions runs during on_startup (event loop live)
-            # — keep the _locked flock/os.close off the loop via the off-loop
-            # backfill helper.
-            update_metadata_off_loop(
-                state.conversation_log, key, {"tab_id": tab_id}
-            )
-        slot._tab_id = tab_id
-        messages = state.conversation_log.read_messages_chained(key)
-        slot._disk_older_count = max(0, len(messages) - 500)
-        for m in messages[-500:]:
-            role = m.get("role", "assistant")
-            cls = m.get("cls") or ("msg msg-u" if role == "user" else "msg msg-a")
-            content = m.get("content", "")
-            if role != "user":
-                content, _ = redact_exfiltration_urls(content)
-                content, _ = redact_credentials(content)
-            slot.append(
-                role,
-                content,
-                cls,
-                ts=m.get("ts", ""),
-                meta=(
-                    _redact_meta_for_role(role, m["meta"])
-                    if isinstance(m.get("meta"), dict)
-                    else None
-                ),
-            )
-            _attach_variants(slot, m)
-        slot.drain()
-        slot._resumed_count = len(slot.messages)
-        # Loaded window is the on-disk window region; older lines (counted in
-        # _disk_older_count above) are the frozen prefix saves never rewrite.
-        slot._disk_window_len = len(slot.messages)
-        slot._dirty = False
+        slot = _apply_recent_session(state, s, slot_name, meta, kiro_model_map, _restore_cfg)
         restored += 1
         logger.info("Restored session %s (%s)", slot_name, slot.title)
     _sync_dashboard_slots(state)
     return restored
+
+
+async def restore_sessions_at_startup(
+    state: DashboardState, window_minutes: int, *, folders_only: bool = False
+) -> int:
+    """Restore the user's tabs and recent sessions without stalling the loop.
+
+    Startup rehydration used to run unbounded and synchronously while the
+    loop-stall watchdog was already armed: the heartbeat could not be petted, so
+    ``LoopStallWatchdog`` ``_exit(1)``'d the gateway mid-boot on any home with
+    enough history, and the failure got more certain as history accumulated.
+
+    Two changes close that outright rather than moving its threshold:
+
+    * The whole eligibility scan (``list_sessions()`` + per-session metadata +
+      filtering) runs in a worker thread via :func:`_collect_restore_plan`,
+      which takes a ``ConversationLog`` rather than the state and so cannot
+      mutate slots.
+    * The replay then runs as a background task that yields to the loop between
+      sessions and reads each message window off-loop, leaving only bounded CPU
+      (redact + append of at most 500 in-memory messages) on the loop per
+      session. No session shape can stretch that to the 25s watchdog budget.
+
+    The collect is awaited rather than backgrounded so the slot counter is
+    reseeded past every known key BEFORE this returns — a new chat minted while
+    the replay is still running must not take an index a returning tab is about
+    to claim.
+
+    Returns the number of sessions the plan will restore (the replay itself
+    finishes in the background).
+    """
+    log = state.conversation_log
+    if not log:
+        return 0
+    # Install the snapshot floor BEFORE the first await, not after the scan.
+    # The scan yields the loop, and the 5s flush fires during it with _slots
+    # still empty — so installing the floor afterwards would let that flush
+    # write an empty open_slots.json over the very file the floor exists to
+    # protect, permanently dropping every old tab. Reading the snapshot here is
+    # bounded by the tab count (one short string per tab), not by history, so it
+    # is safe to do inline; the expensive walk stays off the loop below.
+    open_keys = _read_open_slots_keys()
+    state._restore_floor = tuple(open_keys)
+    # Reserve the open-tab keys here too, for the same reason and in the same
+    # breath: the scan below yields, and a returning browser tab holds exactly
+    # these keys in its local state, so it is the most likely thing to arrive
+    # during it. Without the reservation that request registers an EMPTY slot,
+    # the replay skips it, and a later flush writes the empty window over the
+    # transcript. The recent-session keys are not knowable until the scan
+    # returns, and are added below.
+    state._pending_restore_keys.update(open_keys)
+    plan = await asyncio.to_thread(
+        _collect_restore_plan,
+        log,
+        window_minutes,
+        folders_only=folders_only,
+        open_keys=open_keys,
+    )
+    state.reseed_slot_counter([*plan.open_keys, *(name for name, _, _ in plan.sessions)])
+    # Reserve the remaining planned keys before the replay is scheduled. Until
+    # the replay reaches a key, any request handler that creates from a
+    # caller-supplied key would otherwise register an EMPTY slot under it, which
+    # a later flush writes over the real transcript. With the reservation in
+    # place, such a handler awaits ensure_pending_slot_restored() and gets the
+    # real session instead. The open-tab keys were reserved above, pre-scan.
+    state._pending_restore_keys.update(plan.open_keys)
+    state._pending_restore_keys.update(name for name, _, _ in plan.sessions)
+    # Publish the listing the scan already paid for, so an on-demand replay gets
+    # its title-parity row for free instead of re-walking the session directory.
+    # The config and model map ride along for the same reason: both are
+    # per-process, and re-deriving them per request would glob the agent
+    # directory on the loop.
+    state._restore_shared = (plan.listing, plan.kiro_model_map, plan.cfg)
+    if plan.total:
+        task = asyncio.create_task(_run_restore_plan(state, plan))
+        state._background_tasks.add(task)
+        task.add_done_callback(state._background_tasks.discard)
+    else:
+        state._restore_floor = ()
+    return plan.total
+
+
+async def _run_restore_plan(state: DashboardState, plan: RestorePlan) -> int:
+    """Replay a :class:`RestorePlan`, one session per loop iteration.
+
+    Every step is best-effort: a session that fails to rehydrate is logged and
+    skipped, and slots that appeared in the meantime (a client resumed the tab,
+    or the other half of the plan got there first) are left alone.
+    """
+    log = state.conversation_log
+    if not log:
+        return 0
+    restored = 0
+    failed: set[str] = set()
+    # Slot names the RECENT half will replay. A tab backed only by a legacy
+    # stacked file appears in both halves: its folded name is in open_keys, but
+    # the canonical history key has no file, so only the listing row in
+    # plan.sessions can actually restore it. The open-tab half must therefore not
+    # release such a key when it finishes empty-handed.
+    deferred_to_recent = {name for name, _, _ in plan.sessions}
+    logger.info("Restoring %d session(s) in the background", plan.total)
+
+    for raw in plan.open_keys:
+        await asyncio.sleep(0)
+        if raw in state._slots:
+            state._pending_restore_keys.discard(raw)
+            continue
+        history_key = _history_key_for(raw)
+        try:
+            window = await asyncio.to_thread(log.read_messages_chained, history_key)
+            # Read metadata off-loop too, and AFTER the window: get_metadata
+            # reads the whole file to take its first line, and reading it last
+            # means a session deleted during the window read comes back empty
+            # here, so the rehydrate returns None instead of resurrecting it.
+            meta = await asyncio.to_thread(log.get_metadata, history_key)
+            # Re-check after the awaits: a client can resume this tab while the
+            # reads are in flight, and _rehydrate_slot_from_history would then
+            # hand back the live slot — counted here as a restore that never
+            # happened.
+            if raw in state._slots:
+                continue
+            with _replaying(state, raw):
+                slot = _rehydrate_slot_from_history(
+                    state,
+                    raw,
+                    messages=window,
+                    meta=meta,
+                    session_info=plan.listing.get(raw, {}),
+                    kiro_model_map=plan.kiro_model_map,
+                    restore_cfg=plan.cfg,
+                )
+            if slot is not None:
+                restored += 1
+        except Exception:
+            logger.debug("restore: rehydrate failed for %s", raw, exc_info=True)
+            failed.add(raw)
+            _rollback_partial_slot(state, raw)
+        finally:
+            # Release the reservation only once this key is SETTLED. Holding it
+            # across the off-loop reads is the point: a request arriving mid-read
+            # rehydrates on demand instead of registering an empty slot, and the
+            # post-await _slots re-check above then skips it here.
+            #
+            # Two states are not settled, and both have to be RE-ASSERTED rather
+            # than merely left alone, because _replaying claims the key on entry:
+            #
+            # * the recent half still owns it — a stacked-only tab restores
+            #   nothing here, so only its listing row can, and
+            # * this key FAILED — the transcript is intact on disk, so letting a
+            #   request register an empty slot over it is the data loss the
+            #   reservation exists to prevent. A retained key means requests for
+            #   it get a retryable 503 until a retry succeeds, which is the right
+            #   trade against destroying the session.
+            #
+            # There is no await between the _replaying claim and this line, so no
+            # request can observe the intermediate state.
+            if raw not in state._slots and (raw in failed or raw in deferred_to_recent):
+                state._pending_restore_keys.add(raw)
+            else:
+                state._pending_restore_keys.discard(raw)
+
+    for slot_name, s, _collected_meta in plan.sessions:
+        await asyncio.sleep(0)
+        if slot_name in state._slots:
+            state._pending_restore_keys.discard(slot_name)
+            continue
+        key = s.get("key", "")
+        try:
+            window = await asyncio.to_thread(log.read_messages_chained, key)
+            # Metadata is re-read AFTER the window, not reused from the plan, so
+            # a session deleted or closed while the read was in flight is caught
+            # here: empty metadata means the JSONL is gone, and applying stale
+            # metadata would let the tab_id backfill recreate the file the user
+            # just deleted. No await between this check and the apply.
+            meta = await asyncio.to_thread(log.get_metadata, key)
+            if not meta or meta.get("closed"):
+                continue
+            if slot_name in state._slots:
+                continue
+            with _replaying(state, slot_name):
+                _apply_recent_session(
+                    state, s, slot_name, meta, plan.kiro_model_map, plan.cfg, messages=window
+                )
+            restored += 1
+        except Exception:
+            logger.debug("restore: session %s failed", slot_name, exc_info=True)
+            # Retain the floor entry, same rule as the open-tab half: since the
+            # open-key skip was dropped, a tab backed only by a legacy stacked
+            # file arrives here, and its folded slot name can be a floor key.
+            # Releasing it on a transient read error would let the next snapshot
+            # write an open_slots.json without it and lose the tab for good.
+            failed.add(slot_name)
+            _rollback_partial_slot(state, slot_name)
+        finally:
+            # Same hold-across-the-reads rule as the open-tab half above, and the
+            # same re-assert on failure: a key whose restore raised still has its
+            # transcript on disk, so releasing it would let the next request
+            # register an empty slot over that session.
+            if slot_name in failed and slot_name not in state._slots:
+                state._pending_restore_keys.add(slot_name)
+            else:
+                state._pending_restore_keys.discard(slot_name)
+
+    # Release the floor for everything this pass SETTLED — restored (now in
+    # _slots and snapshotted on its own merit), already live, or absent from
+    # disk (a rehydrate that returns None cleans a dead entry out of the file).
+    # A key whose restore RAISED stays in the floor: the failure may be transient
+    # (a read error under load), and releasing it would let the next flush write
+    # an open_slots.json without it and lose the tab for good. Worst case a
+    # permanently broken key stays in the file for this gateway's lifetime — one
+    # dead entry, which the collect phase already tolerates, and no lost data.
+    #
+    # Deliberately NOT in a finally: if this task is cancelled (gateway shutdown
+    # mid-replay) or raises, the WHOLE floor must stay so the shutdown snapshot
+    # still records every tab that never got its turn.
+    state._restore_floor = tuple(k for k in state._restore_floor if k in failed)
+    # No key is pending now, so nothing can consult these again. An on-demand
+    # replay still in flight falls back to its own off-loop reads.
+    state._restore_shared = None
+    _sync_dashboard_slots(state)
+    logger.info("Restore complete: %d/%d session(s)", restored, plan.total)
+    return restored
+
+
+@contextmanager
+def _replaying(state: DashboardState, slot_name: str) -> "Iterator[None]":
+    """Hide a slot from the persistence sweeps while its window is replayed.
+
+    ``get_or_create_slot`` registers the slot before the replay fills it, and
+    ``slot.append`` marks it ``_dirty`` — so a 5s flush or a shutdown save
+    landing inside the replay would persist a partial window whose
+    ``_disk_older_count`` / ``_disk_window_len`` still describe the pre-replay
+    slot, and the next flush would duplicate those lines. Skipping the save is
+    lossless: the window being replayed was read from that same file.
+
+    Entering also CLAIMS the key out of ``_pending_restore_keys``, marking it
+    settled: the bulk pass and an on-demand replay can both be holding this key
+    across their reads, and the first one to reach this point owns the apply.
+    There is no ``await`` between either caller's post-read ``_slots`` re-check
+    and this claim, so the loser's re-check sees the registered slot and
+    discards its own copy of the window rather than appending it twice.
+    """
+    state._pending_restore_keys.discard(slot_name)
+    state._restoring_keys.add(slot_name)
+    try:
+        yield
+    finally:
+        state._restoring_keys.discard(slot_name)
+
+
+def _listing_row(state: DashboardState, log: "ConversationLog", slot_name: str) -> dict:
+    """This session's ``list_sessions()`` row, for title parity with the bulk pass.
+
+    Prefers the row the startup scan already collected. The fallback walk is
+    only reached when the pass has finished and cleared the listing, and it is
+    the caller's job to run this off the loop.
+    """
+    shared = getattr(state, "_restore_shared", None)
+    if shared is not None:
+        row = shared[0].get(slot_name)
+        if row is not None:
+            return row
+    history_key = _history_key_for(slot_name)
+    return next((s for s in log.list_sessions() if s.get("key") == history_key), {})
+
+
+async def ensure_pending_slot_restored(state: DashboardState, name: str | None) -> None:
+    """Replay a key the startup plan owns but has not reached yet, off the loop.
+
+    Await this from an async handler BEFORE ``get_or_create_slot`` whenever the
+    key is caller-supplied and the handler does not load the window itself.
+    Registering an empty slot under a planned key destroys data: the slot has
+    ``_disk_older_count=0`` and ``_disk_window_len=0``, ``_restoring_keys`` does
+    not cover it, and the next 5s flush writes that empty window over the
+    session's transcript.
+
+    ``get_or_create_slot`` deliberately does not do this itself. It cannot know
+    whether its caller is about to rehydrate: the resume handler does, and
+    handing it a populated slot made it append the same window a second time and
+    flush a doubled transcript. Putting the decision at the call site makes the
+    two cases distinguishable, and it also lets the reads run in a worker thread
+    while only the apply — which touches ``asyncio.Event`` and the SSE queues —
+    stays on the loop.
+
+    Returns nothing: the caller's own ``get_or_create_slot`` then finds the
+    restored slot, or creates the fresh one it asked for if the session is
+    genuinely gone from disk.
+
+    Raises ``web.HTTPServiceUnavailable`` if the restore FAILED (a transient read
+    error, say). Failing the request is the only safe outcome: returning would
+    let the caller create an empty slot over an intact transcript, which the next
+    flush destroys. The reservation is retained so the bulk pass still replays
+    the key, and the status is retryable because the next attempt usually wins.
+    """
+    if not name:
+        return
+    slot_name = _normalize_slot_key(name)
+    if not slot_name or slot_name in state._slots:
+        return
+    if slot_name not in getattr(state, "_pending_restore_keys", ()):
+        return
+    tasks = getattr(state, "_pending_rehydrate_tasks", None)
+    if tasks is None:
+        tasks = state._pending_rehydrate_tasks = {}
+    task = tasks.get(slot_name)
+    if task is None:
+        # A task rather than a bare await, for two reasons: a client that
+        # disconnects mid-read must not abandon a half-applied replay, and the
+        # next request for this key joins this same one instead of starting a
+        # second read of the same window. 67 returning tabs are 67 keys, not 67
+        # reads of one key.
+        task = asyncio.ensure_future(_replay_one_key(state, slot_name))
+        tasks[slot_name] = task
+    # shield: cancelling THIS request (client went away) must not cancel a
+    # replay that other requests are waiting on, or that is mid-apply.
+    try:
+        await asyncio.shield(task)
+    except Exception as exc:
+        raise web.HTTPServiceUnavailable(
+            reason=f"session {slot_name} is still being restored"
+        ) from exc
+
+
+async def _replay_one_key(state: DashboardState, slot_name: str) -> None:
+    """One-key mirror of the open-tab step in :func:`_run_restore_plan`."""
+    log = state.conversation_log
+    if log is None:
+        return
+    info = await asyncio.to_thread(_listing_row, state, log, slot_name)
+    # Read from the key the LISTING reports, not the canonical fold. A tab backed
+    # only by a legacy stacked file (``dashboard_dashboard_x``) has no canonical
+    # file, so reading the folded key would come back empty and the caller would
+    # then create an empty slot over a session that does exist on disk.
+    history_key = info.get("key") or _history_key_for(slot_name)
+    # Per-process facts, taken from the plan when the replay published them. The
+    # fallbacks run in a worker thread because _kiro_model_map globs the agent
+    # directory and _load_restore_cfg reads config from disk — deriving either on
+    # the loop is the read class this PR exists to remove.
+    shared = getattr(state, "_restore_shared", None)
+    if shared is not None:
+        _, model_map, cfg = shared
+    else:
+        model_map = await asyncio.to_thread(_kiro_model_map)
+        cfg = await asyncio.to_thread(_load_restore_cfg)
+    try:
+        # Same read order as the bulk pass: window first, metadata second, so a
+        # session deleted while the window was in flight comes back with empty
+        # metadata and the rehydrate declines instead of resurrecting the file.
+        window = await asyncio.to_thread(log.read_messages_chained, history_key)
+        meta = await asyncio.to_thread(log.get_metadata, history_key)
+        # The reservation is held across those reads rather than claimed up
+        # front, exactly as the bulk pass holds it, so the bulk pass may be
+        # replaying this same key concurrently. Re-check _slots and keep the
+        # apply await-free: whoever registers the slot first owns it and the
+        # loser drops its window here. The cost of losing is one wasted read;
+        # the cost of not checking would be a doubled transcript.
+        if slot_name in state._slots:
+            state._pending_restore_keys.discard(slot_name)
+            return
+        with _replaying(state, slot_name):
+            _rehydrate_slot_from_history(
+                state,
+                slot_name,
+                messages=window,
+                meta=meta,
+                session_info=info,
+                kiro_model_map=model_map,
+                restore_cfg=cfg,
+            )
+        state._pending_restore_keys.discard(slot_name)
+    except Exception:
+        logger.warning("on-demand restore failed for %s", slot_name, exc_info=True)
+        _rollback_partial_slot(state, slot_name)
+        # RETAIN the reservation and re-raise, rather than settling the key.
+        # Swallowing here let the caller's get_or_create_slot register an empty
+        # slot under a key whose transcript is intact on disk, and the next
+        # flush wrote that empty window over it — the exact data loss this
+        # function exists to prevent, reached through a transient read error.
+        # "The bulk pass will retry it" only holds while no slot exists: once
+        # one does, the bulk pass skips the key. Re-added explicitly because
+        # _replaying already claimed it on entry.
+        state._pending_restore_keys.add(slot_name)
+        raise
+    finally:
+        # Always clear the in-flight entry, so a later request can retry a key
+        # whose first attempt failed.
+        tasks = getattr(state, "_pending_rehydrate_tasks", None)
+        if tasks is not None:
+            tasks.pop(slot_name, None)
+
+
+def ensure_restored_before_inject(
+    state: DashboardState, name: str | None, retry: "Callable[[], object]"
+) -> bool:
+    """Gate a non-async, loop-resident caller on a pending key's restore.
+
+    The cron and workflow injectors run on the event loop but are plain
+    functions, called from the Slack gateway and the workflow watcher, so they
+    cannot await. They still must not register an empty slot under a key the
+    startup replay owns, because the next flush writes that empty window over
+    the session's transcript.
+
+    Reading inline would put an unbounded history-scaled read back on the loop —
+    the very thing this PR removes. So when the key is still pending this
+    schedules the off-loop restore and re-runs *retry* (the caller itself) once
+    it lands. The second entry finds the key settled and proceeds normally, so
+    there is no recursion beyond one hop.
+
+    Returns True when the work was deferred, meaning the caller must return
+    immediately and do nothing else.
+
+    With no running loop there is no loop to protect and no watchdog armed, so
+    the restore happens inline and this returns False.
+    """
+    if not name:
+        return False
+    slot_name = _normalize_slot_key(name)
+    if not slot_name or slot_name in state._slots:
+        return False
+    if slot_name not in getattr(state, "_pending_restore_keys", ()):
+        return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _restore_pending_slot_inline(state, slot_name)
+        return False
+
+    async def _restore_then_retry() -> None:
+        try:
+            await ensure_pending_slot_restored(state, slot_name)
+        except Exception:
+            # Deliberately do NOT fall through to the injection: that would put
+            # an empty slot over the transcript. The result is still on the job
+            # record and the notification path is unaffected.
+            logger.warning(
+                "deferred restore failed for %s; skipping injection", slot_name, exc_info=True
+            )
+            return
+        retry()
+
+    task = loop.create_task(_restore_then_retry())
+    state._background_tasks.add(task)
+    task.add_done_callback(state._background_tasks.discard)
+    return True
+
+
+def _restore_pending_slot_inline(state: DashboardState, slot_name: str) -> None:
+    """Inline restore for the no-running-loop case only. See the caller."""
+    # Reuse whatever the replay published, so this does not re-derive per-process
+    # facts either. Each kwarg defaults to an inline read when absent.
+    shared = getattr(state, "_restore_shared", None)
+    try:
+        with _replaying(state, slot_name):
+            _rehydrate_slot_from_history(
+                state,
+                slot_name,
+                kiro_model_map=shared[1] if shared is not None else None,
+                restore_cfg=shared[2] if shared is not None else None,
+            )
+    except Exception:
+        logger.warning("inline restore failed for %s", slot_name, exc_info=True)
+        _rollback_partial_slot(state, slot_name)
+        # Same rule as the async path: retain the reservation on failure rather
+        # than settling a key whose transcript is still intact on disk.
+        state._pending_restore_keys.add(slot_name)
+    else:
+        state._pending_restore_keys.discard(slot_name)
 
 
 def _diff_dropped_message_lines(old_lines: list[str], new_lines: list[str]) -> list[str]:
@@ -982,6 +1683,16 @@ def _save_slot_to_history(
     legacy no-tab_id sessions stay isolated.
     """
     if not state.conversation_log:
+        return
+    # A slot whose window is still being replayed is not in a saveable state: it
+    # is registered and already _dirty, but its _disk_older_count /
+    # _disk_window_len still describe the pre-replay slot, so the frozen-prefix
+    # arithmetic below would write a partial window that the next flush then
+    # duplicates. Skipping loses nothing — that window was read from this very
+    # file. This is the choke point, so it covers the shutdown sweep
+    # (save_all_slots_to_history, force=True) and any future caller;
+    # _flush_dirty_slots skips earlier so it does not clear _dirty either.
+    if slot.key in state._restoring_keys:
         return
     # An explicit message snapshot always means "this is the full authoritative
     # window state" → rewrite. Edit paths (rewind/regenerate/fork) pass a snapshot.

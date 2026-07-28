@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from kiro_crew.dashboard.chat_persistence import ensure_restored_before_inject
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.history import append_if_absent_off_loop
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
@@ -22,6 +23,17 @@ def inject_cron_result_to_dashboard(
 ) -> None:
     """Inject cron result into linked dashboard chat slot (shared by to-chat and auto-inject)."""
     slot_name = f"cron-{job.id}"
+    # A cron slot is a real dashboard session, so its key can be one the startup
+    # replay owns and has not reached. Registering an empty slot under it would
+    # be flushed over that session's transcript, and reading the history inline
+    # would put an unbounded read back on the event loop — so hand off to the
+    # off-loop restore and let it re-enter this function once the slot is real.
+    if ensure_restored_before_inject(
+        state,
+        slot_name,
+        lambda: inject_cron_result_to_dashboard(state, job, result_text, history=history),
+    ):
+        return
     slot = state.get_or_create_slot(name=slot_name, agent=job.agent_id or "")
     safe_name, _ = redact_exfiltration_urls(job.name)
     safe_name, _ = redact_credentials(safe_name)

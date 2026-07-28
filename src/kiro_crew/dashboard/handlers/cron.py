@@ -13,6 +13,7 @@ from aiohttp import web
 
 from kiro_crew import model_registry
 from kiro_crew.cron import CronStoreBusy, is_valid_timezone
+from kiro_crew.dashboard.chat_persistence import ensure_pending_slot_restored
 from kiro_crew.dashboard.cron_inject import (
     hydrate_slot_from_history,
     inject_cron_result_to_dashboard,
@@ -549,6 +550,7 @@ async def api_cron_to_chat(request: web.Request) -> web.Response:
             if state.conversation_log else []
         )
         if history:
+            await ensure_pending_slot_restored(state, slot_name)
             slot = state.get_or_create_slot(name=slot_name, agent="")
             if not slot.linked_session_key:
                 slot.linked_session_key = session_key
@@ -561,6 +563,7 @@ async def api_cron_to_chat(request: web.Request) -> web.Response:
             )
             if not notif:
                 return web.json_response({"error": "job not found"}, status=404)
+            await ensure_pending_slot_restored(state, slot_name)
             slot = state.get_or_create_slot(name=slot_name, agent="")
             body = notif.get("body", "")
             if body:

@@ -83,12 +83,14 @@ from kiro_crew.dashboard.chat_orchestrator import (  # noqa: F401
     api_chat_plan_action,
 )
 from kiro_crew.dashboard.chat_persistence import (  # noqa: F401
+    _apply_recent_session,
     _attach_variants,
     _build_history_prefix,
     _rehydrate_slot_from_history,
     _save_slot_to_history,
     restore_open_slots,
     restore_recent_sessions,
+    restore_sessions_at_startup,
     save_all_slots_to_history,
 )
 from kiro_crew.dashboard.chat_regenerate import (  # noqa: F401

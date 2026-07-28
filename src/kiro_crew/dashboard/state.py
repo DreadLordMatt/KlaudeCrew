@@ -40,6 +40,7 @@ from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
 
 if TYPE_CHECKING:
+    from kiro_crew.config.loader import KiroCrewConfig  # noqa: F401
     from kiro_crew.dashboard._types import (  # noqa: F401
         ContextBuilder,
         ConversationLog,
@@ -1666,6 +1667,49 @@ class DashboardState:
         self._flush_task: asyncio.Task | None = None  # type: ignore[type-arg]
         # Update progress tracking (shared across all connected clients)
         self._update_progress: dict[str, str] | None = None  # {step, detail}
+        # Restore bookkeeping. Both are read by _persist_open_slots /
+        # _flush_dirty_slots, which also run from the 5s flush executor thread
+        # and the shutdown thread — so both are used with WHOLE-VALUE rebinding
+        # (the tuple) or MEMBERSHIP TESTS ONLY (the set). Neither is ever
+        # iterated from those threads, where a concurrent mutation would raise.
+        #
+        # _restore_floor: the keys read out of open_slots.json at boot.
+        # _persist_open_slots unions them into every snapshot it writes until
+        # the background replay finishes, so a flush (or a crash, or a shutdown
+        # save) landing mid-replay cannot rewrite that file NARROWER than it
+        # already was and silently drop tabs the replay had not reached.
+        self._restore_floor: tuple[str, ...] = ()
+        # _restoring_keys: slots whose message window is being replayed right
+        # now. The persistence sweeps skip them; see chat_persistence._replaying.
+        self._restoring_keys: set[str] = set()
+        # _pending_restore_keys: slots the startup plan owns but has not replayed
+        # yet. An empty slot registered under one of these carries
+        # _disk_older_count=0, is not covered by _restoring_keys, and the next
+        # flush writes it over the user's real history — so a handler that
+        # creates from a caller-supplied key and does NOT rehydrate for itself
+        # must first await chat_persistence.ensure_pending_slot_restored().
+        # Membership marks the key UNSETTLED and is held across the replay's
+        # off-loop reads, so both the bulk pass and an on-demand replay can be
+        # working the same key; each re-checks _slots and applies without
+        # awaiting, so the loser discards its window instead of doubling it.
+        # Loop-only (the replay and the request handlers); never read from the
+        # flush thread, unlike the two above.
+        self._pending_restore_keys: set[str] = set()
+        # In-flight on-demand replays, keyed by slot name. Concurrent requests
+        # for one key share a single read instead of each replaying the window:
+        # 67 returning tabs must not become 67 reads of the same session.
+        self._pending_rehydrate_tasks: dict[str, "asyncio.Future[None]"] = {}
+        # The restore plan's shared facts, published for the duration of the
+        # replay so an on-demand rehydrate reuses them: the list_sessions() rows,
+        # the kiro-agent model map, and the loaded config. The model map and the
+        # listing are legitimately EMPTY on a home with no agents or no sessions,
+        # so this is one nullable tuple rather than three containers — testing a
+        # container for truthiness would re-derive them on exactly those homes,
+        # putting the agent-directory glob back on the request path.
+        # ``None`` means "no replay is publishing", not "empty".
+        self._restore_shared: tuple[dict[str, dict], dict[str, str], "KiroCrewConfig | None"] | None = (  # noqa: E501
+            None
+        )
         # Restricted (incognito/temporary): session keys with memory writes disabled
         self._restricted_keys: set[str] = set()
         # Ephemeral: session keys with no memory writes at all
@@ -2137,6 +2181,11 @@ class DashboardState:
         from kiro_crew.dashboard.chat import _save_slot_to_history
 
         for slot in list(self._slots.values()):
+            # Skip before the _dirty check, not after: the branch below clears
+            # _dirty on the assumption the save ran, so continuing later would
+            # drop the flag without a write.
+            if slot.key in self._restoring_keys:
+                continue
             if not slot._dirty or not slot.messages:
                 continue
             try:
@@ -2171,6 +2220,19 @@ class DashboardState:
         """
         try:
             path = config_dir() / "open_slots.json"
+            # Read the restore floor BEFORE enumerating _slots, and never the
+            # other way round. The replay inserts a restored slot and only then
+            # releases it, so with this order a key missing from the floor read
+            # is guaranteed to be present in the _slots read that follows:
+            #
+            #   key absent from floor(t1)  =>  released before t1
+            #                              =>  inserted before t1 < t2
+            #                              =>  key present in slots(t2)
+            #
+            # Reversing the two reads breaks that: a key absent from slots(t1)
+            # can be inserted AND released before floor(t2), and the tab is lost
+            # from the file.
+            floor = self._restore_floor
             # Only snapshot persistent-memory slots. Incognito/temporary tabs
             # are ephemeral by contract ("closes when I'm done", no
             # consolidation/lessons); persisting their keys would resurrect
@@ -2181,7 +2243,16 @@ class DashboardState:
                 name
                 for name, slot in list(self._slots.items())
                 if getattr(slot, "memory_mode", "persistent") == "persistent"
+                # A slot mid-replay has not had memory_mode applied yet, so it
+                # would read as persistent here. Skip it: if it belongs in the
+                # file it is in the floor, which is unioned in below.
+                and name not in self._restoring_keys
             ]
+            # The floor keys came OUT of this file, and every one of them was
+            # persistent when it was written, so unioning them back can only
+            # preserve — never widen the file to something it never held.
+            live = set(keys)
+            keys.extend(k for k in floor if k not in live)
             payload = json.dumps({"keys": keys, "ts": time.time()})
             # Use the canonical atomic_write helper, not a deterministic
             # ".json.tmp" name — _persist_open_slots can run concurrently from
@@ -2530,6 +2601,16 @@ class DashboardState:
                     f"Slot {name!r} already exists with memory_mode={existing.memory_mode!r}"
                 )
             return existing
+        if name and name in getattr(self, "_pending_restore_keys", ()):
+            # The startup plan owns this key but has not replayed it yet. This
+            # factory deliberately does NOT rehydrate here: it cannot know
+            # whether its caller is about to load the window itself. The resume
+            # handler does, and handing it a populated slot made it append the
+            # same window a second time. Handlers that do NOT rehydrate must
+            # await chat_persistence.ensure_pending_slot_restored() before
+            # calling this — see that function for why an empty slot under a
+            # pending key is destructive.
+            logger.debug("creating slot %s while its restore is still pending", name)
         if not name:
             self._slot_counter += 1
             ts = int(time.time())
@@ -2575,7 +2656,7 @@ class DashboardState:
         self.push_slots_update()
         return slot
 
-    def reseed_slot_counter(self) -> None:
+    def reseed_slot_counter(self, extra_keys: "list[str] | None" = None) -> None:
         """Advance ``_slot_counter`` past the highest index among live slots.
 
         ``__init__`` resets ``_slot_counter`` to 0 on every gateway boot, but
@@ -2592,9 +2673,14 @@ class DashboardState:
         observed index so subsequent auto-minted slots always get fresh,
         collision-proof indices. Monotonic: only ever advances the counter,
         never lowers it, so it is safe to call regardless of restore order.
+
+        *extra_keys* names slots that are KNOWN but not in ``_slots`` yet — the
+        sessions a background replay has still to restore. Counting them here
+        means the counter is already past them, so a new chat minted while the
+        replay is running cannot take an index a returning tab is about to claim.
         """
         max_idx = self._slot_counter
-        for name in self._slots:
+        for name in (*self._slots, *(extra_keys or ())):
             # Parse via the shared helper so this stays in lock-step with the
             # key minter (_mint_slot_key). Custom keys return None and skip.
             idx = _slot_index_from_key(name)

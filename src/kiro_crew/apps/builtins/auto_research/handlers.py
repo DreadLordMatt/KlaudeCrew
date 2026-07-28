@@ -915,6 +915,14 @@ async def _launch_loop(request: web.Request, cid: str) -> None:
     if row is None:
         return
     _write_brief(cid, row)
+    # This creates from a stable, caller-derived key without loading the session
+    # window, so a key the startup replay has not reached yet must be restored
+    # first: an empty slot registered under it would be flushed over that
+    # campaign session's transcript. Same guard as /api/chat and the
+    # OpenAI-compat endpoint.
+    from kiro_crew.dashboard.chat_persistence import ensure_pending_slot_restored
+
+    await ensure_pending_slot_restored(state, f"research-{cid}")
     slot = state.get_or_create_slot(
         name=f"research-{cid}", agent=_RESEARCH_AGENT, app="auto-research"
     )
