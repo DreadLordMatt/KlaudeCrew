@@ -55,6 +55,13 @@ agent configuration or agent context.**
 
 ### Tool surface
 
+Shipped in two slices. The read-only pair (`power_list`, `power_steering`) lands
+first in `powers_tools.py`; the pair that starts a process (`power_learn`,
+`power_use`) lands second, with the consent prompt, the sandboxed spawn and the
+per-invocation audit. Splitting there is deliberate: it is the same boundary the
+browse/install PR used, and it keeps the change that introduces third-party
+process execution small enough to review on its own.
+
 Four tools on the **existing** `kirocrew-core` MCP server. No new server is
 registered, and `~/.kiro/agents/kirocrew.json` is not written at all.
 
@@ -99,6 +106,13 @@ them exists in this one — they are not solved, they are absent:
   transitions over the same lock.
 
 ### Consent
+
+`power_list` and `power_steering` raise **no** prompt. Both are reads of content
+the user chose to install, performed only when the agent names a Power, and
+nothing executes — so there is no decision for a human to make that the install
+did not already make. This is also the property the push design could not offer:
+it fed guidance in through `SkillsLoader` keyword triggers whether or not the
+agent wanted it, which is why it needed a gate that this shape does not.
 
 The trust flag is replaced by the approval mechanism the rest of the product
 already uses. The first `power_learn` or `power_use` for a Power in a session

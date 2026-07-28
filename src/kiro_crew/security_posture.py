@@ -107,6 +107,14 @@ class PostureControl:
 # Where a sink runs only ONE of the two scanners, its detail text says so.
 _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
     (
+        "Powers agent tools",
+        "powers_tools.py",
+        "Redacts `power_list` metadata and `power_steering` file contents before "
+        "they enter a transcript — a Power's guidance is third-party markdown the "
+        "agent asked for, so it is an output boundary even though the agent, not a "
+        "human, is the immediate reader.",
+    ),
+    (
         "Powers registry listing",
         "powers_providers/__init__.py",
         "Mandatory redaction of third-party registry metadata (name, description, "

@@ -101,6 +101,9 @@ def normalize_theme_consent_sha(value: Any) -> str | None:
 
 # Valid workspace name pattern (same rules as agent names)
 WORKSPACE_NAME_RE = _AGENT_NAME_RE
+# Power names come from a third-party `POWER.md`; the store enforces the real
+# rule (`is_safe_power_name`) and this is only a pre-filter at the tool edge.
+POWER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 # Valid Slack channel ID pattern (exported for reuse in handlers/CLI)
 # C = standard channels, D = DM channels, G = legacy private channels (pre-2022),
@@ -1812,7 +1815,29 @@ LIST_SESSIONS_SCHEMA = ToolSchema(
 
 # ── Schema Registry ──
 
+POWER_LIST_SCHEMA = ToolSchema(
+    tool_name="power_list",
+    fields=[
+        FieldSpec("installed_only", bool, default=True),
+    ],
+)
+
+POWER_STEERING_SCHEMA = ToolSchema(
+    tool_name="power_steering",
+    fields=[
+        # The Power name is bounded by the store's own name rule; the pattern here
+        # is a cheap pre-filter so an obviously bogus value never reaches the
+        # filesystem layer. `powers_tools` re-validates with `is_safe_power_name`
+        # rather than trusting this, because the two can drift.
+        FieldSpec("power", str, required=True, max_len=128, pattern=POWER_NAME_RE),
+        FieldSpec("file", str, required=True, max_len=128),
+    ],
+)
+
+
 MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
+    "power_list": POWER_LIST_SCHEMA,
+    "power_steering": POWER_STEERING_SCHEMA,
     "spawn_run": SPAWN_RUN_SCHEMA,
     "spawn_sub_agents": SPAWN_SUB_AGENTS_SCHEMA,
     "spawn_list": SPAWN_LIST_SCHEMA,

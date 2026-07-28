@@ -98,7 +98,10 @@ describe('PowersTab — installed view', () => {
     mockApi.powers.mockResolvedValue({ installed: [power()] })
     renderTab()
     await waitFor(() => expect(screen.getByText('Inactive')).toBeInTheDocument())
-    expect(screen.getByText(/no MCP server is registered/)).toBeInTheDocument()
+    // Case-insensitive: the claim moved to the start of a sentence when the
+    // guidance wording was corrected for `power_steering`. The assertion is about
+    // the claim, not its capitalisation.
+    expect(screen.getByText(/no MCP server is registered/i)).toBeInTheDocument()
   })
 
   it('remove hits the remove endpoint', async () => {
@@ -355,5 +358,20 @@ describe('PowersTab — round 12 regressions', () => {
     const link = await screen.findByRole('link', { name: /View Stripe source on GitHub/ })
     expect(link).toHaveAttribute('href', 'https://github.com/kirodotdev/powers/tree/main/stripe')
     expect(screen.queryByText('Source unavailable')).not.toBeInTheDocument()
+  })
+
+  it('does not claim guidance is unreachable, now that power_steering ships', async () => {
+    // The inert note used to promise "none of its guidance is loaded into agent
+    // context". `power_steering` makes that false: the agent can read a Power's
+    // markdown on request. What stays true is that nothing is registered and
+    // nothing loads automatically, so the copy must say that instead — a UI that
+    // asserts a security property the code no longer has is worse than silence.
+    mockApi.powers.mockResolvedValue({ installed: [power()] })
+    mockApi.powersRegistry.mockResolvedValue({ items: [], providers: [], stale: false })
+    renderTab()
+
+    const note = await screen.findByText(/stored on disk/)
+    expect(note.textContent).toMatch(/nothing is loaded into\s+agent context automatically/)
+    expect(note.textContent).not.toMatch(/none of its\s+guidance is loaded/)
   })
 })

@@ -180,8 +180,9 @@ export default function PowersTab() {
           <span className="text-[12px] text-muted">
             Downloaded from{' '}
             <a href={/^https?:\/\//.test(p.source.ref) ? p.source.ref : undefined} target="_blank" rel="noopener noreferrer" className="text-accent hover:text-accent-hover font-mono break-all">{p.source.ref}</a>
-            {' '}and stored on disk. It is not active: no MCP server is registered and none of its
-            guidance is loaded into agent context. Activation arrives in a later release.
+            {' '}and stored on disk. No MCP server is registered and nothing is loaded into
+            agent context automatically — the agent can read this Power's guidance when it
+            asks for it. Running its tools arrives in a later release.
           </span>
         </div>
       </div>
@@ -359,7 +360,7 @@ export default function PowersTab() {
   return (<>
     <h4 className="text-sm font-semibold text-text-strong mt-4 mb-2 flex items-center gap-2">
       Powers ({installed.length})
-      <InfoTip text="Powers are installable capability bundles that package MCP tools and on-demand guidance. This release browses, installs and removes them. An installed power is stored on disk and left inert — no MCP server is registered and no guidance enters agent context — so nothing third-party runs until activation ships." />
+      <InfoTip text="Powers are installable capability bundles that package MCP tools and on-demand guidance. This release browses, installs and removes them, and lets the agent read an installed Power's guidance on request. No MCP server is registered and nothing enters agent context automatically, so no third-party code runs until tool execution ships." />
       <span className="ml-auto flex items-center gap-1" role="tablist" aria-label="Powers view">
         <button
           type="button"

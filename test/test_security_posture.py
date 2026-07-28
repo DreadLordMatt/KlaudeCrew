@@ -677,7 +677,21 @@ class TestRedactionSinkRegistry:
         # helper), redact_and_truncate() (redact-then-slice, so a credential cannot
         # straddle the truncation boundary), and redact_via_context() (routes to
         # CredentialPolicy.redact, whose Default delegates to security.redact).
-        dual_pass = ("StreamRedactor", "redact(", "redact_and_truncate", "redact_via_context")
+        # `redact_external` / `redact_payload` (powers_providers/redact.py) also
+        # qualify: `redact_external` runs `redact_credentials` and then
+        # `redact_exfiltration_urls` on the result, and `redact_payload` maps it
+        # over every string in a payload. Both are therefore dual-pass at the call
+        # site even though neither scanner is named there. Listed here rather than
+        # weakening the assertion, so a wrapper that stops running both would still
+        # be caught by the tests in test_powers_registry.
+        dual_pass = (
+            "StreamRedactor",
+            "redact(",
+            "redact_and_truncate",
+            "redact_via_context",
+            "redact_external",
+            "redact_payload",
+        )
         for label, module, detail in security_posture._REDACTION_SINKS:
             text = (pkg / module).read_text(encoding="utf-8")
             full = any(w in text for w in dual_pass) or (
