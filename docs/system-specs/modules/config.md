@@ -422,6 +422,7 @@ class DashboardConfig:
     tips_recency_decay: float = 0.6    # weighted-random newer-bias decay (clamped to [0, 1])
     tips_model: str = "claude-haiku-4.5"  # model for tips generation (pinned to Haiku for cost)
     tips_explore_ratio: float = 0.2    # probability of random catalog pick vs personalized (clamped to [0, 1])
+    tips_appearance_decay: float = 0.7  # per-appearance weight decay (clamped to [0, 1]); 1.0 disables
 
 @dataclass
 class TelegramConfig:

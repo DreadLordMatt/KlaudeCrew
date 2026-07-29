@@ -1582,6 +1582,16 @@ class DashboardConfig:
             "Probability of picking a random catalog tip instead of personalized (0-1). Higher = more general discovery.",
         ),
     )
+    tips_appearance_decay: float = field(
+        default=0.7,
+        metadata=_meta(
+            "Tips Appearance Decay",
+            "Per-appearance weight decay (0-1). Each time a tip is shown, its "
+            "selection weight is multiplied by this, so a tip you keep ignoring "
+            "steadily fades and selection can't collapse onto a small set. "
+            "1.0 disables decay.",
+        ),
+    )
     gitlab_hosts: list[str] = field(
         default_factory=list,
         metadata=_meta(
@@ -4008,6 +4018,9 @@ class KiroCrewConfig:
                 tips_model=str(dashboard_data.get("tips_model", "claude-haiku-4.5")),
                 tips_explore_ratio=_safe_float(
                     dashboard_data.get("tips_explore_ratio", 0.2), 0.2, lo=0.0, hi=1.0
+                ),
+                tips_appearance_decay=_safe_float(
+                    dashboard_data.get("tips_appearance_decay", 0.7), 0.7, lo=0.0, hi=1.0
                 ),
                 gitlab_hosts=_coerce_gitlab_hosts(dashboard_data.get("gitlab_hosts")),
             ),

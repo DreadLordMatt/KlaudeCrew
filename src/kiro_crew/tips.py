@@ -28,6 +28,11 @@ from kiro_crew.providers.base import EVENT_COMPLETE, EVENT_PERMISSION_REQUEST, E
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
 from kiro_crew.tips_allowlist import TIP_DOC_ALLOWLIST
+from kiro_crew.tips_analyzer import (
+    analyze_activity,
+    candidate_to_tip,
+    dismissed_families_from_ids,
+)
 from kiro_crew.tips_text import truncate_summary
 
 if TYPE_CHECKING:
@@ -35,8 +40,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Single source of truth for the analyzer's cron-detector gate. Off: the
+# recurring-cadence detector cannot reach acceptable precision against narrative
+# daily-history prose (see tips_analyzer._detect_recurring). Also skips the cron
+# job scan that only that detector consumes.
+_ANALYZER_ENABLE_CRON = False
+
+# Upper bound for a persisted per-tip "shown" count. Appearance decay raises a
+# float to this power (``appearance_decay ** shown``), and Python raises
+# ``OverflowError: int too large to convert to float`` for an int wider than a
+# double — a hand-edited or corrupted tips_state.json could otherwise 500 every
+# tips endpoint. Negative values are rejected by the same filter because a
+# negative exponent would INFLATE a tip's weight instead of decaying it.
+_MAX_SHOWN_COUNT = 10**6
+
 # Regenerate tips every 6 hours
 _REFRESH_INTERVAL_SECS = 6 * 60 * 60
+
+# Minimum gap between refresh ATTEMPTS after a hard failure. generate_tips
+# normally handles its own errors and returns the catalog fallback, so this only
+# governs the escaping-exception path, where last_generated is never stamped and
+# the staleness gate would otherwise re-fire on every poll.
+_REFRESH_RETRY_BACKOFF_SECS = 15 * 60
 
 # Doc selection is allowlist-based (see kiro_crew.tips_allowlist) — internal
 # architecture/incident docs must never surface as user-facing tips.
@@ -232,6 +257,7 @@ def _load_state() -> TipsState:
         shown = {
             k: v for k, v in shown_raw.items()
             if isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+            and 0 <= v <= _MAX_SHOWN_COUNT
         }
         snoozed_raw = _typed("snoozed", dict, {})
         snoozed = {
@@ -319,7 +345,16 @@ class TipsCache:
     # user-facing pool. Empty by default so unit tests that build TipsCache()
     # directly are unaffected; populated only by get_tips_cache in production.
     curated: list[dict] = field(default_factory=list)  # type: ignore[type-arg]
+    # Deterministic, zero-token activity-analyzer tips (Tips Kit Phase T1). Stable
+    # ids (analyzer-<family>) let TipsState's id-keyed suppression apply directly.
+    # Recomputed on the refresh cycle alongside LLM generation; empty until the
+    # first refresh (same as `state.tips`).
+    analyzer_tips: list[dict] = field(default_factory=list)  # type: ignore[type-arg]
     state: TipsState = field(default_factory=TipsState)
+    # Process-local timestamp of the last refresh ATTEMPT (success or hard
+    # failure). Deliberately not persisted: it only rate-limits retries within
+    # one gateway process, whereas state.last_generated carries the real cadence.
+    last_attempt: float = 0.0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _task: asyncio.Task | None = field(default=None, repr=False)  # type: ignore[type-arg]
 
@@ -421,6 +456,14 @@ async def get_tips_cache(state: DashboardState) -> TipsCache:
                 cache.catalog = catalog
                 cache.curated = curated
                 cache.state = st
+                # Populate the analyzer pool at init, NOT only from refresh_tips:
+                # analyzer_tips lives on the (process-local) cache while its
+                # refresh is gated on the PERSISTED last_generated timestamp, so
+                # any gateway restart inside the 6h window (auto-update, quit /
+                # relaunch, dev restart) would otherwise leave the pool empty and
+                # silently serve no analyzer tips at all. Deterministic and
+                # zero-token, so this is cheap; never raises.
+                cache.analyzer_tips = await build_analyzer_tips(state, st)
                 state._tips_cache = cache  # type: ignore[attr-defined]
     return state._tips_cache  # type: ignore[attr-defined]
 
@@ -433,11 +476,24 @@ def _select_tip(
     catalog: list[CatalogEntry],
     recency_decay: float = 0.6,
     rng: random.Random | None = None,
+    shown_counts: dict[str, int] | None = None,
+    appearance_decay: float = 1.0,
+    priority_ids: set[str] | None = None,
 ) -> dict | None:  # type: ignore[type-arg]
     """Pick one tip via weighted-random with newer-biased weights.
 
     Weight = recency_decay ** rank, where rank orders eligible tips newest-first
     by catalog recency (doc file mtime).
+
+    ``appearance_decay`` (<1.0) additionally multiplies each candidate's weight
+    by ``appearance_decay ** times_shown`` so a tip the user keeps seeing but
+    never acts on steadily loses selection probability — the explore/exploit
+    counterweight to self-reinforcement (a frequently-served tip decays instead
+    of locking in). ``appearance_decay == 1.0`` is a no-op (legacy behaviour).
+
+    ``priority_ids`` (activity-grounded analyzer tips) sort ahead of everything
+    else so they take rank 0.. and thus the largest recency weights, while still
+    being subject to appearance decay and never crowding out the explore blend.
     """
     if not candidates:
         return None
@@ -472,8 +528,24 @@ def _select_tip(
         candidates, key=lambda t: mtimes[id(t)], reverse=True
     )
 
-    # Compute weights: recency_decay ** rank (rank 0 = newest)
-    weights = [recency_decay ** rank for rank in range(len(sorted_candidates))]
+    # Activity-grounded (analyzer) tips sort ahead of the rest so they take the
+    # top ranks. Stable sort preserves the mtime order within each group.
+    if priority_ids:
+        sorted_candidates.sort(key=lambda t: 0 if t.get("id", "") in priority_ids else 1)
+
+    # Compute weights: recency_decay ** rank (rank 0 = newest / highest priority),
+    # optionally attenuated by how many times each tip has already been shown.
+    weights: list[float] = []
+    for rank, t in enumerate(sorted_candidates):
+        w = recency_decay ** rank
+        if shown_counts and appearance_decay < 1.0:
+            shown = shown_counts.get(t.get("id", ""), 0)
+            if shown > 0:
+                # Defense in depth: _load_state bounds persisted counts, but the
+                # in-memory map is incremented on every serve, so clamp here too
+                # — the exponentiation must never see an unbounded int.
+                w *= appearance_decay ** min(shown, _MAX_SHOWN_COUNT)
+        weights.append(w)
     total = sum(weights)
     if total == 0:
         return sorted_candidates[0]
@@ -767,27 +839,107 @@ async def generate_tips(state: DashboardState) -> list[dict]:  # type: ignore[ty
     return _fallback_tips(cache.catalog, st)
 
 
+async def build_analyzer_tips(
+    state: DashboardState,
+    st: TipsState | None = None,
+) -> list[dict]:  # type: ignore[type-arg]
+    """Compute deterministic activity-analyzer tips (Tips Kit Phase T1).
+
+    Zero-token: reads local redacted history and runs pure pattern detectors.
+    Never raises — degrades to an empty list.
+
+    ``st`` lets a caller that already holds the loaded state pass it in and skip
+    a redundant disk read (used by the cache-init path).
+    """
+    loop = asyncio.get_running_loop()
+
+    def _work() -> list[dict]:  # type: ignore[type-arg]
+        try:
+            memory = ContextBuilder.get_memory_for(None)
+            history = memory.read_recent_history(days=14)
+        except Exception:
+            logger.debug("Analyzer: failed to read history", exc_info=True)
+            return []
+        if not history:
+            return []
+        existing_crons = ""
+        if _ANALYZER_ENABLE_CRON:
+            # Only consumed by the cron detector; skip the whole job scan when
+            # that detector is gated off.
+            try:
+                jobs = state.crons.list_jobs()
+                existing_crons = "\n".join(
+                    f"{getattr(j, 'name', '')} {getattr(j, 'message', '')}" for j in jobs
+                )
+            except Exception:
+                logger.debug("Analyzer: failed to list crons", exc_info=True)
+        cur = st if st is not None else _load_state()
+        dismissed = dismissed_families_from_ids(cur.dismissed)
+        candidates = analyze_activity(
+            history,
+            existing_crons=existing_crons,
+            dismissed_families=dismissed,
+            # Cron detection stays off until a structured per-session activity
+            # signal exists; against narrative history prose it only produced
+            # false positives (see tips_analyzer._detect_recurring).
+            enable_cron=_ANALYZER_ENABLE_CRON,
+        )
+        # Redact defensively: candidate bodies/cta embed history snippets.
+        return _redact_tips([candidate_to_tip(c) for c in candidates])
+
+    try:
+        return await loop.run_in_executor(None, _work)
+    except Exception:
+        logger.warning("Analyzer tips build failed", exc_info=True)
+        return []
+
+
 async def refresh_tips(state: DashboardState, cache: TipsCache) -> None:
     """Background task: regenerate tips.
 
     Generation runs OUTSIDE the cache lock so handlers are never blocked.
     """
+    # Process-local attempt stamp, recorded BEFORE the work: if generation
+    # raises, last_generated is never written, so without this every subsequent
+    # poll would launch a fresh generation plus a 14-day history scan (only
+    # concurrent attempts are deduped by the task handle). Gates retries in
+    # maybe_refresh.
+    cache.last_attempt = time.time()
     try:
         tips = await generate_tips(state)
+        completed = True
     except Exception:
         logger.warning("Tips generation failed", exc_info=True)
-        return
+        tips = []
+        completed = False
+    # Deterministic analyzer runs regardless of LLM generation outcome — it is
+    # the zero-token, reliable half of the Tips Kit and must not depend on the
+    # background session being available.
+    analyzer_tips = await build_analyzer_tips(state)
     async with cache._lock:
-        cache.state.tips = tips
-        cache.state.last_generated = time.time()
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _save_state, cache.state)
+        cache.analyzer_tips = analyzer_tips
+        if completed:
+            # generate_tips handles its own failures internally and returns the
+            # catalog fallback rather than raising, so `completed` means "a
+            # usable pool came back", NOT "the LLM succeeded" — stamping here
+            # matches the pre-existing cadence contract. A hard failure (an
+            # escaping exception) leaves last_generated untouched and is instead
+            # rate-limited by cache.last_attempt.
+            cache.state.tips = tips
+            cache.state.last_generated = time.time()
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _save_state, cache.state)
 
 
 async def maybe_refresh(state: DashboardState, cache: TipsCache) -> None:
     """Trigger a background refresh if tips are stale."""
     now = time.time()
     if now - cache.state.last_generated < _REFRESH_INTERVAL_SECS:
+        return
+    # Failed-attempt backoff: a generation that raised did not stamp
+    # last_generated, so the staleness gate above stays open. Without this a
+    # persistent failure would re-launch generation on every poll.
+    if now - cache.last_attempt < _REFRESH_RETRY_BACKOFF_SECS:
         return
     if cache._task and not cache._task.done():
         return
@@ -831,6 +983,7 @@ async def api_tips_next(request: web.Request) -> web.Response:
     cadence_hours = cfg.dashboard.tips_cadence_hours
     snooze_hours = cfg.dashboard.tips_snooze_hours
     recency_decay = cfg.dashboard.tips_recency_decay
+    appearance_decay = cfg.dashboard.tips_appearance_decay
 
     # Hold the lock across the whole inspect→select→persist transaction so two
     # concurrent tabs cannot both observe "no offered tip + cadence open" and
@@ -854,18 +1007,24 @@ async def api_tips_next(request: web.Request) -> web.Response:
         if not cadence_open:
             return web.json_response({"tip": None, "glow": False})
 
-        # Gather eligible candidates. Curated actionable tips (hand-authored,
-        # action-first, for features with no docs entry) are the primary pool;
-        # LLM-generated tips augment them. Dedupe by id — curated wins.
-        curated_candidates = [
-            t for t in cache.curated if _is_eligible(t, st, now, snooze_hours)
+        # Gather eligible candidates. Activity-grounded analyzer tips (Tips Kit
+        # Phase T1: deterministic, stable ids) rank highest; hand-authored
+        # curated actionable tips are next; LLM-generated tips augment them.
+        # Dedupe by id — analyzer wins over curated wins over generated.
+        analyzer_candidates = [
+            t for t in cache.analyzer_tips if _is_eligible(t, st, now, snooze_hours)
         ]
-        curated_ids = {t.get("id", "") for t in curated_candidates}
+        analyzer_ids = {t.get("id", "") for t in analyzer_candidates}
+        curated_candidates = [
+            t for t in cache.curated
+            if _is_eligible(t, st, now, snooze_hours) and t.get("id", "") not in analyzer_ids
+        ]
+        curated_ids = analyzer_ids | {t.get("id", "") for t in curated_candidates}
         generated_candidates = [
             t for t in st.tips
             if _is_eligible(t, st, now, snooze_hours) and t.get("id", "") not in curated_ids
         ]
-        candidates = curated_candidates + generated_candidates
+        candidates = analyzer_candidates + curated_candidates + generated_candidates
         if not candidates:
             # Last resort: doc-scan catalog fallback (descriptive, not action-first)
             candidates = [
@@ -878,11 +1037,23 @@ async def api_tips_next(request: web.Request) -> web.Response:
 
         # Exploration blend: with probability explore_ratio, pick uniformly at
         # random from the general pool; otherwise use the weighted-random
-        # newer-biased pick. The general pool prefers the curated actionable
-        # tips and falls back to the doc-scan catalog when none are eligible.
+        # newer-biased pick, which prioritises the activity-grounded analyzer
+        # tips and attenuates any tip by how often it has already been shown
+        # (appearance_decay) so selection cannot collapse onto a small fixed set.
         explore_ratio = cfg.dashboard.tips_explore_ratio
         rng = random.Random()
         tip: dict | None = None  # type: ignore[type-arg]
+
+        def _exploit() -> dict | None:  # type: ignore[type-arg]
+            return _select_tip(
+                candidates,
+                cache.catalog,
+                recency_decay=recency_decay,
+                shown_counts=st.shown,
+                appearance_decay=appearance_decay,
+                priority_ids=analyzer_ids or None,
+            )
+
         if rng.random() < explore_ratio:
             explore_pool = curated_candidates or [
                 t for t in _fallback_tips(cache.catalog, st)
@@ -891,10 +1062,10 @@ async def api_tips_next(request: web.Request) -> web.Response:
             if explore_pool:
                 tip = rng.choice(explore_pool)
             else:
-                tip = _select_tip(candidates, cache.catalog, recency_decay=recency_decay)
+                tip = _exploit()
         else:
             # Exploit: weighted-random newer-biased across the merged pool
-            tip = _select_tip(candidates, cache.catalog, recency_decay=recency_decay)
+            tip = _exploit()
         if not tip:
             return web.json_response({"tip": None, "glow": False})
 

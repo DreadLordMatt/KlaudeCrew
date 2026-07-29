@@ -3567,6 +3567,7 @@
         "tips_recency_decay": 0.6,
         "tips_model": "claude-haiku-4.5",
         "tips_explore_ratio": 0.2,
+        "tips_appearance_decay": 0.7,
         "gitlab_hosts": []
       }
     },
@@ -4002,6 +4003,20 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": 0.2
+    },
+    {
+      "path": "dashboard.tips_appearance_decay",
+      "kind": "core",
+      "type": "number",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Tips Appearance Decay",
+      "help": "Per-appearance weight decay (0-1). Each time a tip is shown, its selection weight is multiplied by this, so a tip you keep ignoring steadily fades and selection can't collapse onto a small set. 1.0 disables decay.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 0.7
     },
     {
       "path": "dashboard.gitlab_hosts",
