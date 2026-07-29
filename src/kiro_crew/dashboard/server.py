@@ -1804,6 +1804,8 @@ async def start_dashboard(
     app.router.add_get("/api/file-diff", handlers.api_file_diff)
     app.router.add_get("/api/file-search", handlers.api_file_search)
     app.router.add_get("/api/browse-dirs", handlers.api_browse_dirs)
+    app.router.add_get("/api/native-dir-dialog", handlers.api_native_dir_dialog_probe)
+    app.router.add_post("/api/native-dir-dialog", handlers.api_native_dir_dialog)
     app.router.add_get("/api/browse-files", handlers.api_browse_files)
     app.router.add_post("/api/upload", handlers.api_upload)
     app.router.add_post("/api/upload/file", handlers.api_upload_file)

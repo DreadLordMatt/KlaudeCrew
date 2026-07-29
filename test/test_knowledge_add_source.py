@@ -10,6 +10,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from kiro_crew.dashboard import native_dialog as nd
 from kiro_crew.dashboard.handlers.knowledge import (
     _folder_picker_available,
     _run_folder_dialog,
@@ -206,67 +207,70 @@ def _fake_request(local_only=True):
 
 
 class TestFolderPickerAvailable:
-    def test_available_on_mac_local(self, monkeypatch):
-        monkeypatch.setattr("kiro_crew.dashboard.handlers.knowledge.sys.platform", "darwin")
+    def test_available_when_host_has_a_chooser_and_dashboard_is_local(self, monkeypatch):
+        monkeypatch.setattr(nd, "detect_backend", lambda: nd.BACKEND_OSASCRIPT)
         assert _folder_picker_available(_fake_request(local_only=True)) is True
 
-    def test_unavailable_off_mac(self, monkeypatch):
-        monkeypatch.setattr("kiro_crew.dashboard.handlers.knowledge.sys.platform", "linux")
+    def test_unavailable_without_a_chooser(self, monkeypatch):
+        """A headless host has no dialog to draw, whatever its platform."""
+        monkeypatch.setattr(nd, "detect_backend", lambda: None)
         assert _folder_picker_available(_fake_request(local_only=True)) is False
 
+    def test_available_on_non_mac_hosts_with_a_chooser(self, monkeypatch):
+        monkeypatch.setattr(nd, "detect_backend", lambda: nd.BACKEND_ZENITY)
+        assert _folder_picker_available(_fake_request(local_only=True)) is True
+
     def test_unavailable_when_remote(self, monkeypatch):
-        monkeypatch.setattr("kiro_crew.dashboard.handlers.knowledge.sys.platform", "darwin")
+        monkeypatch.setattr(nd, "detect_backend", lambda: nd.BACKEND_OSASCRIPT)
         assert _folder_picker_available(_fake_request(local_only=False)) is False
 
     def test_fail_closed_when_local_only_unset(self, monkeypatch):
-        monkeypatch.setattr("kiro_crew.dashboard.handlers.knowledge.sys.platform", "darwin")
+        monkeypatch.setattr(nd, "detect_backend", lambda: nd.BACKEND_OSASCRIPT)
         assert _folder_picker_available(SimpleNamespace(app={})) is False
 
 
 class TestRunFolderDialog:
     def test_picked_returns_path(self, monkeypatch):
-        completed = MagicMock(returncode=0, stdout="/home/user/notes\n")
-        monkeypatch.setattr(
-            "kiro_crew.dashboard.handlers.knowledge.subprocess.run",
-            lambda *a, **k: completed,
-        )
+        monkeypatch.setattr(nd, "choose_directory", lambda **kw: "/home/user/notes")
         assert _run_folder_dialog() == "/home/user/notes"
 
     def test_cancel_returns_none(self, monkeypatch):
-        completed = MagicMock(returncode=1, stdout="")
-        monkeypatch.setattr(
-            "kiro_crew.dashboard.handlers.knowledge.subprocess.run",
-            lambda *a, **k: completed,
-        )
+        monkeypatch.setattr(nd, "choose_directory", lambda **kw: None)
         assert _run_folder_dialog() is None
 
     def test_launch_failure_returns_none(self, monkeypatch):
-        def boom(*a, **k):
-            raise FileNotFoundError()
-        monkeypatch.setattr(
-            "kiro_crew.dashboard.handlers.knowledge.subprocess.run", boom,
-        )
+        """This surface feeds the path into a text field, so a failed dialog and
+        a cancelled one collapse to the same answer here."""
+        def boom(**kw):
+            raise nd.DialogUnavailable("no session")
+        monkeypatch.setattr(nd, "choose_directory", boom)
         assert _run_folder_dialog() is None
+
+    def test_uses_the_knowledge_prompt(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(nd, "choose_directory", lambda **kw: seen.update(kw) or "/p")
+        _run_folder_dialog()
+        assert seen["prompt"] == nd.PROMPT_KNOWLEDGE
 
 
 class TestPickFolderHandler:
     @pytest.mark.asyncio
     async def test_blocked_when_not_local_only(self, store, monkeypatch):
-        monkeypatch.setattr("kiro_crew.dashboard.handlers.knowledge.sys.platform", "darwin")
+        monkeypatch.setattr(nd, "detect_backend", lambda: nd.BACKEND_OSASCRIPT)
         async with TestClient(TestServer(_make_pick_app(store, local_only=False))) as client:
             resp = await client.post("/api/knowledge/pick-folder")
             assert resp.status == 403
 
     @pytest.mark.asyncio
-    async def test_blocked_when_not_mac(self, store, monkeypatch):
-        monkeypatch.setattr("kiro_crew.dashboard.handlers.knowledge.sys.platform", "linux")
+    async def test_blocked_without_a_chooser(self, store, monkeypatch):
+        monkeypatch.setattr(nd, "detect_backend", lambda: None)
         async with TestClient(TestServer(_make_pick_app(store, local_only=True))) as client:
             resp = await client.post("/api/knowledge/pick-folder")
             assert resp.status == 403
 
     @pytest.mark.asyncio
     async def test_returns_picked_path(self, store, monkeypatch):
-        monkeypatch.setattr("kiro_crew.dashboard.handlers.knowledge.sys.platform", "darwin")
+        monkeypatch.setattr(nd, "detect_backend", lambda: nd.BACKEND_OSASCRIPT)
         monkeypatch.setattr(
             "kiro_crew.dashboard.handlers.knowledge._run_folder_dialog",
             lambda: "/home/user/notes",
@@ -278,7 +282,7 @@ class TestPickFolderHandler:
 
     @pytest.mark.asyncio
     async def test_returns_null_on_cancel(self, store, monkeypatch):
-        monkeypatch.setattr("kiro_crew.dashboard.handlers.knowledge.sys.platform", "darwin")
+        monkeypatch.setattr(nd, "detect_backend", lambda: nd.BACKEND_OSASCRIPT)
         monkeypatch.setattr(
             "kiro_crew.dashboard.handlers.knowledge._run_folder_dialog",
             lambda: None,
@@ -291,15 +295,15 @@ class TestPickFolderHandler:
 
 class TestConfigFolderPickerFlag:
     @pytest.mark.asyncio
-    async def test_reports_true_on_mac_local(self, store, monkeypatch):
-        monkeypatch.setattr("kiro_crew.dashboard.handlers.knowledge.sys.platform", "darwin")
+    async def test_reports_true_when_local_with_a_chooser(self, store, monkeypatch):
+        monkeypatch.setattr(nd, "detect_backend", lambda: nd.BACKEND_OSASCRIPT)
         async with TestClient(TestServer(_make_pick_app(store, local_only=True))) as client:
             resp = await client.get("/api/knowledge/config")
             assert (await resp.json())["folder_picker"] is True
 
     @pytest.mark.asyncio
-    async def test_reports_false_off_mac(self, store, monkeypatch):
-        monkeypatch.setattr("kiro_crew.dashboard.handlers.knowledge.sys.platform", "win32")
+    async def test_reports_false_without_a_chooser(self, store, monkeypatch):
+        monkeypatch.setattr(nd, "detect_backend", lambda: None)
         async with TestClient(TestServer(_make_pick_app(store, local_only=True))) as client:
             resp = await client.get("/api/knowledge/config")
             assert (await resp.json())["folder_picker"] is False

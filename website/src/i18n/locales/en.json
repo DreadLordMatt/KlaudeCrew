@@ -1501,9 +1501,13 @@
     "projectPicker": {
       "back": "Back",
       "browse": "Browse",
+      "choose_folder": "Choose folder…",
+      "native_dialog_failed": "Couldn't open the folder window — choose a folder from the list below instead.",
       "no_matching_projects": "No matching projects",
       "no_recent_projects": "No recent projects",
+      "no_recent_projects_native": "No recent projects yet — choose a folder to get started.",
       "no_subdirectories": "No subdirectories",
+      "open_a_project_folder": "Open a project folder",
       "path_to_project": "/path/to/project",
       "project_directory_path": "Project directory path",
       "recent": "Recent",
@@ -1511,7 +1515,8 @@
       "search_recent_projects": "Search recent projects",
       "search_recent_projects_2": "Search recent projects…",
       "select": "Select",
-      "subdirectories": "Subdirectories"
+      "subdirectories": "Subdirectories",
+      "waiting_for_dialog": "A folder window opened — choose a folder there"
     },
     "publishHub": {
       "back": "Back",

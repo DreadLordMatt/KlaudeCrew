@@ -215,7 +215,19 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "dashboard/handlers/files.py::api_reveal_path",
         "dashboard/handlers/files.py::api_screenshot",
         "dashboard/handlers/files.py::api_upload",
-        "dashboard/handlers/knowledge.py::_run_folder_dialog",
+        # Native folder chooser on the gateway's own screen (project picker and
+        # knowledge folder picker both route here). Fixed argv of a system
+        # binary — osascript / powershell -STA / zenity / kdialog — where the
+        # AppleScript and PowerShell bodies are module-owned literals and the
+        # only variable parts (prompt, starting directory) travel as argv
+        # elements or env values that the CALLERS derive server-side: the
+        # prompt is a module constant and the starting directory is read from
+        # the gateway's own recent_projects.json, so no request byte reaches
+        # the spawn. Sandboxing would defeat the feature rather than harden it:
+        # the chooser must reach the user's GUI session (scrubbed env drops
+        # DISPLAY/Aqua) and must see the whole filesystem to let the user pick
+        # any directory. Both entry points are gated on a direct-local request.
+        "dashboard/native_dialog.py::choose_directory",
         # Terminal live-cwd probe on hosts without /proc (macOS/BSD): fixed
         # `lsof -a -p <pid> -d cwd -Fn` list-argv (no shell=True) where <pid>
         # is the gateway's own PTY child pid (an int from asyncio.subprocess),

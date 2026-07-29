@@ -24,6 +24,8 @@ from aiohttp.multipart import BodyPartReader
 
 from kiro_crew import platform_compat
 from kiro_crew.config.loader import KiroCrewConfig, WorkspaceConfig, config_dir
+from kiro_crew.dashboard import native_dialog
+from kiro_crew.dashboard.origin import is_direct_local_request
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.platform import redact_via_context as redact
 from kiro_crew.security import (
@@ -55,6 +57,14 @@ mimetypes.add_type(
 )
 
 _INLINE_DISPOSITION_PREFIXES = frozenset({"audio/", "video/", "image/", "application/pdf"})
+
+#: Single-flight guard for native folder dialogs. The dialog is modal on the
+#: host's screen, so a second one would stack behind the first with no way to
+#: attribute the answer; callers get 409 while one is open. A plain flag rather
+#: than an asyncio.Lock: the check-and-set below has no await between its two
+#: halves (so it is atomic on the event loop) and a flag carries no binding to
+#: the loop that first touched it.
+_NATIVE_DIALOG_STATE = {"busy": False}
 
 
 logger = logging.getLogger(__name__)
@@ -2082,6 +2092,105 @@ async def api_browse_dirs(request: web.Request) -> web.Response:
         pass
     _sel().log_api_access(caller=caller, operation="browse_dirs", outcome="allowed", resources=base)
     return web.json_response({"path": base, "parent": os.path.dirname(base), "dirs": dirs})
+
+
+def _last_project_dir() -> str:
+    """Most recent usable project directory, or ``""``.
+
+    Read from the gateway's own ``recent_projects.json`` rather than taken from
+    the caller, so the folder dialog's starting location carries no
+    request-supplied bytes. Blocking (file read) — call in a thread.
+    """
+    try:
+        raw = json.loads((config_dir() / "recent_projects.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return ""
+    if not isinstance(raw, list):
+        return ""
+    for entry in raw:
+        if not isinstance(entry, str) or not entry:
+            continue
+        resolved = os.path.realpath(os.path.expanduser(entry))
+        if os.path.isdir(resolved) and not is_sensitive_path(resolved):
+            return resolved
+    return ""
+
+
+async def api_native_dir_dialog_probe(request: web.Request) -> web.Response:
+    """GET /api/native-dir-dialog — can this host open a native folder dialog?
+
+    The dashboard asks before offering the affordance, so a browser tab on a
+    remote/headless gateway never shows a button that cannot work.
+    """
+    available = is_direct_local_request(request) and native_dialog.is_available()
+    return web.json_response({"available": available})
+
+
+async def api_native_dir_dialog(request: web.Request) -> web.Response:
+    """POST /api/native-dir-dialog — open the host's native folder chooser.
+
+    Returns ``{"path": "/abs/dir"}`` on a selection, ``{"cancelled": true}`` when
+    the user dismisses the dialog. The dialog draws on the gateway's own screen,
+    so the request must come from this machine; remote callers keep the
+    server-side directory browser instead.
+
+    Takes no input. The directory the chooser opens in is derived here from the
+    gateway's own recent-projects file, so no byte of the request reaches the
+    subprocess (see ``BENIGN_SPAWNS`` in ``test/test_spawn_audit.py``).
+    """
+    caller = request.get("user", "dashboard")
+    if not is_direct_local_request(request):
+        _sel().log_api_access(
+            caller=caller, operation="native_dir_dialog", outcome="denied",
+            resources="", error="not a direct local request")
+        return web.json_response(
+            {"error": "The folder dialog can only open on the machine running KiroCrew.",
+             "reason": "remote"}, status=403)
+    if not native_dialog.is_available():
+        return web.json_response(
+            {"error": "No native folder dialog is available on this host.",
+             "reason": "unavailable"}, status=503)
+    # Resolved before the guard below: check-and-set must have no await between
+    # its halves to stay atomic on the event loop, and this costs one small file
+    # read on the (rare) 409 path.
+    default_path = await asyncio.to_thread(_last_project_dir)
+    # One dialog at a time. Repeated clicks would otherwise stack modal panels
+    # on the host with no way to tell which one the eventual answer came from.
+    if _NATIVE_DIALOG_STATE["busy"]:
+        return web.json_response(
+            {"error": "A folder dialog is already open.", "reason": "busy"}, status=409)
+    _NATIVE_DIALOG_STATE["busy"] = True
+    # The flag's lifetime is the DIALOG's, not this request's. asyncio.to_thread
+    # cannot interrupt the worker, so a client that disconnects mid-dialog (tab
+    # closed, fetch aborted, proxy read timeout) leaves the OS panel on screen
+    # until a human answers it or DIALOG_TIMEOUT_SEC fires. Releasing the slot on
+    # request cancellation would admit a second stacked panel; a done-callback on
+    # the future plus a shielded await keeps it held until the thread finishes.
+    fut = asyncio.ensure_future(
+        asyncio.to_thread(native_dialog.choose_directory, default_path))
+    fut.add_done_callback(lambda _f: _NATIVE_DIALOG_STATE.__setitem__("busy", False))
+    try:
+        picked = await asyncio.shield(fut)
+    except native_dialog.DialogUnavailable as exc:
+        _sel().log_api_access(
+            caller=caller, operation="native_dir_dialog", outcome="denied",
+            resources="", error=str(exc))
+        return web.json_response({"error": str(exc), "reason": "failed"}, status=503)
+    if picked is None:
+        return web.json_response({"cancelled": True})
+    resolved = os.path.realpath(picked)
+    if not os.path.isdir(resolved):
+        return web.json_response({"error": "Not a directory", "path": resolved}, status=400)
+    # The same gate the server-side browser applies: a natively-picked path is
+    # still just a path, and ~/.ssh is no more selectable this way than that.
+    if is_sensitive_path(resolved):
+        _sel().log_api_access(
+            caller=caller, operation="native_dir_dialog", outcome="denied",
+            resources=resolved, error="sensitive path")
+        return web.json_response({"error": "Access denied", "reason": "sensitive"}, status=403)
+    _sel().log_api_access(
+        caller=caller, operation="native_dir_dialog", outcome="allowed", resources=resolved)
+    return web.json_response({"path": resolved})
 
 
 async def api_browse_files(request: web.Request) -> web.Response:

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { screen, fireEvent, act, waitFor } from '@testing-library/react'
 import { renderWithProviders } from './helpers'
-import ProjectPicker from '../components/ProjectPicker'
+import ProjectPicker, { __resetNativeProbeForTests } from '../components/ProjectPicker'
 import { api } from '../api/client'
 import { useRef } from 'react'
 
@@ -11,8 +11,14 @@ const mockBrowseDirs = (path = '/home/u', dirs: { name: string; path: string }[]
   ({ path, parent: '/home', dirs })
 
 beforeEach(() => {
+  // The probe answer is cached for the page session in production; drop it so
+  // each case starts from an unknown host.
+  __resetNativeProbeForTests()
   vi.spyOn(api, 'recentProjects').mockResolvedValue({ dirs: ['/home/u/projA', '/home/u/projB'] })
   vi.spyOn(api, 'browseDirs').mockResolvedValue(mockBrowseDirs())
+  // Default to "no native dialog on this host" so the server-side browser is the
+  // surface under test; the native-dialog suite below opts in explicitly.
+  vi.spyOn(api, 'nativeDirDialogAvailable').mockResolvedValue({ available: false })
 })
 
 afterEach(() => {
@@ -471,6 +477,189 @@ describe('ProjectPicker', () => {
       fireEvent.change(input, { target: { value: '/home/u/' } })
       await act(async () => { await vi.advanceTimersByTimeAsync(300) })
       expect(browseSpy).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('native folder dialog', () => {
+    const nativeAvailable = () => {
+      vi.mocked(api.nativeDirDialogAvailable).mockResolvedValue({ available: true })
+    }
+
+    it('replaces the Browse tab with a Choose folder action when the host can open one', async () => {
+      nativeAvailable()
+      const openSpy = vi.spyOn(api, 'openNativeDirDialog').mockResolvedValue({ cancelled: true })
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      expect(await screen.findByText('Choose folder…')).toBeInTheDocument()
+      // One browsing surface only — the tab strip is gone.
+      expect(screen.queryByText('Browse')).not.toBeInTheDocument()
+      expect(screen.queryByText('Recent')).not.toBeInTheDocument()
+      // Recents remain reachable: they are what a native dialog cannot offer.
+      expect(screen.getByText('/home/u/projA')).toBeInTheDocument()
+      expect(openSpy).not.toHaveBeenCalled()
+    })
+
+    it('keeps the server-side browser when the host cannot open a dialog', async () => {
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      expect(await screen.findByText('Browse')).toBeInTheDocument()
+      expect(screen.queryByText('Choose folder…')).not.toBeInTheDocument()
+    })
+
+    it('selects the picked directory and closes', async () => {
+      nativeAvailable()
+      vi.spyOn(api, 'openNativeDirDialog').mockResolvedValue({ path: '/home/u/picked' })
+      const onSelect = vi.fn()
+      const onOpenChange = vi.fn()
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={onOpenChange} anchorRect={rect(100, 50)} onSelect={onSelect} />
+      )
+      fireEvent.click(await screen.findByText('Choose folder…'))
+      await waitFor(() => expect(onSelect).toHaveBeenCalledWith('/home/u/picked'))
+      expect(onOpenChange).toHaveBeenCalledWith(false)
+    })
+
+    it('sends no path — the gateway decides where the dialog opens', async () => {
+      nativeAvailable()
+      const openSpy = vi.spyOn(api, 'openNativeDirDialog').mockResolvedValue({ cancelled: true })
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      fireEvent.click(await screen.findByText('Choose folder…'))
+      await waitFor(() => expect(openSpy).toHaveBeenCalledWith())
+    })
+
+    it('shows a waiting state while the OS dialog is up', async () => {
+      nativeAvailable()
+      let resolve: (v: { cancelled: boolean }) => void = () => {}
+      vi.spyOn(api, 'openNativeDirDialog').mockReturnValue(
+        new Promise(r => { resolve = r as (v: { cancelled: boolean }) => void })
+      )
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      fireEvent.click(await screen.findByText('Choose folder…'))
+      const waiting = await screen.findByText('A folder window opened — choose a folder there')
+      expect(waiting.closest('button')).toBeDisabled()
+      await act(async () => { resolve({ cancelled: true }); await Promise.resolve() })
+      expect(await screen.findByText('Choose folder…')).toBeInTheDocument()
+    })
+
+    it('stays open on cancel without selecting anything', async () => {
+      nativeAvailable()
+      vi.spyOn(api, 'openNativeDirDialog').mockResolvedValue({ cancelled: true })
+      const onSelect = vi.fn()
+      const onOpenChange = vi.fn()
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={onOpenChange} anchorRect={rect(100, 50)} onSelect={onSelect} />
+      )
+      fireEvent.click(await screen.findByText('Choose folder…'))
+      await waitFor(() => expect(screen.getByText('Choose folder…')).toBeInTheDocument())
+      expect(onSelect).not.toHaveBeenCalled()
+      expect(onOpenChange).not.toHaveBeenCalled()
+    })
+
+    it('falls back to the server-side browser when the dialog fails', async () => {
+      // A host that advertised a dialog can still fail to draw one (no GUI
+      // session behind an ssh -L forward) — the user must not be left stranded.
+      nativeAvailable()
+      vi.spyOn(api, 'openNativeDirDialog').mockRejectedValue(new Error('503'))
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      fireEvent.click(await screen.findByText('Choose folder…'))
+      expect(await screen.findByText(/Couldn't open the folder window/)).toBeInTheDocument()
+      expect(screen.getByText('Browse')).toBeInTheDocument()
+      expect(screen.getByPlaceholderText('/path/to/project')).toBeInTheDocument()
+      expect(screen.queryByText('Choose folder…')).not.toBeInTheDocument()
+    })
+
+    it('falls back when the availability probe itself fails', async () => {
+      vi.mocked(api.nativeDirDialogAvailable).mockRejectedValue(new Error('offline'))
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      expect(await screen.findByText('Browse')).toBeInTheDocument()
+      expect(screen.queryByText('Choose folder…')).not.toBeInTheDocument()
+    })
+
+    it('probes the host once per page, not once per open', async () => {
+      // Host capability cannot change under us; re-asking only costs a
+      // round-trip, which is what makes the panel feel slow over a tunnel.
+      nativeAvailable()
+      const probeSpy = vi.mocked(api.nativeDirDialogAvailable)
+      const { rerender } = renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      await screen.findByText('Choose folder…')
+      rerender(<ProjectPicker open={false} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />)
+      rerender(<ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />)
+      await screen.findByText('Choose folder…')
+      expect(probeSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not list the server-side tree that native mode never shows', async () => {
+      nativeAvailable()
+      const browseSpy = vi.mocked(api.browseDirs)
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      await screen.findByText('Choose folder…')
+      expect(browseSpy).not.toHaveBeenCalled()
+    })
+
+    it('lists the tree lazily once the dialog fails and the fallback appears', async () => {
+      nativeAvailable()
+      vi.spyOn(api, 'openNativeDirDialog').mockRejectedValue(new Error('503'))
+      const browseSpy = vi.mocked(api.browseDirs)
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      fireEvent.click(await screen.findByText('Choose folder…'))
+      await waitFor(() => expect(browseSpy).toHaveBeenCalled())
+      expect(await screen.findByPlaceholderText('/path/to/project')).toBeInTheDocument()
+    })
+  })
+
+  describe('warmed data', () => {
+    it('fetches recents and the tree once across repeated opens', async () => {
+      // The panel paints in ~40ms but its lists used to wait a full round-trip
+      // on the FIRST open — ~830ms at 400ms RTT. Warming once per page removes
+      // that from the perceived open latency.
+      const recentSpy = vi.mocked(api.recentProjects)
+      const browseSpy = vi.mocked(api.browseDirs)
+      const { rerender } = renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      await screen.findByText('/home/u/projA')
+      for (const open of [false, true, false, true]) {
+        rerender(<ProjectPicker open={open} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />)
+        await act(async () => { await Promise.resolve() })
+      }
+      await screen.findByText('/home/u/projA')
+      expect(recentSpy).toHaveBeenCalledTimes(1)
+      expect(browseSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('still populates when the warm has not run yet', async () => {
+      // Clicking before the idle callback fires must not show an empty panel.
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      expect(await screen.findByText('/home/u/projA')).toBeInTheDocument()
+    })
+
+    it('survives a failed warm without breaking the panel', async () => {
+      vi.mocked(api.recentProjects).mockRejectedValue(new Error('offline'))
+      vi.mocked(api.browseDirs).mockRejectedValue(new Error('offline'))
+      renderWithProviders(
+        <ProjectPicker open={true} onOpenChange={vi.fn()} anchorRect={rect(100, 50)} onSelect={vi.fn()} />
+      )
+      expect(await screen.findByText('Browse')).toBeInTheDocument()
+      // Empty recents means the panel opens on Browse, which still works.
+      expect(screen.getByPlaceholderText('/path/to/project')).toBeInTheDocument()
     })
   })
 })

@@ -1501,9 +1501,13 @@
     "projectPicker": {
       "back": "返回",
       "browse": "浏览",
+      "choose_folder": "选择文件夹…",
+      "native_dialog_failed": "无法打开文件夹窗口 — 请从下方列表中选择文件夹。",
       "no_matching_projects": "无匹配的项目",
       "no_recent_projects": "无最近项目",
+      "no_recent_projects_native": "还没有最近的项目 — 请选择一个文件夹开始。",
       "no_subdirectories": "无子目录",
+      "open_a_project_folder": "打开项目文件夹",
       "path_to_project": "/path/to/project",
       "project_directory_path": "项目目录路径",
       "recent": "最近",
@@ -1511,7 +1515,8 @@
       "search_recent_projects": "搜索最近项目",
       "search_recent_projects_2": "搜索最近项目…",
       "select": "选择",
-      "subdirectories": "子目录"
+      "subdirectories": "子目录",
+      "waiting_for_dialog": "已打开文件夹窗口 — 请在其中选择文件夹"
     },
     "publishHub": {
       "back": "返回",

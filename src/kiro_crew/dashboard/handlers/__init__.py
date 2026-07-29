@@ -117,6 +117,8 @@ from kiro_crew.dashboard.handlers.files import (  # noqa: E402, F401
     api_file_search,
     api_file_watch,
     api_file_write,
+    api_native_dir_dialog,
+    api_native_dir_dialog_probe,
     api_outbox_download,
     api_outbox_list,
     api_outbox_notify,

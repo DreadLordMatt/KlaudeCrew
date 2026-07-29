@@ -6,8 +6,6 @@ import asyncio
 import json
 import logging
 import re
-import subprocess
-import sys
 import tempfile
 import zipfile
 from datetime import datetime
@@ -17,6 +15,7 @@ from aiohttp import web
 
 from kiro_crew.artifacts import get_default_store
 from kiro_crew.config.loader import KiroCrewConfig, config_dir
+from kiro_crew.dashboard import native_dialog
 from kiro_crew.dashboard.handlers.files import _ZIP_CONTAINER_EXTS, _content_matches_ext
 from kiro_crew.executors import run_in_embed_pool
 from kiro_crew.knowledge.agent_fetch import fetch_url_content
@@ -592,34 +591,27 @@ async def list_sources(request: web.Request) -> web.Response:
 
 
 # Max wall-clock the native folder dialog may stay open before we give up.
-_FOLDER_DIALOG_TIMEOUT = 180  # seconds
-
-
 def _folder_picker_available(request: web.Request) -> bool:
-    """The native folder picker is offered only on macOS (via osascript) and
-    only when the dashboard is local -- a dialog on a remote gateway would open
-    on the wrong screen."""
-    return sys.platform == "darwin" and bool(request.app.get("local_only", False))
+    """The native folder picker is offered only when the host has a chooser to
+    run (see ``native_dialog.detect_backend``) and only when the dashboard is
+    local -- a dialog on a remote gateway would open on the wrong screen."""
+    return native_dialog.is_available() and bool(request.app.get("local_only", False))
 
 
 def _run_folder_dialog() -> str | None:
-    """Open the macOS native folder chooser (blocking) and return the selected
+    """Open the host's native folder chooser (blocking) and return the selected
     absolute path, or None if the user cancelled or it failed to launch. Meant
-    to run off the event loop via an executor."""
-    cmd = [
-        "osascript", "-e",
-        'POSIX path of (choose folder with prompt '
-        '"Select a folder to add to your knowledge base")',
-    ]
+    to run off the event loop via an executor.
+
+    Thin adapter over the shared ``native_dialog`` module, which owns the
+    per-platform argv and the cancel-versus-failure reading. This surface feeds
+    the path back into a text field either way, so a failure collapses to the
+    same None as a cancel here.
+    """
     try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            cmd, capture_output=True, text=True, timeout=_FOLDER_DIALOG_TIMEOUT,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return native_dialog.choose_directory(prompt=native_dialog.PROMPT_KNOWLEDGE)
+    except native_dialog.DialogUnavailable:
         return None
-    # osascript exits non-zero (and prints nothing) when the user cancels.
-    path = proc.stdout.strip()
-    return path if proc.returncode == 0 and path else None
 
 
 async def pick_folder(request: web.Request) -> web.Response:

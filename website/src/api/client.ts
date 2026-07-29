@@ -883,6 +883,15 @@ export const api = {
     }>,
   recentProjects: () => fetch('/api/recent-projects').then(j) as Promise<{ dirs: string[] }>,
   browseDirs: (path?: string) => fetch('/api/browse-dirs' + (path ? '?path=' + encodeURIComponent(path) : '')).then(j) as Promise<{ path: string; parent: string; dirs: { name: string; path: string }[] }>,
+  // Native folder dialog (opens on the machine running the gateway). The probe
+  // keeps the affordance hidden where it cannot work — remote or headless hosts.
+  // Takes no arguments: the gateway derives where the chooser opens from its own
+  // recent-projects file, so no request data reaches the spawned dialog.
+  // Non-2xx (403 remote / 409 busy / 503 unavailable) throws ApiError, so the
+  // caller's catch is the fall-back-to-browser path.
+  nativeDirDialogAvailable: () => fetch('/api/native-dir-dialog').then(j) as Promise<{ available: boolean }>,
+  openNativeDirDialog: () =>
+    post('/api/native-dir-dialog', {}).then(j) as Promise<{ path?: string; cancelled?: boolean }>,
   browseFiles: (path?: string) => fetch('/api/browse-files' + (path ? '?path=' + encodeURIComponent(path) : '')).then(j) as Promise<{ path: string; parent: string; dirs: { name: string; path: string; mtime: number }[]; files: { name: string; path: string; mtime: number }[] }>,
   workspaces: () => fetch('/api/workspaces').then(j),
   createWorkspace: (body: object) => post('/api/workspaces', body).then(j),
