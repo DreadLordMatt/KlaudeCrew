@@ -17,6 +17,7 @@ from kiro_crew.agent_discovery import (
 from kiro_crew.config.loader import KiroCrewConfig, config_dir
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.security import is_sensitive_path
+from kiro_crew.skill_sources import skill_source_roots
 from kiro_crew.skills import skills_dir
 
 if TYPE_CHECKING:
@@ -593,11 +594,14 @@ def _resolve_skill_root(name: str, state: DashboardState) -> Path | None:
         if not rel or ".." in rel or rel.startswith("/") or rel.startswith("~"):
             return None
         # Root precedence must match SkillsLoader.load_skill(): kirocrew ->
-        # user extra_paths -> edition skill roots (lowest). Otherwise the tree
-        # endpoint could display a different directory than load_skill() reads.
+        # user extra_paths -> linked skill repos -> edition skill roots
+        # (lowest). Otherwise the tree endpoint could display a different
+        # directory than load_skill() reads.
         roots = [skills_dir()]
         try:
-            roots.extend(Path(p).expanduser() for p in KiroCrewConfig.load().skills.extra_paths)
+            cfg = KiroCrewConfig.load()
+            roots.extend(Path(p).expanduser() for p in cfg.skills.extra_paths)
+            roots.extend(skill_source_roots(list(cfg.skills.sources)))
         except Exception:
             logger.debug("failed to load extra skill paths from config", exc_info=True)
         roots.extend(_edition_skill_roots())

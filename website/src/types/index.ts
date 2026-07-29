@@ -123,6 +123,35 @@ export interface DiscoverSkillsResponse {
   providers: string[]
 }
 
+/**
+ * One linked skill repository (`skills.sources`) as returned by
+ * GET /api/skills/-/sources.
+ *
+ * The mirror is read-only and lower precedence than local skills, so
+ * `skill_count` is how many shared skills this repo currently contributes —
+ * a locally authored skill of the same name still wins.
+ */
+export interface SkillSource {
+  name: string
+  repo: string
+  branch: string
+  /** Path within the repo holding the skills; '' means the repo root. */
+  subdir: string
+  enabled: boolean
+  /** Whether a mirror exists on disk and resolves to a readable directory. */
+  cloned: boolean
+  /** Full commit SHA of the mirrored tip ('' when never synced). */
+  head: string
+  skill_count: number
+  /** Unix seconds of the last sync attempt (0 = never). */
+  synced_at: number
+  /** Unix seconds of the last SUCCESSFUL sync (0 = never). */
+  last_success_at: number
+  /** Outcome of the last attempt; null when no attempt is on record. */
+  last_ok: boolean | null
+  last_error: string
+}
+
 /** Response from GET /api/skills/-/discover/preview */
 export interface DiscoverSkillPreview {
   description: string

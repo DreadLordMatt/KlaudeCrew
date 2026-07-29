@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { SettingsSection, SettingsCard, SettingsToggle } from '../../components/settings'
 import { api } from '../../api/client'
+import { SkillSourcesSection } from './SkillSourcesSection'
 
 import { i18nT } from '../../i18n/t'
 type SkillsCfg = { auto_create_from_sessions?: boolean; approval_required?: boolean }
@@ -50,6 +51,7 @@ export function SkillsPanel() {
   const disabled = cfgQ.isLoading || patchMut.isPending
 
   return (
+    <>
     <SettingsSection title={i18nT('pages.settings.skillsPanel.skills')}>
       <SettingsCard>
         <SettingsToggle
@@ -69,5 +71,7 @@ export function SkillsPanel() {
       </SettingsCard>
       {saveError && <p className="text-[12px] text-danger mt-2">{saveError}</p>}
     </SettingsSection>
+    <SkillSourcesSection />
+    </>
   )
 }

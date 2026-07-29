@@ -47,6 +47,7 @@ from kiro_crew.dashboard.crash_dump_store import (
     open_dump_file,
     rotate_dumps,
 )
+from kiro_crew.dashboard.handlers._shared import _get_skills
 from kiro_crew.dashboard.handlers.artifacts import (
     api_artifact_comments,
     api_artifact_delete,
@@ -113,6 +114,12 @@ from kiro_crew.dashboard.handlers.mcp_discover import (
     api_mcp_discover_detail,
     api_mcp_discover_install,
 )
+from kiro_crew.dashboard.handlers.skill_sources import (
+    api_skill_sources,
+    api_skill_sources_add,
+    api_skill_sources_delete,
+    api_skill_sources_sync,
+)
 from kiro_crew.dashboard.handlers.source_providers import (
     api_issue_source,
     api_pull_request_auto_merge,
@@ -170,6 +177,7 @@ from kiro_crew.platform import (
 from kiro_crew.safety_override import safety_override
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
+from kiro_crew.skill_sources import sync_skill_sources
 from kiro_crew.skills import SkillsLoader
 from kiro_crew.suggestions import api_suggestions
 from kiro_crew.tips import api_tips_feedback, api_tips_next, api_tips_status
@@ -1591,6 +1599,12 @@ async def start_dashboard(
     app.router.add_post("/api/skills/-/pending/{slug}/approve", handlers.api_skill_pending_approve)
     app.router.add_post("/api/skills/-/pending/{slug}/dismiss", handlers.api_skill_pending_dismiss)
     app.router.add_post("/api/skills/-/pin", handlers.api_skill_pin)
+    # Linked skill repos (skills.sources). Under the ``-`` sentinel prefix and
+    # before the catch-all so ``sources`` is not read as a skill name.
+    app.router.add_get("/api/skills/-/sources", api_skill_sources)
+    app.router.add_post("/api/skills/-/sources", api_skill_sources_add)
+    app.router.add_post("/api/skills/-/sources/{name}/sync", api_skill_sources_sync)
+    app.router.add_delete("/api/skills/-/sources/{name}", api_skill_sources_delete)
     app.router.add_get("/api/skills/{name:.+}/-/tree", handlers.api_skill_tree)
     app.router.add_get("/api/skills/{name:.+}/-/file", handlers.api_skill_file)
     app.router.add_get("/api/skills/{name:.+}", handlers.api_skill_detail)
@@ -2129,6 +2143,54 @@ async def start_dashboard(
         task.add_done_callback(lambda t: app_.get("_bg_tasks", set()).discard(t))
 
     app.on_startup.append(_ensure_playwright)
+
+    async def _sync_skill_sources(app_: web.Application) -> None:
+        """Refresh linked skill repos in the background at startup.
+
+        Backgrounded because each source is a network git fetch and startup must
+        not block on a slow or unreachable remote. Best-effort by design: on
+        failure the previously-synced mirror stays mounted (stale beats missing)
+        and the per-source error is recorded in the sync ledger for the Skills
+        settings panel to surface. Skips entirely when nothing is configured, so
+        this costs nothing for the default install.
+        """
+
+        async def _bg_sync() -> None:
+            try:
+                cfg = await asyncio.to_thread(KiroCrewConfig.load)
+                sources = list(cfg.skills.sources)
+                if not sources:
+                    return
+                loader = _get_skills(state)
+                # Mount what is ALREADY on disk before syncing. A batch sync is
+                # slow — up to 60s per source, and longest exactly when a remote
+                # is unreachable — and loader construction deliberately skips the
+                # linked-root scan, so reloading only afterwards left a perfectly
+                # good mirror unmounted for that entire window on every boot.
+                await asyncio.to_thread(loader.reload_extra_paths, cfg)
+                results = await sync_skill_sources(sources)
+                failed = [r.name for r in results if not r.ok]
+                if failed:
+                    logger.warning(
+                        "skill-sources: startup sync failed for %s (previously synced "
+                        "skills remain mounted)",
+                        ", ".join(failed),
+                    )
+                # Reload again so anything the sync added or changed is picked up.
+                # Re-read config instead of reusing the snapshot taken before the
+                # sync: a batch sync is slow, so the user may have linked or
+                # unlinked something while it ran, and mounting from the stale
+                # snapshot would resurrect a source they just removed.
+                fresh = await asyncio.to_thread(KiroCrewConfig.load)
+                await asyncio.to_thread(loader.reload_extra_paths, fresh)
+            except Exception as exc:
+                logger.debug("skill-sources: startup sync skipped: %s", exc)
+
+        task = asyncio.create_task(_bg_sync())
+        app_.setdefault("_bg_tasks", set()).add(task)
+        task.add_done_callback(lambda t: app_.get("_bg_tasks", set()).discard(t))
+
+    app.on_startup.append(_sync_skill_sources)
 
     async def _hooks_shutdown(app_: web.Application) -> None:
         await on_gateway_shutdown()

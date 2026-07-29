@@ -1023,6 +1023,17 @@ export const api = {
   approvePendingSkill: (slug: string) => post('/api/skills/-/pending/' + encodeURIComponent(slug) + '/approve', {}).then(j),
   dismissPendingSkill: (slug: string) => post('/api/skills/-/pending/' + encodeURIComponent(slug) + '/dismiss', {}).then(j),
   pinSkill: (name: string, pinned: boolean) => post('/api/skills/-/pin', { name, pinned }).then(j),
+
+  // Linked skill repos (skills.sources) — mirrored git repos mounted read-only
+  skillSources: () => fetch('/api/skills/-/sources').then(j) as Promise<{ sources: import('../types').SkillSource[] }>,
+  /** Link a repo and sync it inline. Rejects with ApiError(400) when the sync fails. */
+  addSkillSource: (body: { name: string; repo: string; branch?: string; subdir?: string }) =>
+    post('/api/skills/-/sources', body).then(j) as Promise<{ ok: boolean; source: import('../types').SkillSource }>,
+  /** Resolves with ok:false on a 502 sync failure; `message` is the human-readable reason. */
+  syncSkillSource: (name: string) =>
+    post('/api/skills/-/sources/' + encodeURIComponent(name) + '/sync', {}).then(j) as Promise<{ ok: boolean; message?: string; error?: string; result: { message?: string; error?: string; action?: string }; source: import('../types').SkillSource }>,
+  deleteSkillSource: (name: string) =>
+    del('/api/skills/-/sources/' + encodeURIComponent(name)).then(j) as Promise<{ ok: boolean; mirror_removed: boolean }>,
   /** Multi-provider skill discovery (skills.sh, etc.) */
   discoverSkills: (query: string, opts?: { provider?: string; limit?: number }) =>
     get(`/api/skills/-/discover?q=${encodeURIComponent(query)}${opts?.provider ? `&provider=${opts.provider}` : ''}${opts?.limit ? `&limit=${opts.limit}` : ''}`).then(j) as Promise<import('../types').DiscoverSkillsResponse>,

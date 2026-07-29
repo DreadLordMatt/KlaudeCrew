@@ -1727,6 +1727,49 @@ class ExternalRegistryConfig:
 
 
 @dataclass
+class SkillSourceConfig:
+    """A linked skill repository — a git remote whose skills are mirrored locally.
+
+    The mirror lives at ``$KIROCREW_HOME/skill-sources/<name>/`` and is mounted
+    as a read-only skills root, so shared team skills load alongside local ones
+    without being copied into ``skills/``. See ``kiro_crew.skill_sources``.
+    """
+
+    name: str = field(
+        default="",
+        metadata=_meta(
+            "Name",
+            "Short identifier for this source (lowercase kebab-case). Also the "
+            "mirror directory name under skill-sources/.",
+        ),
+    )
+    repo: str = field(
+        default="",
+        metadata=_meta("Repo", "Git URL of the repo containing SKILL.md trees (https or ssh)."),
+    )
+    branch: str = field(
+        default="main",
+        metadata=_meta("Branch", "Git branch to mirror."),
+    )
+    subdir: str = field(
+        default="",
+        metadata=_meta(
+            "Subdirectory",
+            "Path within the repo holding the skills (e.g. 'skills'). Empty means "
+            "the repo root.",
+        ),
+    )
+    enabled: bool = field(
+        default=True,
+        metadata=_meta(
+            "Enabled",
+            "When false the source is neither synced nor mounted, without losing "
+            "its configuration.",
+        ),
+    )
+
+
+@dataclass
 class SkillsConfig:
     max_triggered: int = field(
         default=3,
@@ -1857,6 +1900,15 @@ class SkillsConfig:
             "Additional directories to scan for skills. Supports ~ expansion. "
             "Skills from extra_paths are read-only (trigger matching + loading). "
             "Local ~/.kiro/crew/skills/ takes precedence for duplicate names.",
+        ),
+    )
+    sources: list[SkillSourceConfig] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Linked Skill Repos",
+            "Git repos whose skills are mirrored into skill-sources/ and mounted "
+            "read-only, so a team shares skills through a repo instead of copying "
+            "files. Each entry: {name, repo, branch, subdir, enabled}.",
         ),
     )
 
@@ -4337,6 +4389,17 @@ class KiroCrewConfig:
                 ),
                 extra_paths=[
                     p for p in _safe_list(skills_data.get("extra_paths")) if isinstance(p, str)
+                ],
+                sources=[
+                    SkillSourceConfig(
+                        name=str(s.get("name", "")),
+                        repo=str(s.get("repo", "")),
+                        branch=str(s.get("branch", "main") or "main"),
+                        subdir=str(s.get("subdir", "")),
+                        enabled=bool(s.get("enabled", True)),
+                    )
+                    for s in _safe_list(skills_data.get("sources"))
+                    if isinstance(s, dict) and s.get("name") and s.get("repo")
                 ],
             ),
             slack_channels={

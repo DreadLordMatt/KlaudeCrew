@@ -84,3 +84,54 @@ overwrite older ones (mtime-based). User-created skills in
 `~/.kiro/crew/skills/` persist as long as they don't share a name with a
 project-level or built-in skill — if they do, the source version wins when
 it's newer.
+
+## Linked Skill Repos (share skills across a team)
+
+Link a git repo and KiroCrew mirrors its skills into this instance. Everyone who
+links the same repo gets the same skills, so one person's skill becomes a team
+standard instead of a file people copy around.
+
+Settings → Skills → **Linked skill repos**: enter the repo URL, a short
+kebab-case name, the branch, and (optionally) the subdirectory holding the
+skills. Linking clones immediately and reports how many skills it found, so a
+wrong URL, branch, or subdirectory fails right there instead of silently
+producing an empty skill set.
+
+```json
+{
+  "skills": {
+    "sources": [
+      {
+        "name": "team-skills",
+        "repo": "https://github.com/your-org/team-skills.git",
+        "branch": "main",
+        "subdir": "skills",
+        "enabled": true
+      }
+    ]
+  }
+}
+```
+
+How it behaves:
+
+- **Mirrored, not copied.** The clone lives at
+  `$KIROCREW_HOME/skill-sources/<name>/` and is mounted as an additional
+  read-only skills root. Shared skills are *lower* precedence than your own, so
+  a skill you wrote locally with the same name always wins and a sync can never
+  overwrite your work.
+- **A sync is a mirror update, not a merge.** Syncing fetches and hard-resets the
+  mirror, which is how an upstream skill *deletion* propagates. Any local edit
+  inside the mirror is discarded — edit shared skills in the repo, not here.
+- **Failures keep the last good state.** If a sync fails, the previously synced
+  commit stays mounted and the row reports the failure plus the commit it is
+  still serving. Stale, but never silent.
+- **When it syncs.** On link, on demand via the Sync button, and in the
+  background at gateway startup.
+- **Auth and host trust.** The clone uses the gateway host's existing git
+  credentials (SSH agent or credential helper), so a private team repo works if
+  `git clone` works for you on that machine. The host must be a well-known public
+  forge or a host you configured as an app registry.
+
+Only skills are shared. Memory, lessons, and personal settings are never part of
+a linked repo.

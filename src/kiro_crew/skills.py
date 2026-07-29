@@ -25,6 +25,7 @@ from kiro_crew.security import (
     redact_exfiltration_urls,
 )
 from kiro_crew.sel import sel
+from kiro_crew.skill_sources import is_within_root, skill_source_roots
 from kiro_crew.skill_usage import SKILL_USAGE_FILENAME, SkillUsageLedger
 from kiro_crew.skills_script_validator import validate_scripts
 
@@ -32,6 +33,32 @@ logger = logging.getLogger(__name__)
 
 
 SKILLS_DIR_NAME = "skills"
+
+# Traversal budget (visited directory entries) for a skills root contributed by a
+# linked repo (``skills.sources``). The content is an arbitrary third-party
+# checkout and the walk runs on the gateway event loop, so it is capped; the
+# managed local root is not.
+#
+# Sizing: linked roots are also walked with ``prune_at_skill=True``, so the cost
+# tracks the number of skill DIRECTORIES plus the non-skill scaffolding above
+# them, not the repo's file count — a skill bundle with hundreds of files is one
+# visit. 2,000 entries is therefore roughly two orders of magnitude above a real
+# skills repo (github.com/anthropics/skills: 17 skills) while keeping the
+# worst-case on-loop walk small. It is a stall guard, not a product limit; if a
+# legitimate repo ever hits it, raise it rather than working around it.
+_LINKED_ROOT_MAX_ENTRIES = 2_000
+
+# Read cap for a SKILL.md body coming from a linked repo. The body is injected
+# into session context, where it is budget-capped far below this anyway, so the
+# ceiling only exists to stop an oversized third-party file from being read
+# whole on the event loop. Managed roots are uncapped, matching prior behavior.
+_LINKED_SKILL_MAX_BYTES = 1_000_000
+
+# Frontmatter lives at the top of the file, so parsing only ever needs the head.
+# Capped for EVERY root (not just linked ones): reading a multi-megabyte body to
+# extract a handful of header lines is wasted work on a per-message path, and no
+# frontmatter is lost by stopping here.
+_FRONTMATTER_MAX_BYTES = 64_000
 _MIN_TRIGGER_OVERLAP = 0.7
 
 
@@ -245,7 +272,50 @@ def _project_skills_dir() -> Path | None:
     return None
 
 
-def _iter_skill_files(base: Path) -> list[tuple[str, Path]]:
+def _read_text_if_present(path: Path, *, max_bytes: int | None = None) -> str | None:
+    """Read *path* as UTF-8, returning None if it is absent or unreadable.
+
+    Collapses the ``exists()`` then ``read_text()`` TOCTOU window into one
+    operation. A separate writer — a linked-repo sync replacing files, or an
+    agent deleting a skill mid-turn — can remove the file between the two, and
+    the resulting ``FileNotFoundError`` would propagate out of a chat turn.
+
+    ``max_bytes`` reads at most that many characters instead of the whole file.
+    These reads happen on the gateway event loop (discovery and ``load_skill``
+    run inline on a chat turn), so content whose size KiroCrew does not control
+    must not be read unbounded.
+
+    The bounded path uses TEXT mode, exactly like the unbounded one. That is
+    load-bearing rather than incidental: text mode applies universal-newline
+    translation, so a CRLF checkout still yields ``\\n`` and the frontmatter
+    regex keeps matching. Reading bytes and decoding by hand skips that
+    translation and silently strips every skill's parsed metadata on Windows.
+    Text mode also keeps decoding strict, so genuinely invalid UTF-8 still
+    reports as unreadable, and makes a partial multi-byte character impossible.
+    The cap is therefore characters, not bytes — a bound on work, not an exact
+    byte budget.
+    """
+    try:
+        if max_bytes is None:
+            return path.read_text(encoding="utf-8")
+        with path.open("r", encoding="utf-8") as fh:
+            text = fh.read(max_bytes + 1)
+        if len(text) > max_bytes:
+            logger.warning(
+                "skills: %s exceeds the %d-character read cap; using the first %d",
+                path,
+                max_bytes,
+                max_bytes,
+            )
+            text = text[:max_bytes]
+        return text
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _iter_skill_files(
+    base: Path, *, max_entries: int | None = None, prune_at_skill: bool = False
+) -> list[tuple[str, Path]]:
     """Recursively find all SKILL.md files under *base*.
 
     Returns ``(relative_name, skill_file_path)`` pairs sorted by name.
@@ -253,12 +323,30 @@ def _iter_skill_files(base: Path) -> list[tuple[str, Path]]:
 
     Uses os.walk with followlinks=True because Python 3.12's Path.rglob
     does not follow symlinks.
+
+    ``max_entries`` bounds the traversal to that many visited directory entries,
+    and ``prune_at_skill`` stops descending once a directory holds a ``SKILL.md``.
+    Both exist for roots whose size KiroCrew does not control — a linked skill
+    repo (``skills.sources``) is an arbitrary third-party checkout, and callers
+    such as ``get_triggered_skills()`` run on the gateway event loop, so an
+    unbounded walk of a large repo would stall the loop and the liveness
+    heartbeat.
+
+    ``prune_at_skill`` is what makes the walk scale with the number of SKILLS
+    rather than the size of the repo: a skill bundle carrying hundreds of scripts
+    and assets costs one directory visit instead of hundreds, because nothing
+    below a ``SKILL.md`` can define another skill. It is off for the managed
+    local root, which is allowed to keep its existing (unbounded, unpruned)
+    behavior. Once the budget is exhausted the walk stops and returns what it
+    found; skills beyond the cap are simply not discovered rather than the whole
+    load failing.
     """
     results: list[tuple[str, Path]] = []
     if not base.exists():
         return results
     real_base = os.path.realpath(base)
     seen_real: set[str] = set()
+    visited = 0
     for dirpath, _dirs, files in os.walk(base, followlinks=True):
         real = os.path.realpath(dirpath)
         if real in seen_real:
@@ -269,6 +357,22 @@ def _iter_skill_files(base: Path) -> list[tuple[str, Path]]:
         # archived / pending / hub-state skills are never enumerated as live,
         # trigger-matchable skills. Mutating ``_dirs`` in place prunes the walk.
         _dirs[:] = [d for d in _dirs if not d.startswith(".")]
+        is_skill_dir = "SKILL.md" in files
+        if prune_at_skill and is_skill_dir:
+            _dirs.clear()
+        if max_entries is not None:
+            # Count directories plus, for a non-skill directory, its files. A
+            # skill directory's own payload is not counted when pruning, since
+            # the walk does not descend into it.
+            visited += len(_dirs) + (0 if (prune_at_skill and is_skill_dir) else len(files))
+            if visited > max_entries:
+                logger.warning(
+                    "skills: traversal cap (%d entries) reached under %s; "
+                    "skills beyond the cap are not loaded",
+                    max_entries,
+                    base,
+                )
+                break
         # Path containment: ensure we stay within the skill base directory
         try:
             Path(real).relative_to(real_base)
@@ -278,7 +382,7 @@ def _iter_skill_files(base: Path) -> list[tuple[str, Path]]:
         if is_sensitive_path(real):
             _dirs.clear()  # never traverse into credential stores
             continue
-        if "SKILL.md" in files:
+        if is_skill_dir:
             skill_file = Path(dirpath) / "SKILL.md"
             if is_sensitive_path(os.path.realpath(str(skill_file))):
                 continue
@@ -408,6 +512,55 @@ class SkillsLoader:
         # config and refreshed when the loader is rebuilt (per gateway).
         self._max_triggered = cfg.skills.max_triggered
         self._extra_paths: list[Path] = []
+        # Subset of _extra_paths that came from a linked repo rather than from
+        # operator-configured extra_paths / edition roots. Only these are
+        # precomputed rather than walked (see _scan_linked_roots).
+        self._linked_roots: set[Path] = set()
+        # Precomputed (name, SKILL.md) pairs per linked root, so discovery from
+        # the event loop never walks third-party content.
+        self._linked_skill_files: dict[Path, list[tuple[str, Path]]] = {}
+        # scan_linked=False: __init__ can run on the event loop (a handler
+        # touching _get_skills builds the standalone loader lazily), and scanning
+        # a linked mirror there would put third-party filesystem work back on the
+        # loop. Linked roots stay empty until the first reload_extra_paths, which
+        # every caller runs in a worker thread — the gateway's startup sync does
+        # so unconditionally, so this self-heals within seconds of boot.
+        self._resolve_extra_paths(cfg, scan_linked=False)
+
+        # Persistent usage ledger for hotness-ranked lazy skill injection.
+        # Co-located with the skills root's parent (the KiroCrew home) so it
+        # travels with runtime state. Best-effort: a failure here must not break
+        # skill loading — ranking then falls back to recency/unweighted order.
+        self._usage: SkillUsageLedger | None
+        try:
+            self._usage = SkillUsageLedger(self._dir.parent / SKILL_USAGE_FILENAME)
+        except Exception:  # pragma: no cover — ledger is best-effort telemetry
+            logger.warning(
+                "skill-usage: ledger init failed; ranking falls back to unweighted",
+                exc_info=True,
+            )
+            self._usage = None
+
+    def _resolve_extra_paths(self, cfg: KiroCrewConfig, *, scan_linked: bool = True) -> None:
+        """Rebuild ``self._extra_paths`` from *cfg*.
+
+        Precedence, highest first: the local skills root (not in this list),
+        operator-configured ``skills.extra_paths``, linked skill repos
+        (``skills.sources``), then edition-contributed roots. ``_iter_uncached``
+        keeps the first occurrence of a duplicate name, so a locally authored
+        skill always wins over a shared one.
+
+        Split out of ``__init__`` so :meth:`reload_extra_paths` can re-run it on
+        a live loader — linking a repo has to take effect without a gateway
+        restart, and the loader is a long-lived singleton.
+
+        When ``scan_linked`` is true this also PRECOMPUTES the skill list for
+        linked roots (see ``_scan_linked_roots``), which is why every reload
+        caller runs it in a worker thread. ``__init__`` passes false so loader
+        construction never walks third-party content.
+        """
+        self._extra_paths = []
+        self._linked_roots = set()
         for p in cfg.skills.extra_paths:
             resolved = Path(p).expanduser().resolve()
             if is_sensitive_path(str(resolved)):
@@ -416,6 +569,24 @@ class SkillsLoader:
                 self._extra_paths.append(resolved)
             else:
                 logger.debug("Extra skill path does not exist: %s", p)
+
+        # Linked skill repos (config.skills.sources): each mirror under
+        # $KIROCREW_HOME/skill-sources/<name>/ is mounted like a configured
+        # extra path — read-only, lower precedence than the local skills root,
+        # so a team-shared skill never shadows a locally authored one of the
+        # same name. Placed after extra_paths so an operator's explicit path
+        # also wins over a repo.
+        try:
+            source_roots = skill_source_roots(list(cfg.skills.sources))
+        except Exception:
+            # A broken/unavailable source list must never stop local skills from
+            # loading — this runs on every loader construction.
+            logger.warning("skill-sources: could not resolve linked repo roots", exc_info=True)
+            source_roots = []
+        for source_root in source_roots:
+            if source_root not in self._extra_paths:
+                self._extra_paths.append(source_root)
+                self._linked_roots.add(source_root)
 
         # Edition-contributed skill paths (CPP seam). A companion returns extra
         # SKILL.md source roots via McpToolingProvider.extra_skills(); the public
@@ -443,19 +614,57 @@ class SkillsLoader:
             else:
                 logger.debug("Edition skill path does not exist: %s", edition_path)
 
-        # Persistent usage ledger for hotness-ranked lazy skill injection.
-        # Co-located with the skills root's parent (the KiroCrew home) so it
-        # travels with runtime state. Best-effort: a failure here must not break
-        # skill loading — ranking then falls back to recency/unweighted order.
-        self._usage: SkillUsageLedger | None
-        try:
-            self._usage = SkillUsageLedger(self._dir.parent / SKILL_USAGE_FILENAME)
-        except Exception:  # pragma: no cover — ledger is best-effort telemetry
-            logger.warning(
-                "skill-usage: ledger init failed; ranking falls back to unweighted",
-                exc_info=True,
-            )
-            self._usage = None
+        if scan_linked:
+            self._scan_linked_roots()
+
+    def _scan_linked_roots(self) -> None:
+        """Precompute the skill list for each linked root.
+
+        Linked repos are third-party content of unknown size, and the discovery
+        callers (``get_triggered_skills`` on every message, ``list_skills``) are
+        synchronous and run on the gateway event loop. Rather than walk that
+        content there — even bounded and pruned — the walk happens once here, and
+        ``_iter_uncached`` reads the result. Linked roots therefore contribute
+        ZERO filesystem traversal to any event-loop caller.
+
+        Correctness of caching it: a mirror is written only by
+        ``kiro_crew.skill_sources``, and every one of its write paths (link,
+        sync, unlink, startup sync) calls :meth:`reload_extra_paths`, which
+        re-runs this scan. There is no other writer whose changes could be
+        missed, which is what makes precomputing safe here but not for the local
+        skills root (user- and agent-writable, so it keeps its TTL re-walk).
+
+        Runs in whatever thread ``_resolve_extra_paths`` was called on — a worker
+        thread for every live-reload path, and gateway construction for the
+        initial build.
+        """
+        scanned: dict[Path, list[tuple[str, Path]]] = {}
+        for root in self._linked_roots:
+            try:
+                scanned[root] = _iter_skill_files(
+                    root,
+                    max_entries=_LINKED_ROOT_MAX_ENTRIES,
+                    prune_at_skill=True,
+                )
+            except OSError:
+                # A mirror that vanished or became unreadable contributes no
+                # skills rather than breaking discovery for every other root.
+                logger.warning("skills: could not scan linked root %s", root, exc_info=True)
+                scanned[root] = []
+        self._linked_skill_files = scanned
+
+    def reload_extra_paths(self, config: KiroCrewConfig | None = None) -> None:
+        """Re-resolve extra skill roots on a LIVE loader and drop cached state.
+
+        Called after ``skills.sources`` changes (link / sync / unlink) so newly
+        mirrored skills are discoverable immediately. Without this, the loader —
+        one long-lived instance per gateway — would keep the roots it resolved at
+        construction and the freshly cloned skills would not appear until a
+        restart.
+        """
+        cfg = config or KiroCrewConfig.load()
+        self._resolve_extra_paths(cfg)
+        self._invalidate_iter_cache()
 
     def _iter(self) -> list[tuple[str, Path]]:
         """Return all ``(name, skill_file)`` pairs, TTL-cached.
@@ -473,17 +682,55 @@ class SkillsLoader:
         return results
 
     def _iter_uncached(self) -> list[tuple[str, Path]]:
-        """Walk the skills dir + extra paths once (no caching)."""
+        """Walk the skills dir + extra paths once (no caching).
+
+        Roots contributed by a linked skill repo are NOT walked here: their
+        content is an arbitrary third-party checkout and this method runs on the
+        gateway event loop, so their skill list is precomputed off-loop by
+        ``_scan_linked_roots`` and merely read back. Operator-configured
+        ``extra_paths`` and the local root are still walked, unbounded, matching
+        the pre-existing behavior — those are paths the operator chose
+        deliberately and are the roots that can change without going through
+        this module.
+        """
         results = _iter_skill_files(self._dir)
         seen = {name for name, _ in results}
         for root in self._extra_paths:
-            for name, skill_file in _iter_skill_files(root):
+            is_linked = root in self._linked_roots
+            root_real = os.path.realpath(root) if is_linked else ""
+            # Linked roots are read from the precomputed scan; only managed roots
+            # are walked here, and this method runs on the event loop.
+            entries = (
+                self._linked_skill_files.get(root, [])
+                if is_linked
+                else _iter_skill_files(root)
+            )
+            for name, skill_file in entries:
                 if name in seen:
                     continue
                 # Route through hooks validation (resolves symlinks + sensitive
                 # check) so files read later during trigger matching are vetted.
                 resolved = validate_file_path(str(skill_file))
                 if resolved is None:
+                    continue
+                if is_linked and not is_within_root(resolved, root_real):
+                    # A linked repo is third-party content and CAN carry
+                    # symlinks. ``_iter_skill_files`` already prunes a symlinked
+                    # *directory* that resolves outside its base, but a symlinked
+                    # SKILL.md *file* is not covered by that check — a committed
+                    # ``leak/SKILL.md -> ../../../config.json`` would be loaded
+                    # as skill content, turning skill discovery into an
+                    # arbitrary-file read. Sensitivity classification is not
+                    # enough on its own: plenty of readable-but-private files are
+                    # not classified sensitive. So for linked roots the resolved
+                    # file must also stay inside the mirror. Scoped to linked
+                    # roots so the local root and operator-configured
+                    # ``extra_paths`` behave exactly as they did before.
+                    logger.warning(
+                        "skills: skipping %r from linked root %s — resolves outside the mirror",
+                        name,
+                        root,
+                    )
                     continue
                 results.append((name, Path(resolved)))
                 seen.add(name)
@@ -539,24 +786,55 @@ class SkillsLoader:
         return bool(name) and ".." not in name and "\\" not in name
 
     def load_skill(self, name: str) -> str | None:
-        """Load a single skill's content by name (supports nested paths)."""
+        """Load a single skill's content by name (supports nested paths).
+
+        Reads are tolerant of the file disappearing between the existence check
+        and the read. That race is real for any root a separate writer can
+        mutate — most sharply a linked repo, where a concurrent sync replaces
+        files via unlink+create, but also the local root when an agent removes a
+        skill mid-turn. The correct behavior is to report the skill as
+        unavailable, not to raise ``FileNotFoundError`` out of a chat turn or API
+        request.
+        """
         if not self._safe_name(name):
             return None
         _t0 = time.monotonic()
         skill_file = self._dir / name / "SKILL.md"
-        if skill_file.exists():
-            content = skill_file.read_text(encoding="utf-8")
+        content = _read_text_if_present(skill_file)
+        if content is not None:
             self._emit_lazy_load_metric(_t0, hit=True)
             return content
         # Check extra paths
         for extra in self._extra_paths:
             skill_file = extra / name / "SKILL.md"
-            if skill_file.exists():
-                resolved = validate_file_path(str(skill_file))
-                if resolved is None:
-                    logger.warning("Refusing to load skill from sensitive path: %s", skill_file)
+            if not skill_file.exists():
+                continue
+            resolved = validate_file_path(str(skill_file))
+            if resolved is None:
+                logger.warning("Refusing to load skill from sensitive path: %s", skill_file)
+                continue
+            if extra in self._linked_roots:
+                # Same containment discovery applies, enforced again HERE because
+                # load_skill reaches these files by name rather than through
+                # _iter_uncached — a `$skillname` / skill_search lookup skips
+                # discovery entirely, so a check in one path does not protect the
+                # other. Without this, a linked repo committing
+                # `leak/SKILL.md -> /etc/passwd` stays invisible in the skills
+                # list yet still injects that file into agent context on demand.
+                if not is_within_root(resolved, os.path.realpath(extra)):
+                    logger.warning(
+                        "skills: refusing %r from linked root %s — resolves outside the mirror",
+                        name,
+                        extra,
+                    )
                     continue
-                content = Path(resolved).read_text(encoding="utf-8")
+                # A linked repo's body is also size-capped: third-party content
+                # read on the event loop.
+                cap: int | None = _LINKED_SKILL_MAX_BYTES
+            else:
+                cap = None
+            content = _read_text_if_present(Path(resolved), max_bytes=cap)
+            if content is not None:
                 self._emit_lazy_load_metric(_t0, hit=True)
                 return content
         self._emit_lazy_load_metric(_t0, hit=False)
@@ -1915,9 +2193,17 @@ class SkillsLoader:
 
     @staticmethod
     def _parse_frontmatter(path: Path) -> dict[str, str]:
-        """Parse YAML frontmatter from a markdown file (simple key: value)."""
-        content = path.read_text(encoding="utf-8")
-        if not content.startswith("---"):
+        """Parse YAML frontmatter from a markdown file (simple key: value).
+
+        Returns ``{}`` when the file cannot be read. This runs for every
+        discovered skill on every ``list_skills`` / ``get_triggered_skills``, so
+        it is the hottest place a file removed by a concurrent writer (a
+        linked-repo sync, an agent deleting a skill mid-turn) would surface — and
+        it must degrade to "no metadata" rather than raising into a chat turn.
+        The caller's ``stat()`` is already guarded; this closes the read.
+        """
+        content = _read_text_if_present(path, max_bytes=_FRONTMATTER_MAX_BYTES)
+        if content is None or not content.startswith("---"):
             return {}
         match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
         if not match:
