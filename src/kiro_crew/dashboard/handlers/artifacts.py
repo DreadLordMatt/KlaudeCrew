@@ -56,6 +56,7 @@ from kiro_crew.artifacts import (
 )
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.dashboard.chat_folders import generate_emoji_for_name
+from kiro_crew.dashboard.file_resolve import resolve_recorded, snapshot_from_change
 from kiro_crew.dashboard.handlers._shared import _is_restricted_session
 from kiro_crew.executors import subprocess_executor
 from kiro_crew.hooks import FileTooLargeError, safe_read_file_bytes_with_identity, stat_identity
@@ -673,6 +674,8 @@ def _collect_session_docs(
     conversation_log: Any,
     saved_map: dict[str, str],
     session_key: str | None = None,
+    *,
+    resolve: bool = False,
 ) -> list[dict[str, Any]]:
     """Scan ALL sessions for non-code document file-changes (blocking).
 
@@ -682,6 +685,14 @@ def _collect_session_docs(
     when the path already backs a real (materialized) artifact. Sorted
     newest-first. Runs OFF the event loop — reads every session's jsonl.
 
+    When ``resolve=True`` each DISTINCT path is reconciled with the filesystem
+    exactly once (stat once per path, not per message): a path that still exists
+    is kept; a path renamed away is followed to its current location (git-rename
+    then content-match, via :func:`file_resolve.resolve_recorded` using the
+    snapshot captured here); a path that is gone and unresolvable is DROPPED so
+    the panels stop showing dead rows. ``resolve=False`` (the default) leaves
+    every recorded path untouched.
+
     INTERNAL ONLY — the raw ``path``/``name``/``session_title`` may contain a
     credential-shaped substring. Callers that reach an external surface MUST go
     through :func:`_scan_session_docs`, which redacts the display fields. The
@@ -689,7 +700,9 @@ def _collect_session_docs(
     directly because it must ``stat`` the true path — redaction there would
     corrupt a path that merely contains a credential-shaped substring (e.g. a
     temp dir ``/var/folders/.../<hash>/``), silently emptying the materialize
-    allowlist so a legitimate document could not be saved.
+    allowlist so a legitimate document could not be saved. That scan MUST keep
+    ``resolve=False`` (its default): rename-following would swap in a different
+    inode identity and corrupt the allowlist.
     """
     best: dict[str, dict[str, Any]] = {}
     try:
@@ -746,14 +759,30 @@ def _collect_session_docs(
                         "session_title": session_title,
                         "message_ts": m.get("ts") or "",
                         "_mtime": modified,
+                        # Recorded content snapshot for rename resolution (see
+                        # ``resolve``). Captured while we already hold the entry
+                        # so a later content-match need not re-read history.
+                        "_snapshot": snapshot_from_change(fc),
                     }
 
     out: list[dict[str, Any]] = []
     for e in sorted(best.values(), key=lambda d: d["_mtime"], reverse=True):
         mt = e.pop("_mtime")
+        snap = e.pop("_snapshot", "")
         raw_path = e["path"]
+        if resolve:
+            # Reconcile the recorded path with disk exactly once. A gone,
+            # unresolvable path is dropped; a renamed path is followed to its
+            # current location and its display fields re-based on the new path.
+            resolved, _method, _conf = resolve_recorded(raw_path, snap)
+            if resolved is None:
+                continue  # dead row — file gone and unresolvable
+            if resolved != raw_path:
+                e["path"] = resolved
+                e["name"] = os.path.basename(resolved) or resolved
+                raw_path = resolved
         e["updated_at"] = datetime.fromtimestamp(mt).isoformat() if mt else ""
-        # saved/slug are keyed by the real source_path.
+        # saved/slug are keyed by the (possibly resolved) real source_path.
         e["saved"] = raw_path in saved_map
         e["slug"] = saved_map.get(raw_path, "")
         out.append(e)
@@ -767,7 +796,9 @@ def _scan_session_docs(
 ) -> list[dict[str, Any]]:
     """Display-safe session-doc scan for the ``/session-docs`` API.
 
-    Wraps :func:`_collect_session_docs` and redacts every display field
+    Wraps :func:`_collect_session_docs` with ``resolve=True`` — dead rows
+    (renamed/deleted docs that can't be followed) are dropped and renamed docs
+    are re-based on their current path — then redacts every display field
     (``path``, ``name``, ``session_title``) through the credential/exfiltration
     redactors before the result leaves the process. Redaction is identity for
     normal content, so ordinary paths still round-trip through ``/materialize``;
@@ -781,7 +812,7 @@ def _scan_session_docs(
         cleaned, _ = redact_exfiltration_urls(cleaned)
         return cleaned
 
-    out = _collect_session_docs(conversation_log, saved_map, session_key)
+    out = _collect_session_docs(conversation_log, saved_map, session_key, resolve=True)
     for e in out:
         e["path"] = _redact(e["path"])
         e["name"] = _redact(e["name"])

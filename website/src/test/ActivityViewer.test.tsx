@@ -23,6 +23,10 @@ vi.mock('../api/client', () => ({
     browseFiles: vi.fn().mockResolvedValue({ path: '/projects/foo', parent: '/', dirs: [], files: [] }),
     pullRequestSource: vi.fn().mockImplementation(() => new Promise(() => {})),
     fileDiff: vi.fn().mockResolvedValue({ diff: '' }),
+    // Path resolver: default to "exists" (echoes the path) so every existing
+    // FileRow renders unchanged; the rename/missing tests override per-case.
+    fileResolve: vi.fn().mockImplementation((path: string) =>
+      Promise.resolve({ path, exists: true, resolved_path: path, method: 'exact', confidence: 1 })),
     // Artifacts tab: real session-scoped artifacts + the virtual file-backed docs.
     artifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
     artifactSessionDocs: vi.fn().mockResolvedValue({ docs: [] }),
@@ -136,6 +140,59 @@ describe('ActivityViewer', () => {
     expect(screen.getByText('CR-1')).toBeInTheDocument()
     // The link already shown in the Changes tab is hidden from Resources.
     expect(screen.queryByText('PR #42')).not.toBeInTheDocument()
+  })
+
+  it('search filters both files and links, with a no-matches state', async () => {
+    render(
+      <ActivityViewer
+        {...baseProps}
+        view="files"
+        // >5 total entries, so the search box clears its display threshold.
+        files={[
+          { path: '/proj/alpha.md', source: 'tool' },
+          { path: '/proj/beta.ts', source: 'tool' },
+          { path: '/proj/gamma.ts', source: 'tool' },
+          { path: '/proj/delta.ts', source: 'tool' },
+          { path: '/proj/epsilon.ts', source: 'tool' },
+        ]}
+        navLinks={[{ url: 'https://example.com/alpha-notes', type: 'other', label: 'Alpha notes', msgIdx: 0 }]}
+        onFileOpen={vi.fn()}
+      />,
+      { wrapper },
+    )
+    expect(screen.getByText('Changed files')).toBeInTheDocument()
+    expect(screen.getByText('Resources')).toBeInTheDocument()
+
+    // Typing filters ACROSS both sections (path match + link label match).
+    const box = screen.getByLabelText('Search by file name, folder, or link…')
+    fireEvent.change(box, { target: { value: 'alpha' } })
+    expect(screen.getByText('alpha.md')).toBeInTheDocument()
+    expect(screen.getByText('Alpha notes')).toBeInTheDocument()
+    expect(screen.queryByText('beta.ts')).not.toBeInTheDocument()
+
+    // A query matching nothing shows the no-matches state, not the empty state.
+    fireEvent.change(box, { target: { value: 'zzz-no-such-thing' } })
+    expect(screen.getByText('No matches')).toBeInTheDocument()
+    expect(screen.queryByText('No files changed yet')).not.toBeInTheDocument()
+
+    // Clearing restores everything.
+    fireEvent.change(box, { target: { value: '' } })
+    expect(screen.getByText('beta.ts')).toBeInTheDocument()
+  })
+
+  it('hides the search box for a short list (nothing to filter yet)', async () => {
+    render(
+      <ActivityViewer
+        {...baseProps}
+        view="files"
+        files={[{ path: '/proj/alpha.md', source: 'tool' }]}
+        onFileOpen={vi.fn()}
+      />,
+      { wrapper },
+    )
+    // The list renders, but a 1-item list is faster to scan than to filter.
+    expect(screen.getByText('alpha.md')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Search by file name, folder, or link…')).not.toBeInTheDocument()
   })
 
   it('Files tab opens a file inline with a back button, not a new tab', async () => {
@@ -399,6 +456,80 @@ describe('ActivityViewer', () => {
     } finally {
       global.fetch = prevFetch
     }
+  })
+})
+
+// ── Files tab: FileRow path resolution (rename / missing) ───────────────────
+//
+// The Changed-files list is built from session history + a persisted touched-
+// files list that is never revalidated against disk, so a renamed file used to
+// keep its old name and read as broken. FileRow now probes /api/file-resolve
+// (mocked here like fileDiff) and renders three states: exists (unchanged),
+// renamed (show the successor + a labelled indicator, open the successor), and
+// missing (dim + mark, still dismissible). Rows are opened via onFileOpen when
+// no inline save handler is wired, so these assert the resolved open target.
+describe('ActivityViewer — FileRow resolve states', () => {
+  const filesProps = (files: { path: string; source: 'tool' | 'history' }[], onFileOpen: () => void) => ({
+    subagents: {},
+    toolLog: [],
+    open: true,
+    onToggle: vi.fn(),
+    slot: 'test-slot',
+    view: 'files' as const,
+    files,
+    onFileOpen,
+  })
+
+  beforeEach(() => {
+    // Default: file exists (echo the path). Per-test overrides set rename/gone.
+    vi.mocked(api.fileResolve).mockImplementation((path: string) =>
+      Promise.resolve({ path, exists: true, resolved_path: path, method: 'exact', confidence: 1 }))
+  })
+
+  it('renders an existing file unchanged — no rename/missing indicators', async () => {
+    const onFileOpen = vi.fn()
+    render(<ActivityViewer {...filesProps([{ path: '/proj/a.md', source: 'tool' }], onFileOpen)} />, { wrapper })
+    expect(await screen.findByText('a.md')).toBeInTheDocument()
+    expect(screen.queryByText('renamed')).not.toBeInTheDocument()
+    expect(screen.queryByText('missing')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTitle('/proj/a.md'))
+    expect(onFileOpen).toHaveBeenCalledWith('/proj/a.md')
+  })
+
+  it('reflects the new name for a renamed file and opens the successor on click', async () => {
+    vi.mocked(api.fileResolve).mockResolvedValue({
+      path: '/proj/old.md', exists: false, resolved_path: '/proj/new.md', method: 'git-rename', confidence: 0.9,
+    })
+    const onFileOpen = vi.fn()
+    render(<ActivityViewer {...filesProps([{ path: '/proj/old.md', source: 'tool' }], onFileOpen)} />, { wrapper })
+    // Shows the RESOLVED basename, not the stale one.
+    expect(await screen.findByText('new.md')).toBeInTheDocument()
+    expect(screen.queryByText('old.md')).not.toBeInTheDocument()
+    // Renamed indicator carries accessible text naming old + new basenames.
+    const badge = screen.getByText('renamed')
+    expect(badge).toHaveAttribute('aria-label', 'Renamed from old.md to new.md')
+    // Clicking opens the SUCCESSOR path.
+    fireEvent.click(screen.getByTitle('/proj/new.md'))
+    expect(onFileOpen).toHaveBeenCalledWith('/proj/new.md')
+  })
+
+  it('dims and marks a missing file but keeps it visible and dismissible', async () => {
+    vi.mocked(api.fileResolve).mockResolvedValue({
+      path: '/proj/gone.md', exists: false, resolved_path: null, method: null, confidence: null,
+    })
+    const onFileOpen = vi.fn()
+    const onFileRemove = vi.fn()
+    render(
+      <ActivityViewer {...filesProps([{ path: '/proj/gone.md', source: 'tool' }], onFileOpen)} onFileRemove={onFileRemove} />,
+      { wrapper },
+    )
+    // Not silently hidden — the row (and its name) stay visible.
+    const badge = await screen.findByText('missing')
+    expect(badge).toHaveAttribute('aria-label', 'This file no longer exists on disk')
+    expect(screen.getByText('gone.md')).toBeInTheDocument()
+    // Still dismissible via the existing ✕ (keyed on the original path).
+    fireEvent.click(screen.getByLabelText('Remove file from list'))
+    expect(onFileRemove).toHaveBeenCalledWith('/proj/gone.md')
   })
 })
 

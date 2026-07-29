@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, useCallback, useMemo, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { Bot, ScrollText, FileText, X, Lock, CheckCircle, AlertCircle, Loader as LoaderIcon, Ban, Handshake, Wrench, MessageSquare, Workflow, Star, Component, GitPullRequest, ArrowLeft, Square, RotateCcw, Clock } from 'lucide-react'
+import { Bot, ScrollText, FileText, X, Lock, CheckCircle, AlertCircle, Loader as LoaderIcon, Ban, Handshake, Wrench, MessageSquare, Workflow, Star, Component, GitPullRequest, ArrowLeft, Square, RotateCcw, Clock, Search, Link as LinkIcon, ExternalLink } from 'lucide-react'
 import { api } from '../../api/client'
 import MarkdownPanel, { type MarkdownPanelHandle } from '../../components/MarkdownPanel'
-import { fileReadUrl } from '../../utils/fileReadUrl'
+import { resolveFileRead, fileResolveQueryOptions } from '../../utils/fileResolve'
 import { LogViewer } from '../LogsPage'
 import TrustDropdown from '../../components/TrustDropdown'
 import Clickable from '../../components/Clickable'
@@ -33,18 +33,10 @@ const STATUS = {
   stopped: <Square size={12} className="text-muted" />,
 } as const
 
-// Keyed by extractChatLinks' LinkType, which is 'cr' | 'other' only — the OSS
-// fork classifies URLs as generic git PR/review vs everything else. Use design
-// tokens (not hardcoded Tailwind palette colors) so both themes stay consistent.
-const RESOURCE_TYPE_COLORS: Record<string, string> = {
-  cr: 'bg-accent-subtle text-accent',
-  other: 'bg-muted/15 text-muted',
-}
-
-const RESOURCE_TYPE_LABELS: Record<string, string> = {
-  cr: 'PR',
-  other: 'Link',
-}
+// Resource-link type ('cr' | 'other', from extractChatLinks) is encoded on the
+// ResourceRow icon (a pull-request glyph in accent for code reviews, a link
+// glyph in muted for everything else) rather than a leading text badge — this
+// keeps the left text edge aligned with the Changed-files rows above it.
 
 function fmtTime(ts: number) {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -312,23 +304,13 @@ function FilePreview({ path, slot, onBack, onFileSave, onSubmitComments }: {
 }) {
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['file-read', path],
-    // Same query key + result shape ({ text, ok }) as ChatPage's document-tab
-    // reader, so the inline view SHARES that cache instead of colliding with it.
-    queryFn: async () => {
-      try {
-        const res = await fetch(fileReadUrl(path))
-        const text = res.ok
-          ? await res.text()
-          : res.status === 404 ? '_File not found on disk. It may have been moved or deleted._'
-            : '_Unable to read file._'
-        return { text, ok: res.ok }
-      } catch {
-        // Network-level failure (fetch rejected) — return a NOT-ok result rather
-        // than throwing, so `data` is always defined and the editor is never
-        // mounted over an empty buffer that a save could write to the file.
-        return { text: '_Unable to read file._', ok: false }
-      }
-    },
+    // Same query key + result shape ({ text, ok, ... }) as ChatPage's document-
+    // tab reader, so the inline view SHARES that cache instead of colliding
+    // with it. resolveFileRead follows a rename on 404 (consistent with
+    // handleFileOpen and cold-tab hydration) and never throws — a network-level
+    // failure comes back as ok:false, so `data` is always defined and the
+    // editor is never mounted over an empty buffer that a save could clobber.
+    queryFn: () => resolveFileRead(path),
     staleTime: 10_000,
   })
   // Working copy is backed by the module-level inline-draft store (keyed by
@@ -447,6 +429,143 @@ function FilePreview({ path, slot, onBack, onFileSave, onSubmitComments }: {
   )
 }
 
+/* ── Files tab ────────────────────────────────────────────────────────────────
+ * Two scannable lists — the files the agent touched this turn ("Changed files")
+ * and any links it surfaced ("Resources") — with a search box that filters both
+ * by name/path (and link label/URL). Opening a file previews it inline (see
+ * FilePreview) rather than spawning a document tab. Extracted from the render so
+ * it can own the search state as a real component (hooks can't live in the
+ * conditional render IIFE it replaced). */
+function FilesTab({
+  files, sources, navLinks, navResolving, slot,
+  onFileOpen, onFileRemove, onFileSave, onSubmitComments, openDocPaths,
+  previewPathValue, setPreviewPath,
+}: {
+  files?: TouchedFile[]
+  sources?: PullRequestLink[]
+  navLinks?: ExtractedLink[]
+  navResolving?: boolean
+  slot: string
+  onFileOpen?: (path: string) => void
+  onFileRemove?: (path: string) => void
+  onFileSave?: (filePath: string, content: string) => Promise<void>
+  onSubmitComments?: (message: string) => void
+  openDocPaths?: Set<string>
+  previewPathValue: string | null
+  setPreviewPath: (p: string | null) => void
+}) {
+  const [query, setQuery] = useState('')
+
+  // Inline file preview: opening a file from this tab keeps it HERE (no new
+  // document tab) — the list is swapped for the file's content with a "Back to
+  // files" bar. A thin host of the shared MarkdownPanel editor (keyed by path);
+  // falls back to the tab opener only if no save handler was wired.
+  if (previewPathValue && onFileSave) {
+    return (
+      <FilePreview
+        key={previewPathValue}
+        path={previewPathValue}
+        slot={slot}
+        onBack={() => setPreviewPath(null)}
+        onFileSave={onFileSave}
+        onSubmitComments={onSubmitComments}
+      />
+    )
+  }
+  // One editor per path: if this file is already open as a document tab, focus
+  // that tab instead of spawning a second (inline) editor for it.
+  const openInline = onFileSave
+    ? (p: string) => { if (openDocPaths?.has(p)) onFileOpen?.(p); else setPreviewPath(p) }
+    : onFileOpen
+  const changed = (files || []).filter(f => f.source === 'tool')
+  // Hide links already surfaced in the Changes tab (its `sources`); keep every
+  // other link — including cr-classified hosts (Bitbucket, self-hosted, code
+  // reviews) the Changes parser can't render — so they stay reachable here.
+  const sourceUrls = new Set((sources || []).map(s => resourceKey(s.url)))
+  const resourceLinks = dedupResourceLinks((navLinks || []).filter(l => !sourceUrls.has(resourceKey(l.url))))
+
+  const q = query.trim().toLowerCase()
+  const filteredChanged = q
+    ? changed.filter(f => f.path.toLowerCase().includes(q))
+    : changed
+  const filteredLinks = q
+    ? resourceLinks.filter(l => (l.label || '').toLowerCase().includes(q) || l.url.toLowerCase().includes(q))
+    : resourceLinks
+
+  const isEmpty = changed.length === 0 && resourceLinks.length === 0
+  const noMatches = !isEmpty && filteredChanged.length === 0 && filteredLinks.length === 0
+  // Only offer the search box once the list is long enough that scanning it by
+  // eye stops being the faster option — a short list needs no filter.
+  const showSearch = changed.length + resourceLinks.length > 5
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden">
+      {showSearch && (
+        <div className="px-3 pt-2 pb-0.5 shrink-0">
+          <div className="relative">
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted/60 pointer-events-none" />
+            <input
+              type="text"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder={i18nT('pages.chat.activityViewer.search_files')}
+              className="w-full h-7 pl-8 pr-8 rounded-md bg-bg-elevated border border-border text-[12px] text-text placeholder:text-muted/50 focus:outline-none focus:border-border-strong transition-colors"
+              aria-label={i18nT('pages.chat.activityViewer.search_files')}
+            />
+            {query && (
+              <button
+                onClick={() => setQuery('')}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded text-muted/50 hover:text-text transition-colors bg-transparent border-none cursor-pointer"
+                title={i18nT('pages.chat.activityViewer.clear')}
+                aria-label={i18nT('pages.chat.activityViewer.clear')}
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+      <div className="flex-1 overflow-y-auto py-1.5">
+        {isEmpty ? (
+          <div className="flex-1 flex items-center justify-center text-muted text-[13px] py-8">{i18nT('pages.chat.activityViewer.no_files_changed_yet')}</div>
+        ) : noMatches ? (
+          <div className="flex-1 flex items-center justify-center text-muted text-[13px] py-8">{i18nT('pages.chat.activityViewer.no_matches')}</div>
+        ) : (
+          <>
+            {filteredChanged.length > 0 && (
+              <div className="px-3 mb-2">
+                <div className="flex items-center gap-2 mt-1 mb-0.5">
+                  <span className="text-[11.5px] font-semibold text-muted">{i18nT('pages.chat.activityViewer.changed_files')}</span>
+                  <span className="text-[10.5px] text-muted/50 font-mono tabular-nums">{filteredChanged.length}</span>
+                  <span className="flex-1 h-px bg-border" />
+                </div>
+                <div className="flex flex-col">
+                  {filteredChanged.map(f => <FileRow key={f.path} f={f} onFileOpen={openInline} onFileRemove={onFileRemove} />)}
+                </div>
+              </div>
+            )}
+            {filteredLinks.length > 0 && (
+              <div className="px-3 mb-2">
+                <div className="flex items-center gap-2 mt-1 mb-0.5">
+                  <span className="text-[11.5px] font-semibold text-muted">{i18nT('pages.chat.activityViewer.resources')}</span>
+                  <span className="text-[10.5px] text-muted/50 font-mono tabular-nums">{filteredLinks.length}</span>
+                  <span className="flex-1 h-px bg-border" />
+                  {navResolving && <span className="text-[10px] text-accent animate-pulse">{i18nT('pages.chat.activityViewer.resolving_2')}</span>}
+                </div>
+                <div className="flex flex-col">
+                  {filteredLinks.map((link, i) => (
+                    <ResourceRow key={i} link={link} />
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 /* ── Main component ── */
 
 
@@ -459,46 +578,126 @@ export function countDiffStats(diff: string): { added: number; removed: number }
   return { added, removed }
 }
 
-function FileTile({ f, onFileOpen, onFileRemove }: { f: TouchedFile; onFileOpen?: (p: string) => void; onFileRemove?: (p: string) => void }) {
-  const name = f.path.split('/').pop() || f.path
-  const Icon = fileIcon(f.path)
-  const colorCls = colorForExt(f.path)
+/* ── Changed-files list row ──────────────────────────────────────────────────
+ * One touched file per full-width row: type-colored icon + filename (with the
+ * parent directory as a dimmed subtitle for disambiguation) on the left, a
+ * +N/-N diffstat on the right, and a hover-revealed remove control. Reads as a
+ * scannable list instead of a wrapping pile of cramped chips. */
+function FileRow({ f, onFileOpen, onFileRemove }: { f: TouchedFile; onFileOpen?: (p: string) => void; onFileRemove?: (p: string) => void }) {
+  // Revalidate the (possibly stale) path against disk. The list is built from
+  // session history + a persisted touched-files list that is never checked
+  // against the filesystem, so a renamed file otherwise keeps showing its old
+  // name and reads as broken. Shares the ['file-resolve', path] cache with
+  // handleFileOpen (see utils/fileResolve) so one lookup serves both the row
+  // and the click. Mirrors ToolCallLine's existence probe: React Query +
+  // staleTime, never a hand-rolled useState/useEffect fetch.
+  const { data: resolve } = useQuery(fileResolveQueryOptions(f.path))
+  // Three states: (a) exists / still resolving → treat as present (optimistic;
+  // a click still follows any rename via handleFileOpen's own 404 lookup);
+  // (b) renamed → a successor path different from the original; (c) missing →
+  // gone with no successor.
+  const renamedTo = resolve && !resolve.exists && resolve.resolved_path && resolve.resolved_path !== f.path
+    ? resolve.resolved_path
+    : null
+  const missing = !!resolve && !resolve.exists && !resolve.resolved_path
+  // The path the row now represents — the successor when renamed, else the
+  // original. Everything visible (icon, name, dir, diff, open target) keys off
+  // this so a renamed row reflects the NEW file.
+  const effectivePath = renamedTo || f.path
+
+  const name = effectivePath.split('/').pop() || effectivePath
+  const dir = effectivePath.slice(0, Math.max(0, effectivePath.length - name.length)).replace(/\/+$/, '')
+  const oldName = f.path.split('/').pop() || f.path
+  const Icon = fileIcon(effectivePath)
+  const colorCls = colorForExt(effectivePath)
   const { data } = useQuery({
-    queryKey: ['file-diff', f.path, f.lastWrite],
-    queryFn: () => api.fileDiff(f.path),
+    queryKey: ['file-diff', effectivePath, f.lastWrite],
+    queryFn: () => api.fileDiff(effectivePath),
     placeholderData: (prev) => prev,
+    enabled: !missing,
   })
   const stats = data?.diff ? countDiffStats(data.diff) : null
+  const renameLabel = i18nT('pages.chat.activityViewer.renamed_from_to', { old: oldName, new: name })
   return (
     <div
-      className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border bg-bg-elevated text-[12px] cursor-pointer hover:bg-bg-hover hover:border-border-strong transition-all max-w-full"
-      onClick={() => onFileOpen?.(f.path)}
-      title={f.path}
+      className={`group flex items-center gap-2 px-2 py-1 rounded-md cursor-pointer hover:bg-bg-hover transition-colors ${missing ? 'opacity-60' : ''}`}
+      onClick={() => onFileOpen?.(effectivePath)}
+      title={missing ? `${effectivePath} — ${i18nT('pages.chat.activityViewer.file_no_longer_exists')}` : effectivePath}
       role="button"
       tabIndex={0}
-      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onFileOpen?.(f.path) } }}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onFileOpen?.(effectivePath) } }}
     >
-      <span className="group/icon relative inline-flex items-center justify-center w-4 h-4 shrink-0">
-        <Icon size={12} className={`${colorCls} ${onFileRemove ? 'group-hover/icon:opacity-0' : ''} transition-opacity`} />
-        {onFileRemove && (
-          <button
-            className="absolute inset-0 flex items-center justify-center opacity-0 group-hover/icon:opacity-100 transition-opacity text-danger cursor-pointer bg-transparent border-none p-0"
-            onClick={e => { e.stopPropagation(); onFileRemove(f.path) }}
-            title={i18nT('pages.chat.activityViewer.remove')}
-            aria-label={i18nT('pages.chat.activityViewer.remove_file_from_list')}
-          >
-            <X size={12} />
-          </button>
-        )}
+      <Icon size={14} className={`shrink-0 ${colorCls}`} />
+      <span className="min-w-0 flex-1 flex flex-col leading-tight">
+        <span className={`text-[12.5px] truncate ${missing ? 'text-muted line-through' : 'text-text'}`}>{name}</span>
+        {dir && <span className="text-[10.5px] text-muted/80 truncate">{dir}</span>}
       </span>
-      <span className="truncate text-text max-w-[140px]">{name}</span>
+      {renamedTo && (
+        // Renamed indicator — carries visible text (not colour/icon only) plus
+        // an aria-label/title naming the old and new basenames for AT.
+        <span
+          className="shrink-0 text-[10px] leading-none px-1.5 py-0.5 rounded border border-border text-muted whitespace-nowrap"
+          title={renameLabel}
+          aria-label={renameLabel}
+        >
+          {i18nT('pages.chat.activityViewer.renamed')}
+        </span>
+      )}
+      {missing && (
+        // Missing indicator — visible text + accessible label; never colour-only.
+        <span
+          className="shrink-0 text-[10px] leading-none px-1.5 py-0.5 rounded border border-danger/40 text-danger whitespace-nowrap"
+          title={i18nT('pages.chat.activityViewer.file_no_longer_exists')}
+          aria-label={i18nT('pages.chat.activityViewer.file_no_longer_exists')}
+        >
+          {i18nT('pages.chat.activityViewer.missing')}
+        </span>
+      )}
       {stats && (stats.added > 0 || stats.removed > 0) && (
-        <span className="flex items-center gap-1 text-[10px] font-mono shrink-0 ml-0.5">
+        <span className="flex items-center gap-1.5 text-[11px] font-mono shrink-0 tabular-nums">
           {stats.added > 0 && <span className="text-ok">+{stats.added}</span>}
           {stats.removed > 0 && <span className="text-danger">-{stats.removed}</span>}
         </span>
       )}
+      {onFileRemove && (
+        <button
+          className="shrink-0 p-1 rounded opacity-0 group-hover:opacity-100 text-muted/50 hover:text-danger transition-all bg-transparent border-none cursor-pointer"
+          onClick={e => { e.stopPropagation(); onFileRemove(f.path) }}
+          title={i18nT('pages.chat.activityViewer.remove')}
+          aria-label={i18nT('pages.chat.activityViewer.remove_file_from_list')}
+        >
+          <X size={13} />
+        </button>
+      )}
     </div>
+  )
+}
+
+/* ── Resource-link list row ──────────────────────────────────────────────────
+ * Shares FileRow's anatomy so the two sections read as one list: a fixed-width
+ * type icon (pull-request glyph in accent for code reviews, link glyph in muted
+ * otherwise), the link label, the host as a dimmed subtitle, and a trailing
+ * external-link arrow in the same right slot the file rows use for +N/-N. */
+function ResourceRow({ link }: { link: ExtractedLink }) {
+  const isCr = link.type === 'cr'
+  const Icon = isCr ? GitPullRequest : LinkIcon
+  let host = ''
+  try { host = new URL(link.url).hostname.replace(/^www\./, '') } catch { host = link.url }
+  return (
+    <a
+      href={link.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="group flex items-center gap-2 px-2 py-1 rounded-md hover:bg-bg-hover transition-colors no-underline"
+      title={link.url}
+    >
+      <Icon size={14} className={`shrink-0 ${isCr ? 'text-accent' : 'text-muted'}`} />
+      <span className="min-w-0 flex-1 flex flex-col leading-tight">
+        <span className="text-[12.5px] text-text truncate">{link.label}</span>
+        {host && <span className="text-[10.5px] text-muted/80 truncate">{host}</span>}
+      </span>
+      <ExternalLink size={12} className="shrink-0 text-muted/40 group-hover:text-muted transition-colors" />
+    </a>
   )
 }
 
@@ -591,15 +790,15 @@ function SessionArtifactsTab({ slot, onFileOpen }: { slot: string; onFileOpen?: 
   const loading = isFetching || artifactsFetching
 
   return (
-    <div className="flex-1 overflow-y-auto py-2">
+    <div className="flex-1 overflow-y-auto py-1.5">
       {rows.length === 0 ? (
         <div className="flex-1 flex items-center justify-center text-muted text-[13px] py-8">{loading ? 'Loading…' : 'Nothing produced in this session yet'}</div>
       ) : (
-        <div className="px-3 flex flex-col gap-0.5">
+        <div className="px-3 flex flex-col">
           {rows.map(r => {
             const busy = (r.kind === 'doc' && busyPath === r.path) || (!!r.slug && busySlug === r.slug)
             return (
-              <div key={r.key} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-bg-hover transition-colors">
+              <div key={r.key} className="flex items-center gap-2 px-2 py-1 rounded-md hover:bg-bg-hover transition-colors">
                 <button
                   type="button"
                   onClick={() => { if (r.kind === 'doc') onFileOpen?.(r.path); else navigate(`/artifacts/${r.slug}`) }}
@@ -609,9 +808,9 @@ function SessionArtifactsTab({ slot, onFileOpen }: { slot: string; onFileOpen?: 
                   {r.kind === 'doc'
                     ? <FileText size={14} className="text-emerald-400 shrink-0" />
                     : <Component size={14} className="text-accent shrink-0" />}
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-[13px] text-text truncate">{r.name}</span>
-                    <span className="block text-[11px] text-muted truncate">{r.sub}</span>
+                  <span className="min-w-0 flex-1 leading-tight">
+                    <span className="block text-[12.5px] text-text truncate">{r.name}</span>
+                    <span className="block text-[10.5px] text-muted/80 truncate">{r.sub}</span>
                   </span>
                 </button>
                 <button
@@ -938,87 +1137,22 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
       )}
 
       {/* Files tab */}
-      {effectiveTab === 'files' && (() => {
-        // Inline file preview: opening a file from this tab keeps it HERE
-        // (no new document tab) — the list is swapped for the file's content
-        // with a "Back to files" bar. A thin host of the shared MarkdownPanel
-        // editor (keyed by path); falls back to the tab opener only if no save
-        // handler was wired (host without editing).
-        if (previewPathValue && onFileSave) {
-          return (
-            <FilePreview
-              key={previewPathValue}
-              path={previewPathValue}
-              slot={slot}
-              onBack={() => setPreviewPath(null)}
-              onFileSave={onFileSave}
-              onSubmitComments={onSubmitComments}
-            />
-          )
-        }
-        // One editor per path: if this file is already open as a document tab,
-        // focus that tab instead of spawning a second (inline) editor for it.
-        const openInline = onFileSave
-          ? (p: string) => { if (openDocPaths?.has(p)) onFileOpen?.(p); else setPreviewPath(p) }
-          : onFileOpen
-        const changed = (files || []).filter(f => f.source === 'tool')
-        // Hide links that are already surfaced in the Changes tab (its `sources`);
-        // keep every other link — including cr-classified hosts (Bitbucket,
-        // self-hosted, code reviews) that the Changes parser can't render, so
-        // they stay reachable in Resources instead of vanishing from the panel.
-        const sourceUrls = new Set((sources || []).map(s => resourceKey(s.url)))
-        const resourceLinks = dedupResourceLinks((navLinks || []).filter(l => !sourceUrls.has(resourceKey(l.url))))
-        return (
-          <div className="flex-1 flex flex-col overflow-hidden">
-            <div className="flex-1 overflow-y-auto py-2">
-              {(changed.length === 0 && resourceLinks.length === 0) ? (
-                <div className="flex-1 flex items-center justify-center text-muted text-[13px] py-8">{i18nT('pages.chat.activityViewer.no_files_changed_yet')}</div>
-              ) : (
-                <>
-                  {changed.length > 0 && (
-                    <div className="px-3 mb-4">
-                      <div className="flex items-center gap-2 my-2">
-                        <span className="text-[14px] font-semibold text-muted">{i18nT('pages.chat.activityViewer.changed_files')}</span>
-                        <span className="flex-1 h-px bg-border" />
-                      </div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {changed.map(f => <FileTile key={f.path} f={f} onFileOpen={openInline} onFileRemove={onFileRemove} />)}
-                      </div>
-                    </div>
-                  )}
-                  {resourceLinks.length > 0 && (
-                    <div className="px-3 mb-4">
-                      <div className="flex items-center gap-2 my-2">
-                        <span className="text-[14px] font-semibold text-muted">{i18nT('pages.chat.activityViewer.resources')}</span>
-                        <span className="flex-1 h-px bg-border" />
-                        {navResolving && <span className="text-[10px] text-accent animate-pulse">{i18nT('pages.chat.activityViewer.resolving_2')}</span>}
-                      </div>
-                      <div className="flex flex-col gap-0.5">
-                        {resourceLinks.map((link, i) => (
-                          <a
-                            key={i}
-                            href={link.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="flex items-center gap-2 px-2 py-1 rounded hover:bg-bg-hover transition-colors no-underline group"
-                          >
-                            <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${RESOURCE_TYPE_COLORS[link.type] || RESOURCE_TYPE_COLORS.other}`}>
-                              {RESOURCE_TYPE_LABELS[link.type] || 'Link'}
-                            </span>
-                            <span className="text-[12px] text-text truncate group-hover:text-accent transition-colors">
-                              {link.label}
-                            </span>
-                          </a>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-        )
-      })()}
+      {effectiveTab === 'files' && (
+        <FilesTab
+          files={files}
+          sources={sources}
+          navLinks={navLinks}
+          navResolving={navResolving}
+          slot={slot}
+          onFileOpen={onFileOpen}
+          onFileRemove={onFileRemove}
+          onFileSave={onFileSave}
+          onSubmitComments={onSubmitComments}
+          openDocPaths={openDocPaths}
+          previewPathValue={previewPathValue}
+          setPreviewPath={setPreviewPath}
+        />
+      )}
 
       {/* Artifacts tab (in-session documents) */}
       {effectiveTab === 'artifacts' && <SessionArtifactsTab slot={slot} onFileOpen={onFileOpen} />}

@@ -1493,6 +1493,61 @@ async def api_file_read(request: web.Request) -> web.Response:
         return web.json_response({"error": "failed to read file"}, status=500)
 
 
+async def api_file_resolve(request: web.Request) -> web.Response:
+    """GET /api/file-resolve?path=... — follow a file renamed after a turn recorded it.
+
+    The Files / "Changed files" panels list paths harvested from immutable
+    session history; a renamed file's old path 404s. This endpoint maps that
+    old path to its current location. Response contract:
+
+        {"path": str, "exists": bool, "resolved_path": str|null,
+         "method": "exact"|"git-rename"|"content-match"|null,
+         "confidence": float|null}
+
+    Security: applies the SAME path-safety / sensitive-path guard as
+    ``/api/file-read`` (``validate_tool_args`` + ``_validate_dashboard_path``).
+    This is a resolver, not a reader — it never returns file content. The
+    resolution scan runs off the event loop.
+    """
+    from kiro_crew.dashboard.file_resolve import resolve_path  # noqa: F811
+    from kiro_crew.validation import (  # noqa: F811
+        FILE_READ_SCHEMA,
+        ValidationError,
+        validate_tool_args,
+    )
+
+    raw_path = request.query.get("path", "")
+    try:
+        validate_tool_args({"path": raw_path}, FILE_READ_SCHEMA)
+    except ValidationError:
+        _sel().log_tool_invocation(
+            session_key="dashboard",
+            tool_name="file_resolve",
+            outcome="denied",
+            resources=raw_path,
+        )
+        return web.json_response({"error": "invalid input"}, status=400)
+
+    canonical = _validate_dashboard_path(raw_path)
+    if not canonical:
+        _sel().log_tool_invocation(
+            session_key="dashboard",
+            tool_name="file_resolve",
+            outcome="denied",
+            resources=raw_path,
+        )
+        return web.json_response({"error": "invalid or forbidden path"}, status=400)
+
+    state = request.app.get("state")
+    conversation_log = getattr(state, "conversation_log", None) if state is not None else None
+
+    result = await asyncio.to_thread(resolve_path, raw_path, canonical, conversation_log)
+    _sel().log_tool_invocation(
+        session_key="dashboard", tool_name="file_resolve", outcome="success", resources=canonical
+    )
+    return web.json_response(result)
+
+
 async def api_file_download(request: web.Request) -> web.Response:
     """GET /api/file-download?path=... — download a file as raw bytes.
 

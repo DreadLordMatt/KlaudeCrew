@@ -114,6 +114,7 @@ from kiro_crew.dashboard.handlers.files import (  # noqa: E402, F401
     api_file_download,
     api_file_raw,
     api_file_read,
+    api_file_resolve,
     api_file_search,
     api_file_watch,
     api_file_write,

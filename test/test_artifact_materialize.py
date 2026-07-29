@@ -121,6 +121,9 @@ def test_materialize_is_idempotent(isolated_store, tmp_path):
 class _MalformedLog:
     """Session log with malformed session/message/file-change shapes."""
 
+    def __init__(self, doc: str):
+        self._doc = doc
+
     def list_sessions(self):
         return [
             "not-a-dict",
@@ -133,15 +136,18 @@ class _MalformedLog:
             "not-a-dict",
             {"meta": "wrong-type"},
             {"meta": {"file_changes": "wrong-type"}},
-            {"meta": {"file_changes": ["not-a-dict", {"path": 123}, {"path": "/tmp/doc.md"}]}},
+            {"meta": {"file_changes": ["not-a-dict", {"path": 123}, {"path": self._doc}]}},
         ]
 
 
-def test_scan_session_docs_survives_malformed_history():
+def test_scan_session_docs_survives_malformed_history(tmp_path):
     """One malformed entry must not crash listing or materialization."""
-    out = h._scan_session_docs(_MalformedLog(), {})
+    # The one well-formed path must exist on disk so it survives the
+    # existence/rename reconciliation that _scan_session_docs now applies.
+    doc = _write_doc(tmp_path, "doc.md")
+    out = h._scan_session_docs(_MalformedLog(doc), {})
     # Only the single well-formed document path survives.
-    assert [e["path"] for e in out] == ["/tmp/doc.md"]
+    assert [e["path"] for e in out] == [doc]
 
 
 def test_recorded_doc_identities_skips_missing_and_relative(tmp_path):
@@ -153,12 +159,17 @@ def test_recorded_doc_identities_skips_missing_and_relative(tmp_path):
     assert len(ids) == 1
 
 
-def test_redaction_lives_at_the_api_boundary_only():
+def test_redaction_lives_at_the_api_boundary_only(tmp_path):
     """Design-hardening regression: redaction is enforced structurally, not by a
     shared flag. The external ``_scan_session_docs`` MUST redact a
     credential-shaped path; the internal ``_collect_session_docs`` (used by the
     authorization scan) MUST preserve the TRUE path so it can be ``stat``'d."""
-    cred_path = "/tmp/AKIAIOSFODNN7EXAMPLE/report.md"
+    # The path must exist on disk so it survives the existence reconciliation
+    # _scan_session_docs now applies; put a credential-shaped segment in its dir.
+    cred_dir = tmp_path / "AKIAIOSFODNN7EXAMPLE"
+    cred_dir.mkdir()
+    cred_path = str(cred_dir / "report.md")
+    (cred_dir / "report.md").write_text("# report\n")
     log = _FakeLog([cred_path])
     # API boundary: the path is redacted (never leaks a credential substring).
     api = h._scan_session_docs(log, {})

@@ -31,7 +31,7 @@ import { api } from '../api/client'
 import type { PlanStepInput } from '../api/client'
 import { useProvider } from '../providers'
 import { type AutoNudgeLoop } from '../components/AutoNudgePopover'
-import { fileReadUrl } from '../utils/fileReadUrl'
+import { rawFileRead, resolveFileRead, fileResolveQueryOptions } from '../utils/fileResolve'
 import { safeSetItem, safeSetSessionItem } from '../utils/safeStorage'
 import { handleStopPress, isEscalationState } from '../utils/stopDebounce'
 import { EmptyState, Btn, Input } from '../components/ui'
@@ -61,7 +61,7 @@ const SCROLL_AFTER_RENDER_MS = 100
 export { PREFILL_STORAGE_KEY } from '../utils/navIntent'
 import { PREFILL_STORAGE_KEY, writePrefill } from '../utils/navIntent'
 import WelcomeView from '../components/WelcomeView'
-import { usePanelTabs, clearInlineDraft, getInlineDraft } from '../hooks/usePanelTabs'
+import { usePanelTabs, clearInlineDraft, getInlineDraft, type PanelTab } from '../hooks/usePanelTabs'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
 import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useAgents } from '../hooks/useAgents'
@@ -1434,32 +1434,34 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
     try { window.dispatchEvent(new CustomEvent('kirocrew-file-open', { detail: { path: filePath } })) } catch { /* ignore */ }
     if ((window as unknown as { __kirocrewPluginHandlesFiles?: boolean }).__kirocrewPluginHandlesFiles) return
     try {
-      const [{ text, ok }] = await Promise.all([
-        queryClient.fetchQuery({
-          queryKey: ['file-read', filePath],
-          queryFn: async () => {
-            const url = fileReadUrl(filePath)
-            const res = await fetch(url)
-            const text = res.ok
-              ? await res.text()
-              : res.status === 404 ? '_File not found on disk. It may have been moved or deleted._'
-              : '_Unable to read file._'
-            return { text, ok: res.ok }
-          },
-          staleTime: 10_000,
-        }),
-        queryClient.prefetchQuery({
-          queryKey: ['file-diff', filePath],
-          queryFn: () => api.fileDiff(filePath),
-        }),
-      ])
-      tabsCtl.openFile(filePath, text, activeSlotRef.current ?? null, opts)
+      // Read the file, and if it 404s, follow a rename via the resolver. Both
+      // reads and the resolve go through queryClient so they share the
+      // ['file-read', path] / ['file-resolve', path] caches with the panel rows
+      // (the FileRow probes) and cold-tab hydration — one lookup per path.
+      const cachedRead = (p: string) => queryClient.fetchQuery({
+        queryKey: ['file-read', p],
+        queryFn: () => rawFileRead(p),
+        staleTime: 10_000,
+      })
+      const cachedResolve = (p: string) => queryClient.fetchQuery(fileResolveQueryOptions(p))
+      const result = await resolveFileRead(filePath, cachedRead, cachedResolve)
+      // Prefetch the diff for the path we actually opened (the successor when a
+      // rename was followed), not the stale one.
+      queryClient.prefetchQuery({
+        queryKey: ['file-diff', result.path],
+        queryFn: () => api.fileDiff(result.path),
+      })
+      tabsCtl.openFile(result.path, result.text, activeSlotRef.current ?? null, opts)
       dispatch(openActivityPanel())
       // The right-hand dock is a single slot; the file viewer is render-gated
       // behind !search.isOpen. Close the find pane so the opened file actually
       // shows instead of being silently suppressed.
       search.close()
-      if (ok) touchedFiles.addFile(filePath, 'history')
+      // Reconcile the touched-files list: drop the stale name and record the
+      // successor. The `ok` gate is preserved — a nonexistent file must not
+      // pollute history, but a followed rename read OK so its successor does.
+      if (result.renamedFrom) touchedFiles.removeFile(result.renamedFrom)
+      if (result.ok) touchedFiles.addFile(result.path, 'history')
     } catch {
       tabsCtl.openFile(filePath, '_Error reading file_', activeSlotRef.current ?? null, opts)
       dispatch(openActivityPanel())
@@ -2791,26 +2793,37 @@ export default function ChatPage({ mode, embedded, embedMode, popout }: { mode?:
   const coldFileResults = useQueries({
     queries: coldFileTabs.map(t => ({
       queryKey: ['file-read', t.path!],
-      queryFn: async () => {
-        const res = await fetch(fileReadUrl(t.path!))
-        const text = res.ok
-          ? await res.text()
-          : res.status === 404 ? '_File not found on disk. It may have been moved or deleted._'
-          : '_Unable to read file._'
-        return { text, ok: res.ok }
-      },
+      // Follow a rename on 404 (same behaviour as handleFileOpen): a restored
+      // tab whose file was renamed hydrates from the successor instead of
+      // showing a dead "not found" body. The resolve is routed through
+      // queryClient so it shares the ['file-resolve'] cache with the panel
+      // rows; the read stays a plain fetch (rawFileRead) to avoid re-entering
+      // this same ['file-read'] query key from inside its own queryFn.
+      queryFn: () => resolveFileRead(
+        t.path!,
+        rawFileRead,
+        (p: string) => queryClient.fetchQuery(fileResolveQueryOptions(p)),
+      ),
       staleTime: 10_000,
     })),
   })
   // Mirror settled reads into the tab strip. useQueries owns the fetch
   // lifecycle (error/retry/dedupe); this effect only writes results back, and
   // the content===undefined guard keeps it idempotent (a hydrated tab leaves
-  // coldFileTabs, so it isn't re-patched).
+  // coldFileTabs, so it isn't re-patched). When a rename was followed, patch
+  // the tab's path + title too so the strip reflects the new name.
   useEffect(() => {
     coldFileResults.forEach((r, i) => {
       const t = coldFileTabs[i]
       if (!t || t.content !== undefined) return
-      if (r.data) tabsCtl.patchTab(t.id, { content: r.data.text })
+      if (r.data) {
+        const patch: Partial<PanelTab> = { content: r.data.text }
+        if (r.data.renamedFrom && r.data.path !== t.path) {
+          patch.path = r.data.path
+          patch.title = r.data.path.split('/').pop() || r.data.path
+        }
+        tabsCtl.patchTab(t.id, patch)
+      }
       else if (r.isError) tabsCtl.patchTab(t.id, { content: '_Error reading file_' })
     })
   }, [coldFileResults, coldFileTabs, tabsCtl])

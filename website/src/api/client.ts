@@ -8,6 +8,7 @@ import type {
   PublishProviderDescriptor,
   SessionDoc,
 } from '../types'
+import type { FileResolveResult } from '../utils/fileResolve'
 import { refreshOnce, __resetRefreshOnceForTests } from './refreshOnce'
 import { installApiTransport } from './apiTransport'
 import { queryClient } from './queryClient'
@@ -1227,6 +1228,10 @@ export const api = {
   simulateUpdate: (opts?: { delay?: number; fail_at?: string }) => post('/api/update/simulate', opts || {}).then(j),
   pickFiles: () => post('/api/upload').then(j) as Promise<{ paths: string[] }>,
   fileDiff: (path: string) => fetch('/api/file-diff?path=' + encodeURIComponent(path)).then(j) as Promise<{ diff: string; original: string; status?: 'clean' | 'modified' | 'untracked' | 'not_git' }>,
+  /** Resolve a (possibly stale) file path against disk. On a rename the backend
+   *  returns the successor in `resolved_path`; it equals `path` when the file
+   *  still exists and is null when the file is gone and unresolvable. */
+  fileResolve: (path: string) => fetch('/api/file-resolve?path=' + encodeURIComponent(path)).then(j) as Promise<FileResolveResult>,
   /** Fuzzy file search for @-mention picker */
   fileSearch: (q: string, project?: string, signal?: AbortSignal) => {
     const p = new URLSearchParams({ q })
