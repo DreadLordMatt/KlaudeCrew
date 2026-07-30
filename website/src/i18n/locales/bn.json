@@ -913,6 +913,18 @@
     "artifactBody": {
       "rendering": "রেন্ডার হচ্ছে…"
     },
+    "artifactChatPanel": {
+      "agent_chat": "এজেন্ট চ্যাট",
+      "artifact_companion_chat": "আর্টিফ্যাক্ট সহযোগী চ্যাট",
+      "close_chat_panel": "চ্যাট প্যানেল বন্ধ করুন",
+      "close_panel_the_session_stays_active": "প্যানেল বন্ধ করুন (সেশন সক্রিয় থাকে)",
+      "new_chat": "নতুন চ্যাট",
+      "new_chat_archive_this_conversation_and_start_fresh": "নতুন চ্যাট — এই কথোপকথন আর্কাইভ করুন এবং নতুন করে শুরু করুন",
+      "no_active_session_for_this_artifact": "এই আর্টিফ্যাক্টের জন্য কোনো সক্রিয় সেশন নেই।",
+      "open_in_chat_page": "চ্যাট পৃষ্ঠায় খুলুন",
+      "start_chat": "চ্যাট শুরু করুন",
+      "starting_session": "সেশন শুরু হচ্ছে…"
+    },
     "artifactFolderDeleteDialog": {
       "cancel": "বাতিল",
       "contents_move_up_to": "বিষয়বস্তু উপরে সরে যাবে এখানে",
@@ -969,7 +981,6 @@
       "allow_once": "একবারের জন্য অনুমতি দিন",
       "apply_a_ready_made_set_of_instructions": "আগে থেকে তৈরি নির্দেশের একটি সেট প্রয়োগ করুন",
       "attach_files": "ফাইল সংযুক্ত করুন",
-      "browser_use": "ব্রাউজার ব্যবহার",
       "click_again_to_force_stop": "জোর করে থামাতে আবার ক্লিক করুন",
       "command": "কমান্ড",
       "context_usage": "কনটেক্সট ব্যবহার",
@@ -980,10 +991,11 @@
       "force_kill_session_discards_in_progress_work_and": "জোর করে সেশন বন্ধ করুন (চলমান কাজ ও সারিতে থাকা বার্তা বাতিল হয়)",
       "force_reset_session_taking_longer_than_expected": "জোর করে সেশন রিসেট করুন (প্রত্যাশার চেয়ে বেশি সময় নিচ্ছে)",
       "force_reset_taking_longer_than_expected": "জোর করে রিসেট — প্রত্যাশার চেয়ে বেশি সময় নিচ্ছে",
+      "it_can_click_type_and_navigate_pages_not_just_re": "এটি পেজে ক্লিক করতে, টাইপ করতে এবং নেভিগেট করতে পারে — শুধু পড়া নয়। আপনি যে সাইটগুলিতে সাইন ইন করা আছেন সেখানে এটি কাজ না করুক চাইলে বন্ধ রাখুন।",
       "killing": "বন্ধ করা হচ্ছে…",
       "killing_session": "সেশন বন্ধ করা হচ্ছে",
-      "let_the_agent_open_a_real_browser_to_load_web_pa": "এজেন্টকে সত্যিকারের ব্রাউজার খুলে ওয়েব পেজ লোড করতে এবং সেখানে যা আছে তা পড়তে দিন।",
       "let_the_agent_read_one_of_your_files": "এজেন্টকে আপনার একটি ফাইল পড়তে দিন",
+      "let_the_agent_use_the_browser": "এজেন্টকে ব্রাউজার ব্যবহার করতে দিন",
       "message_input": "বার্তা ইনপুট",
       "model": "মডেল",
       "optimizing_prompt": "প্রম্পট অপ্টিমাইজ করা হচ্ছে…",
@@ -1935,16 +1947,16 @@
       "will_provision": "যা তৈরি করা হবে"
     },
     "webPreviewPanel": {
+      "agent_can_act": "এজেন্ট কাজ করতে পারে",
       "back": "পেছনে",
       "browser_live": "ব্রাউজার — লাইভ",
-      "browser_use_is_on_the_agent_can_operate_this_pag": "ব্রাউজার ব্যবহার চালু আছে — এজেন্ট এই পেজটি পরিচালনা করতে পারে",
       "can_t_embed_an_http_page_here": "এখানে কোনো http:// পেজ এম্বেড করা যাবে না",
       "dismiss": "বন্ধ করুন",
-      "enable_interaction": "ইন্টারঅ্যাকশন চালু করুন",
       "enter_your_dev_server_url_above_e_g_a_vite_or_st": "আপনি যে সাইটে কাজ করছেন সেটির প্রিভিউ দেখার জন্য উপরে আপনার dev-server URL দিন (যেমন localhost-এ চলা একটি Vite বা স্ট্যাটিক সার্ভার) —\n              আপনি এডিট করার সাথে সাথেই এটি লাইভ রিলোড হয়।",
       "forward": "সামনে",
       "http": "http://",
-      "interactive": "ইন্টারঅ্যাক্টিভ",
+      "let_the_agent_act": "এজেন্টকে কাজ করতে দিন",
+      "lets_the_agent_click_type_and_navigate_this_page": "এজেন্টকে আপনার হয়ে এই পেজে ক্লিক, টাইপ ও নেভিগেট করতে দেয়",
       "live_browser_session": "লাইভ ব্রাউজার সেশন",
       "load_preview": "প্রিভিউ লোড করুন",
       "localhost_5173": "localhost:5173",
@@ -1956,16 +1968,16 @@
       "preview_server_not_reachable": "প্রিভিউ সার্ভারে পৌঁছানো যাচ্ছে না",
       "preview_size": "প্রিভিউয়ের আকার",
       "preview_url": "প্রিভিউ URL",
-      "read_only_mirror_of_the_browse_session": "ব্রাউজ সেশনের রিড-অনলি মিরর",
       "reload": "রিলোড",
       "reload_preview": "প্রিভিউ রিলোড করুন",
       "screenshot_an_area_into_the_chat": "চ্যাটে একটি অংশের স্ক্রিনশট নিন",
       "stopped_responding_it_ll_reconnect_automatically": "সাড়া দেওয়া বন্ধ করেছে।\n              এটি ফিরে এলে স্বয়ংক্রিয়ভাবে আবার সংযুক্ত হবে — অথবা এখনই রিলোড করুন।",
+      "the_agent_can_click_type_and_navigate_this_page": "এজেন্ট এই পেজে ক্লিক, টাইপ ও নেভিগেট করতে পারে",
       "the_agent_started_a_local_preview_load_it_to_vie": "এজেন্ট একটি লোকাল প্রিভিউ চালু করেছে। এই প্যানেলে সাইটটি দেখতে এটি লোড করুন।",
       "the_server_at": "এই ঠিকানার সার্ভার:",
       "this_dashboard_is_served_over_https_so_the_brows": "এই ড্যাশবোর্ডটি HTTPS-এর মাধ্যমে পরিবেশিত, তাই ব্রাউজার এখানে এম্বেড করতে দেয় না কোনো",
-      "turn_on_browser_use_so_the_agent_can_click_type": "ব্রাউজার ব্যবহার চালু করুন, যাতে এজেন্ট এই পেজে ক্লিক, টাইপ ও নেভিগেট করতে পারে",
       "updated": "সর্বশেষ আপডেট",
+      "view_only_clicks_here_don_t_reach_the_page": "শুধু দেখার জন্য — এখানে ক্লিক করলে পেজে পৌঁছায় না",
       "waiting_for_the_browser_to_take_a_screenshot": "ব্রাউজার স্ক্রিনশট নেওয়ার জন্য অপেক্ষা করা হচ্ছে…",
       "web_preview": "ওয়েব প্রিভিউ"
     },
@@ -2342,6 +2354,7 @@
       "activity": "অ্যাক্টিভিটি",
       "add_a_tag": "একটি ট্যাগ যোগ করুন",
       "add_a_tag_comma_separated_tags_supported": "একটি ট্যাগ যোগ করুন (কমা দিয়ে আলাদা করা ট্যাগ সমর্থিত)",
+      "agent_chat": "এজেন্ট চ্যাট",
       "artifact": "আর্টিফ্যাক্ট",
       "back": "ফিরে যান",
       "back_to_library": "← লাইব্রেরিতে ফিরুন",
@@ -2350,6 +2363,7 @@
       "by": "তৈরি করেছেন",
       "cancel": "বাতিল",
       "cancel_esc": "বাতিল (Esc)",
+      "chat_with_the_agent_about_this_artifact": "এই আর্টিফ্যাক্ট নিয়ে এজেন্টের সঙ্গে চ্যাট করুন",
       "comments": "মন্তব্য",
       "content_copied_from_v": "কনটেন্ট কপি করা হয়েছে এই ভার্সন থেকে: v",
       "created": "তৈরি হয়েছে",
@@ -2393,9 +2407,11 @@
       "tag": "ট্যাগ…",
       "tag_2": "ট্যাগ",
       "this_artifact_is_regenerated_by_a_cron_job_your": "এই আর্টিফ্যাক্টটি একটি cron জব দিয়ে পুনরায় তৈরি হয়। আপনার সম্পাদনাগুলি ভার্সন ইতিহাসে সংরক্ষিত থাকবে, তবে পরবর্তী cron রান একটি নতুন ভার্সন তৈরি করবে, যা আপনি এখানে যা সংরক্ষণ করছেন তার উপরে বসে যাবে।",
+      "this_artifact_was_deleted": "এই আর্টিফ্যাক্টটি মুছে ফেলা হয়েছে।",
       "tip_select_text_to_anchor_a_comment_or_use_the": "টিপ: মন্তব্য জুড়ে দিতে টেক্সট নির্বাচন করুন, অথবা ব্যবহার করুন",
       "tip_use_the": "টিপ: ব্যবহার করুন",
       "to_chat_with_the_agent": "এজেন্টের সঙ্গে চ্যাট করার জন্য",
+      "toggle_agent_chat": "এজেন্ট চ্যাট চালু/বন্ধ করুন",
       "toggle_comments": "মন্তব্য দেখান বা লুকান",
       "unsaved_changes": "• অসংরক্ষিত পরিবর্তন",
       "updated": "· আপডেট হয়েছে",
@@ -2675,14 +2691,14 @@
         "loop": "লুপ"
       },
       "recoveryCard": {
-        "tool_call_blocked": "টুল কল ব্লক করা হয়েছে",
-        "n_tool_calls_blocked": "{{count}}টি টুল কল ব্লক করা হয়েছে",
-        "safety_policy_continuing": "নিরাপত্তা নীতি · স্বয়ংক্রিয়ভাবে চলছে",
+        "cancelled_continuing": "বাতিল · চলছে",
         "n_patterns": "{{count}}টি প্যাটার্ন",
-        "turn_stalled": "টার্ন থেমে গেছে",
+        "n_tool_calls_blocked": "{{count}}টি টুল কল ব্লক করা হয়েছে",
         "recovered_continuing": "পুনরুদ্ধার হয়েছে · চলছে",
+        "safety_policy_continuing": "নিরাপত্তা নীতি · স্বয়ংক্রিয়ভাবে চলছে",
+        "tool_call_blocked": "টুল কল ব্লক করা হয়েছে",
         "tool_stopped_responding": "টুল সাড়া দেওয়া বন্ধ করেছে",
-        "cancelled_continuing": "বাতিল · চলছে"
+        "turn_stalled": "টার্ন থেমে গেছে"
       },
       "sessionColorPicker": {
         "change_your_color_palette_in_display_settings": "ডিসপ্লে সেটিংসে আপনার রঙের প্যালেট পরিবর্তন করুন",
@@ -4523,7 +4539,7 @@
   "settings": {
     "display": {
       "language": {
-        "auto": "স্বয়ংক্রিয় (ব্রাউজার অনুযায়ী)",
+        "auto": "স্বয়ংক্রিয়",
         "description": "ড্যাশবোর্ড ইন্টারফেসের ভাষা।",
         "label": "ভাষা",
         "sync_failed": "এটি আপনার KiroCrew কনফিগে সংরক্ষণ করা যায়নি — ভাষাটি শুধু এই ব্রাউজারেই প্রযোজ্য হবে এবং রিলোড করলে রিসেট হয়ে যেতে পারে।"

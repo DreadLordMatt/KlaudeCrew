@@ -924,6 +924,18 @@
     "artifactBody": {
       "rendering": "Rendu en cours…"
     },
+    "artifactChatPanel": {
+      "agent_chat": "Chat de l’agent",
+      "artifact_companion_chat": "Chat compagnon de l’artefact",
+      "close_chat_panel": "Fermer le panneau de chat",
+      "close_panel_the_session_stays_active": "Fermer le panneau (la session reste active)",
+      "new_chat": "Nouveau chat",
+      "new_chat_archive_this_conversation_and_start_fresh": "Nouveau chat — archiver cette conversation et repartir de zéro",
+      "no_active_session_for_this_artifact": "Aucune session active pour cet artefact.",
+      "open_in_chat_page": "Ouvrir dans la page de chat",
+      "start_chat": "Démarrer le chat",
+      "starting_session": "Démarrage de la session…"
+    },
     "artifactFolderDeleteDialog": {
       "cancel": "Annuler",
       "contents_move_up_to": "Le contenu est déplacé vers",
@@ -981,7 +993,6 @@
       "allow_once": "Autoriser une fois",
       "apply_a_ready_made_set_of_instructions": "Appliquer un ensemble d’instructions prêt à l’emploi",
       "attach_files": "Joindre des fichiers",
-      "browser_use": "Utilisation du navigateur",
       "click_again_to_force_stop": "Cliquer à nouveau pour forcer l’arrêt",
       "command": "Commande",
       "context_usage": "Utilisation du contexte",
@@ -992,10 +1003,11 @@
       "force_kill_session_discards_in_progress_work_and": "Forcer l'arrêt de la session (abandonne le travail en cours et les messages en file d'attente)",
       "force_reset_session_taking_longer_than_expected": "Forcer la réinitialisation de la session (délai plus long que prévu)",
       "force_reset_taking_longer_than_expected": "Réinitialisation forcée — délai plus long que prévu",
+      "it_can_click_type_and_navigate_pages_not_just_re": "Il peut cliquer, saisir du texte et naviguer dans les pages, pas seulement les lire. Laissez-le désactivé si vous préférez qu'il n'agisse pas sur les sites où vous êtes connecté.",
       "killing": "Arrêt forcé…",
       "killing_session": "Arrêt forcé de la session",
-      "let_the_agent_open_a_real_browser_to_load_web_pa": "Autoriser l'agent à ouvrir un vrai navigateur pour charger des pages web et en lire le contenu.",
       "let_the_agent_read_one_of_your_files": "Autoriser l'agent à lire l'un de vos fichiers",
+      "let_the_agent_use_the_browser": "Autoriser l'agent à utiliser le navigateur",
       "message_input": "Saisie du message",
       "model": "Modèle",
       "optimizing_prompt": "Optimisation du prompt…",
@@ -1956,16 +1968,16 @@
       "will_provision": "Va provisionner"
     },
     "webPreviewPanel": {
+      "agent_can_act": "L'agent peut agir",
       "back": "Retour",
       "browser_live": "Navigateur — en direct",
-      "browser_use_is_on_the_agent_can_operate_this_pag": "L'utilisation du navigateur est activée — l'agent peut piloter cette page",
       "can_t_embed_an_http_page_here": "Impossible d'intégrer une page http:// ici",
       "dismiss": "Ignorer",
-      "enable_interaction": "Activer l'interaction",
       "enter_your_dev_server_url_above_e_g_a_vite_or_st": "Saisissez ci-dessus l'URL de votre serveur de développement (par ex. un serveur Vite ou statique sur localhost) pour\n              prévisualiser le site sur lequel vous travaillez — il se recharge en direct pendant que vous éditez.",
       "forward": "Suivant",
       "http": "http://",
-      "interactive": "Interactif",
+      "let_the_agent_act": "Autoriser l'agent à agir",
+      "lets_the_agent_click_type_and_navigate_this_page": "Permet à l'agent de cliquer, saisir du texte et naviguer sur cette page pour vous",
       "live_browser_session": "Session de navigateur en direct",
       "load_preview": "Charger l'aperçu",
       "localhost_5173": "localhost:5173",
@@ -1977,16 +1989,16 @@
       "preview_server_not_reachable": "Serveur d'aperçu inaccessible",
       "preview_size": "Taille de l'aperçu",
       "preview_url": "URL de l'aperçu",
-      "read_only_mirror_of_the_browse_session": "Miroir en lecture seule de la session de navigation",
       "reload": "Recharger",
       "reload_preview": "Recharger l'aperçu",
       "screenshot_an_area_into_the_chat": "Capturer une zone dans la conversation",
       "stopped_responding_it_ll_reconnect_automatically": "ne répond plus.\n              Il se reconnectera automatiquement dès qu'il sera de retour — ou rechargez maintenant.",
+      "the_agent_can_click_type_and_navigate_this_page": "L'agent peut cliquer, saisir du texte et naviguer sur cette page",
       "the_agent_started_a_local_preview_load_it_to_vie": "L'agent a démarré un aperçu local. Chargez-le pour voir le site dans ce panneau.",
       "the_server_at": "Le serveur à l'adresse",
       "this_dashboard_is_served_over_https_so_the_brows": "Ce tableau de bord est servi via HTTPS, donc le navigateur bloque l'intégration d'une page",
-      "turn_on_browser_use_so_the_agent_can_click_type": "Activez l'utilisation du navigateur pour que l'agent puisse cliquer, saisir du texte et naviguer sur cette page",
       "updated": "mis à jour",
+      "view_only_clicks_here_don_t_reach_the_page": "Affichage seul — les clics ici n'atteignent pas la page",
       "waiting_for_the_browser_to_take_a_screenshot": "En attente de la capture d'écran du navigateur…",
       "web_preview": "Aperçu web"
     },
@@ -2372,6 +2384,7 @@
       "activity": "Activité",
       "add_a_tag": "Ajouter une étiquette",
       "add_a_tag_comma_separated_tags_supported": "Ajouter une étiquette (étiquettes séparées par des virgules acceptées)",
+      "agent_chat": "Chat de l’agent",
       "artifact": "Artefact",
       "back": "Retour",
       "back_to_library": "← Retour à la bibliothèque",
@@ -2380,6 +2393,7 @@
       "by": "par",
       "cancel": "Annuler",
       "cancel_esc": "Annuler (Esc)",
+      "chat_with_the_agent_about_this_artifact": "Discuter de cet artefact avec l’agent",
       "comments": "Commentaires",
       "content_copied_from_v": "contenu copié depuis la v",
       "created": "Créé",
@@ -2423,9 +2437,11 @@
       "tag": "étiquette…",
       "tag_2": "étiquette",
       "this_artifact_is_regenerated_by_a_cron_job_your": "cet artefact est régénéré par une tâche cron. Vos modifications seront conservées dans l'historique des versions, mais la prochaine exécution cron créera une version plus récente qui remplacera ce que vous enregistrez ici.",
+      "this_artifact_was_deleted": "Cet artefact a été supprimé.",
       "tip_select_text_to_anchor_a_comment_or_use_the": "Astuce : sélectionnez du texte pour ancrer un commentaire, ou utilisez le",
       "tip_use_the": "Astuce : utilisez le",
       "to_chat_with_the_agent": "pour discuter avec l'agent",
+      "toggle_agent_chat": "Afficher ou masquer le chat de l’agent",
       "toggle_comments": "Afficher/masquer les commentaires",
       "unsaved_changes": "• modifications non enregistrées",
       "updated": "· Mis à jour",
@@ -2708,14 +2724,14 @@
         "loop": "Boucle"
       },
       "recoveryCard": {
-        "tool_call_blocked": "Appel d'outil bloqué",
-        "n_tool_calls_blocked": "{{count}} appels d'outil bloqués",
-        "safety_policy_continuing": "politique de sécurité · poursuite automatique",
+        "cancelled_continuing": "annulé · poursuite",
         "n_patterns": "{{count}} motifs",
-        "turn_stalled": "Tour bloqué",
+        "n_tool_calls_blocked": "{{count}} appels d'outil bloqués",
         "recovered_continuing": "récupéré · poursuite",
+        "safety_policy_continuing": "politique de sécurité · poursuite automatique",
+        "tool_call_blocked": "Appel d'outil bloqué",
         "tool_stopped_responding": "L'outil ne répond plus",
-        "cancelled_continuing": "annulé · poursuite"
+        "turn_stalled": "Tour bloqué"
       },
       "sessionColorPicker": {
         "change_your_color_palette_in_display_settings": "Modifiez votre palette de couleurs dans les paramètres d'affichage",
@@ -4567,7 +4583,7 @@
   "settings": {
     "display": {
       "language": {
-        "auto": "Automatique (suivre le navigateur)",
+        "auto": "Automatique",
         "description": "Langue de l'interface du tableau de bord.",
         "label": "Langue",
         "sync_failed": "Impossible d'enregistrer ce réglage dans votre configuration KiroCrew — la langue ne s'applique qu'à ce navigateur et peut être réinitialisée au rechargement."
