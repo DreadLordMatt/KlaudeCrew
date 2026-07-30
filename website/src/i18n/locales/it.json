@@ -2584,6 +2584,7 @@
         "loading": "Caricamento…",
         "no_files_changed_yet": "Ancora nessun file modificato",
         "no_matches": "Nessuna corrispondenza",
+        "no_pull_requests_yet": "Ancora nessuna pull request in questa sessione",
         "no_subagents_running": "Nessun subagente in esecuzione",
         "no_workflow_runs": "Nessuna esecuzione di workflow",
         "output": "Output",

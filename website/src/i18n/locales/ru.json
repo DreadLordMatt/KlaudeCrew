@@ -2616,6 +2616,7 @@
         "loading": "Загрузка…",
         "no_files_changed_yet": "Изменённых файлов пока нет",
         "no_matches": "Нет совпадений",
+        "no_pull_requests_yet": "В этом сеансе пока нет пул-реквестов",
         "no_subagents_running": "Нет запущенных субагентов",
         "no_workflow_runs": "Нет запусков рабочих процессов",
         "output": "Вывод",

@@ -105,6 +105,25 @@ describe('ActivityViewer', () => {
     expect(screen.getByText('Loading source provider…')).toBeInTheDocument()
   })
 
+  it('shows an empty state, not the Files view, when Changes is opened with no PR', () => {
+    // Changes is a PINNED view (always present under `view` mode), so with no
+    // sources it must NOT fall back to the touched-files list under a "Changes"
+    // header — it owns its own PR empty state instead. Even with touched files
+    // present, the Changes view stays empty.
+    render(
+      <ActivityViewer
+        {...baseProps}
+        view="changes"
+        sources={[]}
+        files={[{ path: '/proj/foo.ts', ts: 1, source: 'tool' }]}
+      />,
+      { wrapper },
+    )
+    expect(screen.queryByText('No files changed yet')).toBeNull()
+    expect(screen.queryByText('/proj/foo.ts')).toBeNull()
+    expect(screen.getByText(/No pull requests in this session yet/)).toBeInTheDocument()
+  })
+
   it('Resources hides links present in the Changes tab (sources) and keeps the rest', () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const store = configureStore({

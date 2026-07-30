@@ -2520,6 +2520,7 @@
         "loading": "加载中…",
         "no_files_changed_yet": "尚无文件更改",
         "no_matches": "无匹配项",
+        "no_pull_requests_yet": "此会话中还没有拉取请求",
         "no_subagents_running": "没有运行中的子代理",
         "no_workflow_runs": "无工作流运行",
         "output": "输出",

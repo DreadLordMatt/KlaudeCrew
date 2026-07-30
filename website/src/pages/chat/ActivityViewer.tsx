@@ -989,13 +989,14 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
   // When a `view` prop is supplied, SidePanel owns the tab strip — render only
   // that view and skip the internal SegmentedControl.
   const requestedTab = view ?? tab
-  // `changes` is a PINNED view, so its tab exists even with nothing to show and
-  // falling back to Files is the long-standing behaviour. `issues` is NOT
-  // pinned: it only appears once the session mentions an issue, or when the user
-  // opens it from the + menu. In that second case there is no auto-removal, so
-  // falling back would render the Files list under an "Issues" label. Keep the
-  // requested view and let it render its own empty state instead.
-  const effectiveTab = requestedTab === 'changes' && !hasSources ? 'files' : requestedTab
+  // In the internal SegmentedControl (`!view`) the Changes segment only exists
+  // when there are sources, so a stale `changes` selection with none left must
+  // fall back to Files. But under `view` mode Changes is a PINNED tab that is
+  // ALWAYS present — falling back there would render the touched-files list
+  // under a "Changes" header (confusing, and wrong when files were touched with
+  // no PR). Keep it on `changes` and let it render its own PR empty state,
+  // mirroring how the (unpinned) Issues view already owns its empty state.
+  const effectiveTab = requestedTab === 'changes' && !hasSources && !view ? 'files' : requestedTab
 
   const TABS: { key: typeof tab; label: string; icon: ReactNode; count?: number }[] = [
     ...(hasSources ? [{ key: 'changes' as const, label: 'Changes', icon: <GitPullRequest size={13} />, count: sources!.length }] : []),
@@ -1027,14 +1028,20 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
       )}
 
       {/* Changes (pull request sources) view */}
-      {effectiveTab === 'changes' && hasSources && (
+      {effectiveTab === 'changes' && (
         <div className="flex-1 min-h-0 overflow-hidden">
-          <PullRequestPanel
-            sources={sources!}
-            selectedUrl={selectedSourceUrl || ''}
-            onSelect={onSelectSource || (() => {})}
-            onAddToChat={onAddToChat || (() => {})}
-          />
+          {hasSources ? (
+            <PullRequestPanel
+              sources={sources!}
+              selectedUrl={selectedSourceUrl || ''}
+              onSelect={onSelectSource || (() => {})}
+              onAddToChat={onAddToChat || (() => {})}
+            />
+          ) : (
+            <div className="text-muted text-[13px] pt-8 px-6 text-center">
+              {i18nT('pages.chat.activityViewer.no_pull_requests_yet')}
+            </div>
+          )}
         </div>
       )}
 

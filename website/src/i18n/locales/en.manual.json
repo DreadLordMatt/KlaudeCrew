@@ -123,6 +123,7 @@
       "activityViewer": {
         "clear": "Clear",
         "no_matches": "No matches",
+        "no_pull_requests_yet": "No pull requests in this session yet",
         "resource_type_issue": "Issue",
         "resource_type_link": "Link",
         "resource_type_pr": "PR",

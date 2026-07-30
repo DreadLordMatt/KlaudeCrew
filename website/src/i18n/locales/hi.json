@@ -2552,6 +2552,7 @@
         "loading": "लोड हो रहा है…",
         "no_files_changed_yet": "अभी कोई फ़ाइल नहीं बदली",
         "no_matches": "कोई मेल नहीं",
+        "no_pull_requests_yet": "इस सत्र में अभी तक कोई पुल रिक्वेस्ट नहीं है",
         "no_subagents_running": "कोई सबएजेंट नहीं चल रहा",
         "no_workflow_runs": "कोई वर्कफ़्लो रन नहीं",
         "output": "आउटपुट",

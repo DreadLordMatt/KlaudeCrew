@@ -2552,6 +2552,7 @@
         "loading": "লোড হচ্ছে…",
         "no_files_changed_yet": "এখনও কোনো ফাইল পরিবর্তিত হয়নি",
         "no_matches": "কোনো মিল নেই",
+        "no_pull_requests_yet": "এই সেশনে এখনও কোনো পুল রিকোয়েস্ট নেই",
         "no_subagents_running": "কোনো সাবএজেন্ট চলছে না",
         "no_workflow_runs": "কোনো ওয়ার্কফ্লো রান নেই",
         "output": "আউটপুট",

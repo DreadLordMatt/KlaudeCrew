@@ -2552,6 +2552,7 @@
         "loading": "Wird geladen…",
         "no_files_changed_yet": "Noch keine Dateien geändert",
         "no_matches": "Keine Treffer",
+        "no_pull_requests_yet": "Noch keine Pull Requests in dieser Sitzung",
         "no_subagents_running": "Keine Subagenten laufen",
         "no_workflow_runs": "Keine Workflow-Ausführungen",
         "output": "Ausgabe",

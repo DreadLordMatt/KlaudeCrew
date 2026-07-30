@@ -2584,6 +2584,7 @@
         "loading": "Chargement…",
         "no_files_changed_yet": "Aucun fichier modifié pour l'instant",
         "no_matches": "Aucun résultat",
+        "no_pull_requests_yet": "Aucune pull request dans cette session pour l'instant",
         "no_subagents_running": "Aucun sous-agent en cours",
         "no_workflow_runs": "Aucune exécution de workflow",
         "output": "Sortie",
