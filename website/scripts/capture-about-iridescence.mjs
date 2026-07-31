@@ -49,7 +49,7 @@ async function aboutApi(path, route) {
   return false
 }
 
-async function shoot(browser, { name, reducedMotion }) {
+async function shoot(browser, { name, reducedMotion, theme, expectCanvas = true }) {
   const context = await browser.newContext({
     viewport: { width: 1400, height: 980 },
     deviceScaleFactor: 2,
@@ -60,10 +60,26 @@ async function shoot(browser, { name, reducedMotion }) {
   await stubDashboardApi(page, { extra: aboutApi })
 
   await page.goto(`${base}/settings?tab=about`, { waitUntil: 'domcontentloaded' })
+  if (theme) {
+    await page.evaluate(t => document.documentElement.setAttribute('data-theme', t), theme)
+  }
 
   // Fail loudly rather than shoot the wrong panel.
   await page.locator('#main-content').getByText('Updates', { exact: false })
     .first().waitFor({ state: 'visible', timeout: 15000 })
+
+  if (!expectCanvas) {
+    // Degraded path: no WebGL, so no canvas is expected and the assertion flips.
+    // The panel must still be legible, which proves the opaque backdrop base is
+    // carrying the contrast rather than the shader.
+    await page.waitForTimeout(600)
+    const found = await page.locator('#main-content canvas').count()
+    if (found > 0) throw new Error(`expected no canvas without WebGL, found ${found}`)
+    await page.screenshot({ path: `${OUT}/${PREFIX}-${name}.png` })
+    console.log(`wrote ${OUT}/${PREFIX}-${name}.png  (no canvas, as expected)`)
+    await context.close()
+    return
+  }
 
   const canvas = page.locator('#main-content canvas')
   await canvas.waitFor({ state: 'attached', timeout: 15000 })
@@ -99,8 +115,17 @@ async function main() {
 
   await shoot(browser, { name: 'about', reducedMotion: false })
   await shoot(browser, { name: 'about-reduced-motion', reducedMotion: true })
-
+  // Light theme still gets the dark backdrop base — the panel is deliberately a
+  // dark showcase in every theme, because the glass text is white-on-dark.
+  await shoot(browser, { name: 'about-light-theme', reducedMotion: false, theme: 'light' })
   await browser.close()
+
+  // Degraded path: WebGL off entirely. Proves the panel stays legible when the
+  // shader cannot mount, which is the failure both advisory reviewers flagged.
+  const noGl = await chromium.launch({ args: ['--disable-webgl', '--disable-webgl2'] })
+  await shoot(noGl, { name: 'about-no-webgl', reducedMotion: false, expectCanvas: false })
+  await noGl.close()
+
   served.srv.close()
 }
 

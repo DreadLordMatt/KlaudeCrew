@@ -404,6 +404,14 @@ export function AboutPanel() {
           aria-hidden
           className="absolute -left-6 -right-6 top-0 bottom-0 z-0 overflow-hidden"
           style={{
+            // Opaque dark base, NOT decoration. The .about-glass text overrides
+            // are white-on-dark, and the darkness they assume comes from the
+            // shader — which is not guaranteed: Iridescence bails when WebGL is
+            // unavailable (corporate policy, software rendering, remote desktop),
+            // and on a light theme the scrim alone would sit over #fafafa. This
+            // base makes the subtree unconditionally dark so the overrides are
+            // always correct, in every theme, with or without a GPU.
+            background: '#0b0d12',
             maskImage: 'linear-gradient(to bottom, #000 calc(100% - 130px), transparent 100%)',
             WebkitMaskImage: 'linear-gradient(to bottom, #000 calc(100% - 130px), transparent 100%)',
           }}
@@ -414,12 +422,15 @@ export function AboutPanel() {
             speed={0.8}
           />
           {/* Scrim: darkens toward the bottom and edges so the lower cards don't
-              sit on the shader's brightest region. */}
+              sit on the shader's brightest region. The top floor is .30 rather
+              than lower because the hero sits there and the shader MOVES — the
+              tagline has to stay legible through the brightest part of the loop,
+              which a single screenshot cannot prove. */}
           <div
             className="absolute inset-0 pointer-events-none"
             style={{
               background:
-                'radial-gradient(120% 90% at 50% 0%, rgba(10,11,15,.18), rgba(10,11,15,.56) 62%, rgba(10,11,15,.78) 100%)',
+                'radial-gradient(120% 90% at 50% 0%, rgba(10,11,15,.30), rgba(10,11,15,.58) 62%, rgba(10,11,15,.78) 100%)',
             }}
           />
         </div>

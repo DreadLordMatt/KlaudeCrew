@@ -66,6 +66,14 @@ export type IridescenceProps = {
   mouseReact?: boolean
   /** Upper bound on devicePixelRatio; this fills a panel, so 1 is plenty. */
   maxDpr?: number
+  /**
+   * uTime for the single frame drawn under prefers-reduced-motion. The shader's
+   * accumulator makes brightness a non-monotonic function of t, so this is
+   * chosen by measurement (see scripts/capture-about-iridescence.mjs, which
+   * reports mean backdrop brightness per scene) rather than by taste — a bad
+   * value renders near-black and reads as a broken canvas.
+   */
+  staticTime?: number
   className?: string
 }
 
@@ -75,6 +83,7 @@ export function Iridescence({
   amplitude = 0.1,
   mouseReact = true,
   maxDpr = 1,
+  staticTime = 3.5,
   className = '',
 }: IridescenceProps) {
   const hostRef = useRef<HTMLDivElement>(null)
@@ -88,9 +97,19 @@ export function Iridescence({
     const probe = document.createElement('canvas')
     if (!probe.getContext('webgl') && !probe.getContext('experimental-webgl')) return
 
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+
     let renderer: Renderer
     try {
-      renderer = new Renderer({ alpha: false, powerPreference: 'low-power' })
+      renderer = new Renderer({
+        alpha: false,
+        powerPreference: 'low-power',
+        // Only for the static path. A single frame drawn into a normal (unpreserved)
+        // backbuffer is discarded at the first composite, so reduced-motion users
+        // would get a black panel. When we are looping this stays off, because
+        // preserving the buffer every frame costs bandwidth for nothing.
+        preserveDrawingBuffer: reduced,
+      })
     } catch {
       return
     }
@@ -115,6 +134,12 @@ export function Iridescence({
     })
     const mesh = new Mesh(gl, { geometry: new Triangle(gl), program })
 
+    // Draws the single frame used when motion is suppressed.
+    const renderStatic = () => {
+      program.uniforms.uTime.value = staticTime
+      renderer.render({ scene: mesh })
+    }
+
     const resize = () => {
       renderer.setSize(host.offsetWidth, host.offsetHeight)
       program.uniforms.uResolution.value = new Color(
@@ -122,6 +147,10 @@ export function Iridescence({
         gl.canvas.height,
         gl.canvas.width / gl.canvas.height,
       )
+      // Resizing a canvas CLEARS it. With no animation loop to redraw, the
+      // reduced-motion frame would be wiped — including by the ResizeObserver's
+      // own first async callback, which lands after the initial paint. Redraw.
+      if (reduced) renderStatic()
     }
     // ResizeObserver, not window.resize: the panel also changes width when the
     // chat sidebar or the side panel nav collapses, which fires no window event.
@@ -137,7 +166,7 @@ export function Iridescence({
     }
     if (mouseReact) host.addEventListener('mousemove', onMouseMove)
 
-    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+    const reducedMotion = reduced
 
     let raf = 0
     const frame = (t: number) => {
@@ -145,19 +174,8 @@ export function Iridescence({
       program.uniforms.uTime.value = t * 0.001
       renderer.render({ scene: mesh })
     }
-    const start = () => { if (!raf && !reduced) raf = requestAnimationFrame(frame) }
+    const start = () => { if (!raf && !reducedMotion) raf = requestAnimationFrame(frame) }
     const stop = () => { if (raf) { cancelAnimationFrame(raf); raf = 0 } }
-
-    if (reduced) {
-      // one static frame, at a t that lands on a pleasant part of the loop
-      program.uniforms.uTime.value = 2.4
-      renderer.render({ scene: mesh })
-    } else {
-      start()
-    }
-
-    const onVisibility = () => (document.hidden ? stop() : start())
-    document.addEventListener('visibilitychange', onVisibility)
 
     // ogl sizes the canvas via width/height attributes only; CSS-size it so it
     // fills the host box regardless of the dpr cap.
@@ -165,6 +183,18 @@ export function Iridescence({
     gl.canvas.style.height = '100%'
     gl.canvas.style.display = 'block'
     host.appendChild(gl.canvas)
+
+    if (reducedMotion) {
+      // One static frame, drawn AFTER the canvas is in the document and inside a
+      // rAF so it lands in a real composited frame. resize() also redraws it, so
+      // a later ResizeObserver callback cannot leave the panel blank.
+      requestAnimationFrame(renderStatic)
+    } else {
+      start()
+    }
+
+    const onVisibility = () => (document.hidden ? stop() : start())
+    document.addEventListener('visibilitychange', onVisibility)
 
     return () => {
       stop()
@@ -175,7 +205,7 @@ export function Iridescence({
       gl.getExtension('WEBGL_lose_context')?.loseContext()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [speed, amplitude, mouseReact, maxDpr, color[0], color[1], color[2]])
+  }, [speed, amplitude, mouseReact, maxDpr, staticTime, color[0], color[1], color[2]])
 
   return <div ref={hostRef} aria-hidden className={className} />
 }

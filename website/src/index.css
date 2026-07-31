@@ -57,9 +57,19 @@
 /* ── Settings › About: frosted glass over the Iridescence backdrop ─────────
    The panel paints a bright animated shader behind the cards, so the normal
    text/border tokens (tuned for a #12141a surface) lose contrast. Scoped
-   overrides lift them to white-on-glass. Literal rgba() throughout: the theme
-   tokens are raw var(--x) with no <alpha-value>, so Tailwind opacity modifiers
-   would silently generate nothing here. */
+   overrides lift them to white-on-glass.
+
+   INVARIANT these overrides depend on: the .about-glass subtree is ALWAYS on a
+   dark base. AboutPanel guarantees that with an opaque #0b0d12 backdrop layer
+   rather than relying on the shader, which is conditional (no WebGL -> the
+   canvas never mounts) and theme-independent (a light theme would otherwise put
+   white text over #fafafa). Anything rendered inside .about-glass inherits
+   white-on-dark styling — if you add a surface here that needs its own palette,
+   render it outside the wrapper, as the update dialog does.
+
+   Literal rgba() throughout: the theme tokens are raw var(--x) with no
+   <alpha-value>, so Tailwind opacity modifiers would silently generate nothing
+   here. */
 .about-glass .text-muted{color:rgba(255,255,255,.7)}
 .about-glass .text-text{color:#eef2f0}
 .about-glass .text-text-strong{color:#fff}
