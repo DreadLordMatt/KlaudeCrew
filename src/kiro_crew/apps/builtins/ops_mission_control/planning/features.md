@@ -49,6 +49,38 @@ different set. Re-read them against what shipped:
       equivalents are structural — confidence decay and the 500-entry prune — so porting the
       annotations would add ceremony without adding information.
 
+## Source-material re-review: the context package (2026-07-31)
+
+Audited `InscopeTeamContext` itself, which I had cited for the shared-memory idea but never
+read structurally. Its `conclave.yaml` carries a **team roster with a named `leader:`** —
+a shape our `rotation.yaml` lacked, and the omission was a real bug.
+
+- [x] **Every instance was claiming the primary tier.** `is_primary()` defaults to `True`
+      and reads each instance's OWN config, so on a team where nobody opted out, all of
+      them ran ledger hygiene. Verified with three default installs: `is_primary=True` for
+      all three — N agents concurrently running dedupe/decay/**prune** against one shared
+      ledger.
+
+      This is the same shape as the double-claim the shared schedule prevents, but on the
+      maintenance path, and worse: a duplicate claim wastes a turn, a duplicate prune
+      **deletes knowledge**.
+
+      Fixed by adopting the source's shape — an optional top-level `leader:` in
+      `rotation.yaml`. When present it decides, case-insensitively; when absent,
+      `primary_instance` still applies so solo installs and hand-configured teams are
+      untouched. An unresolvable login is NOT the leader: a missed nightly pass is
+      recoverable next run, every instance pruning is not. Surfaced in the roster so the
+      panel can mark who owns hygiene. Verified: `leader: alice` → only alice primary; no
+      key → falls back to local config. 8 tests.
+
+      *One fact in the file everyone reads beats N local settings agreeing by convention —
+      which is the same argument as the on-call schedule itself, applied to maintenance.*
+
+      Rest of the package: `lessons/` and `knowledge/` map to the ledger (built);
+      `oncall-context/` weekly folders map to the handover digest (built); `missions/` was
+      covered by the earlier review; `conclave-state.json` is package-scan state for
+      internal build systems, deliberately out of scope.
+
 ## Owner redirect: single-owner on-call via the shared schedule (2026-07-31)
 
 Owner: *"we need different model — some common oncall schedule file in the repo readable by

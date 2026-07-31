@@ -492,3 +492,91 @@ class TestRoster(_Env):
 
         described = rotation.describe(schedule_file.resolve_now())
         self.assertEqual(described["roster"], {})
+
+
+class TestLeader(_Env):
+    """Exactly ONE instance may run nightly ledger hygiene.
+
+    `primary_instance` defaults to True and lives in each instance's own config, so on a
+    team where nobody opted out, EVERY instance claimed the primary tier — verified with
+    three default installs, all reporting is_primary=True. That is N agents concurrently
+    running dedupe/decay/PRUNE against one shared ledger: the same shape as the
+    double-claim the shared schedule prevents, but on the maintenance path, and worse,
+    because a duplicate claim wastes a turn while a duplicate prune deletes knowledge.
+
+    The source workflow's shared team file carries a `leader:` field for exactly this
+    reason. One fact in the file everyone reads beats N local settings agreeing by
+    convention.
+    """
+
+    SCHEDULE = (
+        "leader: alice\n"
+        "timezone: UTC\n"
+        "shifts:\n  - from: 2026-08-01\n    to: 2026-08-08\n    who: alice\n"
+    )
+
+    def test_only_the_named_leader_is_primary(self) -> None:
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        self._write(self.SCHEDULE)
+        for who, expected in (("alice", True), ("bob", False), ("carol", False)):
+            with self.subTest(login=who):
+                with mock.patch.object(schedule_file, "_resolve_login_sync", return_value=who):
+                    self.assertEqual(rotation.is_primary(), expected)
+
+    def test_the_schedule_overrides_local_config(self) -> None:
+        """A teammate who left primary_instance at its default must not become leader."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        self._write(self.SCHEDULE)
+        with mock.patch.object(schedule_file, "_resolve_login_sync", return_value="bob"):
+            # bob's local config says primary (the default) — the schedule still wins.
+            self.assertFalse(rotation.is_primary())
+
+    def test_no_leader_key_falls_back_to_local_config(self) -> None:
+        """A solo install, and a team that configures primaries by hand, keep working."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        self._write("shifts:\n  - from: 2026-08-01\n    to: 2026-08-08\n    who: alice\n")
+        self.assertEqual(schedule_file.leader(), "")
+        self.assertTrue(rotation.is_primary(), "default primary_instance=True still applies")
+
+    def test_no_schedule_at_all_falls_back_to_local_config(self) -> None:
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        self.assertEqual(schedule_file.leader(), "")
+        self.assertTrue(rotation.is_primary())
+
+    def test_an_unresolvable_login_is_not_the_leader(self) -> None:
+        """Cannot prove leadership => do not claim it.
+
+        A missed nightly pass is recoverable on the next run; every instance pruning the
+        shared ledger is not.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        self._write(self.SCHEDULE)
+        with mock.patch.object(schedule_file, "_resolve_login_sync", return_value=""):
+            self.assertFalse(rotation.is_primary())
+
+    def test_leader_match_is_case_insensitive(self) -> None:
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        self._write(self.SCHEDULE.replace("leader: alice", "leader: Alice"))
+        with mock.patch.object(schedule_file, "_resolve_login_sync", return_value="alice"):
+            self.assertTrue(rotation.is_primary())
+
+    def test_a_broken_schedule_does_not_grant_leadership(self) -> None:
+        """Markers or bad YAML must not read as "no leader, so I am primary" for everyone."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        self._write("leader: alice\nshifts: [unclosed\n")
+        self.assertEqual(schedule_file.leader(), "", "an unparseable file names nobody")
+        # Falls back to local config, which is the documented behavior — but the ledger is
+        # protected because a conflicted schedule also refuses to push (ledger_sync).
+        self.assertTrue(rotation.is_primary())
+
+    def test_the_roster_reports_the_leader(self) -> None:
+        """So the panel can mark who owns hygiene without a second call."""
+        self._write(self.SCHEDULE)
+        self.assertEqual(schedule_file.roster()["leader"], "alice")

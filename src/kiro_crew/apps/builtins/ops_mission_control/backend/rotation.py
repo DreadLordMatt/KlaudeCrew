@@ -216,13 +216,58 @@ def _audited(signal: Signal, action: str, allowed: bool, reason: str) -> tuple[b
 
 
 def is_primary() -> bool:
-    """Whether this instance runs the ``primary`` tier.
+    """Whether this instance runs the ``primary`` tier (ledger hygiene).
 
-    Defaults to ``True`` so a single-instance install runs ledger hygiene. A team
-    sets exactly one instance primary so the pass does not run N times over a
-    shared ledger.
+    **The committed schedule's ``leader`` wins when it names one.** Local config decides
+    only when the shared file is silent.
+
+    Why: ``primary_instance`` defaults to ``True`` and lives in each instance's own
+    config, so on a team where nobody opted out, EVERY instance claimed the primary tier —
+    verified with three default installs, all reporting ``is_primary=True``. That means N
+    agents concurrently running dedupe/decay/**prune** against one shared ledger, which is
+    the same shape as the double-claim the shared schedule exists to prevent, just on the
+    maintenance path instead of the incident path. Concurrent prunes are worse than
+    concurrent claims: a claim wastes a turn, a prune deletes knowledge.
+
+    The source workflow solves this with a ``leader:`` field in its shared team file, and
+    that is the right shape — one fact, in the file everyone already reads, rather than N
+    local settings that must agree by convention. `primary_instance` stays honoured so a
+    solo install and an explicitly-configured team both keep working.
     """
+    leader = _schedule_leader()
+    if leader:
+        me = _schedule_me()
+        # No resolvable login means this instance cannot prove it is the leader. Answer
+        # False: a missed nightly hygiene pass is recoverable on the next run, whereas
+        # every instance pruning the shared ledger is not.
+        return bool(me) and me.lower() == leader.lower()
     return bool(read_config().get(_PRIMARY_KEY, True))
+
+
+def _schedule_leader() -> str:
+    """The ``leader:`` named in the committed schedule, or "". Never raises."""
+    try:
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
+            schedule_file,
+        )
+
+        return schedule_file.leader()
+    except Exception:  # noqa: BLE001 — a broken schedule must not break tier arming
+        logger.debug("ops-mission-control: could not read the schedule leader", exc_info=True)
+        return ""
+
+
+def _schedule_me() -> str:
+    """This instance's resolved GitHub login, or "". Never raises."""
+    try:
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
+            schedule_file,
+        )
+
+        return schedule_file.resolve_login()
+    except Exception:  # noqa: BLE001
+        logger.debug("ops-mission-control: could not resolve this instance's login", exc_info=True)
+        return ""
 
 
 def tier_states(shift: ShiftStatus) -> dict[str, bool]:

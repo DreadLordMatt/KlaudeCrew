@@ -15,10 +15,13 @@ Why a file in git rather than a service:
 - **It is reviewable.** A shift swap is a diff with an author and a timestamp. That is
   a better audit trail than most rotation UIs give you, and it is the same reason the
   ledger is JSONL in git rather than rows in a private DB.
-- **It degrades correctly.** Every failure — missing file, malformed YAML, unresolvable
-  login, clock outside every window — resolves to ``unknown=True``, which the tier gate
-  treats as ARMED. See ``ShiftStatus.unknown``: wrongly disarming a team costs missed
-  incidents, while wrongly arming costs API polls in a tier that only *observes*.
+- **It fails CLOSED, which is the opposite of what a rotation API should do.** Every
+  indeterminate case — missing file, malformed YAML, unresolvable login, clock outside
+  every window — resolves to ``on_shift=False, unknown=True`` under ``strict_gating``
+  (default on). For an API, "cannot tell" means the network is down and arming is right.
+  For a file every instance reads, "cannot tell" means the SCHEDULE is wrong, and arming
+  makes the whole team pick up the same alarm. ``unknown`` survives so the UI can explain
+  WHY; only ``on_shift`` gates work.
 
 **This adapter never decides authority, only tier arming.** Being on shift arms the
 ``on_shift`` cron tier; it does not raise the autonomy mode. ``effective = min(app_mode,
@@ -29,6 +32,7 @@ it is wired to the cheap decision (when to look) and not the expensive one (what
 
 Schedule format (``rotation.yaml`` at the repo root)::
 
+    leader: octocat                   # optional; runs nightly ledger hygiene ALONE
     timezone: America/Los_Angeles     # optional; UTC when absent
     shifts:
       - from: 2026-08-01
@@ -353,6 +357,48 @@ class ScheduleFileRotationSource:
         return await asyncio.to_thread(resolve_now)
 
 
+def resolve_login() -> str:
+    """This instance's GitHub login, or "". Public wrapper over the cached resolver.
+
+    Exists so callers outside this module (``rotation.is_primary``) do not reach for a
+    private name; the caching and the ``gh`` fallback are the same.
+    """
+    return _resolve_login_sync()
+
+
+def leader() -> str:
+    """The team's ``leader:`` login from the committed schedule, or "".
+
+    One optional top-level key:
+
+    ```yaml
+    leader: alice
+    shifts: [...]
+    ```
+
+    Modeled on the source workflow's shared team file, which carries the same field for
+    the same reason: nightly consolidation must run ONCE over shared knowledge. Putting it
+    in the file everyone reads is what makes that true by construction, instead of relying
+    on N instances each having been configured not to.
+
+    Empty when absent, so a schedule that names no leader leaves ``primary_instance`` in
+    charge and a solo install is unaffected.
+    """
+    shifts, _tz, error = read_schedule()
+    del shifts  # only the top-level key is needed here
+    if error:
+        return ""
+    try:
+        import yaml  # type: ignore[import-untyped]
+
+        data = yaml.safe_load(schedule_path().read_text(encoding="utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001 — read_schedule already validated; be safe anyway
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("leader", "") or "").strip()
+
+
 def roster(now: datetime | None = None) -> dict[str, Any]:
     """The whole team and its shift order — not just whoever holds the pager now.
 
@@ -420,6 +466,9 @@ def roster(now: datetime | None = None) -> dict[str, Any]:
         # the former is a setup mistake, the latter is normal.
         "me_on_roster": bool(me) and me.lower() in seen,
         "strict_gating": strict_gating(),
+        # Who runs nightly consolidation. Surfaced so the panel can mark the leader and an
+        # operator can see at a glance that exactly one instance owns ledger hygiene.
+        "leader": leader(),
         "error": error,
     }
 
