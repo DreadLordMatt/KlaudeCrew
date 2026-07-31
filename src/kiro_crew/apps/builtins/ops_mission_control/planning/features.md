@@ -63,13 +63,39 @@ No PR opened — owner's call.
         another secure transport; all instances sit on the internal network). Work
         items get handled as a team with rotating Ops responsibility, plus a group
         chat.
-        *Design note:* this is the one item that needs a new contract rather than a
-        new adapter. The claim index is currently per-instance
-        (`incidents/index.json` + a local file lock), which is what stops one
-        instance double-claiming — it does NOT stop two instances claiming the same
-        signal. A mesh needs claim arbitration across instances (the append-only,
-        content-addressed ledger already merges cleanly; the dispatch index does
-        not). Worth settling before building the transport.
+        **Arbitration contract SETTLED 2026-07-31** —
+        `docs/task-specs/2026/07/ops-mission-control/mesh-claim-arbitration.md`. The
+        backlog said to settle this before building the transport; it is now settled
+        with measurements rather than assertions, and the transport is unblocked.
+
+        Measured the failure first: two instances on one alarm both claim it, and both
+        mint `INV-1` (`_next_incident_id` counts a LOCAL index). So it is not just
+        duplicated work — the id itself is ambiguous across a mesh, two Slack threads
+        appear for one incident, and each ledger entry under-counts the recurrence.
+
+        The contract: claims become an append-only, content-addressed `claims.jsonl`
+        riding the EXISTING `ledger_sync` transport; arbitration is lowest
+        `claimed_at`, tie-broken on `instance_id`, so every member computes the same
+        winner with no messages exchanged. `signal_id` (`source:native_id`) is
+        identical on every instance, which is what makes a coordinator unnecessary.
+
+        **The useful conclusion: the mesh needs NO new transport.** SSH keys, a message
+        bus, and group chat are all orthogonal to arbitration — none is required to
+        stop double-claiming.
+
+        *One overstatement caught by verifying:* I first wrote that content-addressed
+        claims "merge cleanly". They do not — a real `git merge` returns exit 1 with
+        conflict markers, exactly as the ledger does. What append-only buys is that no
+        claim is LOST and the conflict is mechanically reconcilable. Reusing the
+        ledger's marker-tolerant reader is therefore a requirement, not a nicety:
+        without it a conflicted `claims.jsonl` reads as zero claims and every instance
+        believes it won.
+
+        Open question left for the owner (in the spec): should a losing instance's
+        incident be `resolved` or a new `superseded` status? Recommendation is
+        `superseded` — `resolved` asserts the condition cleared, which is not what
+        happened, and mislabelling a race would corrupt the one count an operator
+        reads to judge whether the app works.
 
 ## Requested (owner's queue) — added from source-material review
 
