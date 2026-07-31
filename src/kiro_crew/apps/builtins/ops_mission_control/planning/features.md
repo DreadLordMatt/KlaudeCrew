@@ -49,6 +49,35 @@ different set. Re-read them against what shipped:
       equivalents are structural — confidence decay and the 500-entry prune — so porting the
       annotations would add ceremony without adding information.
 
+## Browser gate re-run + dispatch-route audit (2026-07-31)
+
+Three backend behaviors had changed since the last full browser run and none had been
+through it: the `reconcile` tier move, the `tier_states` fix, and the off-shift write guard.
+
+- [x] **E2E gate re-run: `expected=234, skipped=0, unexpected=0, flaky=0`** — a completely
+      clean browser run, 6/6, with the bundle-staleness guard confirming the served bundle
+      was current first. All three changes hold up against a real gateway.
+
+- [x] **Audited `POST /dispatch` for the same shape as the off-shift write hole** — a route
+      reachable independently of the tier that pauses its cron. Concluded it is correct
+      as-is and documented why, rather than adding a guard that would break a real button:
+
+      Claiming a signal and reading evidence changes nothing in the operator's tooling;
+      `authorize_action` guards the actual provider write. Its two callers are the dispatch
+      cron (paused off shift, so the automated path IS gated) and the dashboard's "Check
+      now" button — a deliberate human action, and the one thing an operator most needs
+      right after configuring a provider. `store.claim` is a compare-and-set, so a second
+      instance finds nothing left rather than duplicating work; the residual exposure is a
+      duplicate investigation *session*, which is a wasted turn, not a production change.
+
+      *Not every route with the shape of a bug is one — the distinction is whether it
+      mutates something the operator owns.*
+
+      *One inconclusive step recorded honestly:* my first probe reported `polled: 0` and
+      looked like proof that off-shift claiming was blocked. It was not — the ADD-only
+      registry had refused my duplicate adapter registration, so the cycle had no source to
+      poll. The real answer came from reading the route's callers.
+
 ## Credential leak into the model prompt (2026-07-31)
 
 Continued the audit that keeps paying: check each enforcement seam *empirically* rather than

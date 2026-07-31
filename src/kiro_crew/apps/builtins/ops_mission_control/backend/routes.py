@@ -317,6 +317,24 @@ async def _handle_dispatch(request: web.Request) -> web.StreamResponse:
 
     This is what the dispatch cron calls. It returns ``changed: false`` when
     nothing happened, which is the cron's signal to stay completely silent.
+
+    **Deliberately NOT shift-gated**, unlike ``authorize_action``. Audited after the
+    off-shift write hole, since this has the same shape — a route reachable independently
+    of the tier that pauses its cron. The difference is what it does: claiming a signal and
+    reading evidence changes nothing in the operator's tooling, whereas
+    ``rotation.authorize_action`` guards an actual provider write.
+
+    Its two callers are the dispatch cron (paused off shift by the tier gate, so the
+    automated path IS gated) and the dashboard's "Check now" button — a deliberate human
+    action. Blocking the button off shift would stop an operator from proving a
+    freshly-configured provider works, which is the one thing they most need right after
+    setup; and claiming is idempotent across the team because ``store.claim`` is a
+    compare-and-set, so a second instance finds nothing left to claim rather than
+    duplicating work.
+
+    The residual exposure is a duplicate *investigation session* if two instances both
+    dispatch by hand at once. That is a wasted turn, not a production change — the same
+    trade the claim design already accepts (see ``store.claim``).
     """
     result = await dispatch.run_cycle(slack_client=_slack_client(request))
     payload = result.to_dict()
