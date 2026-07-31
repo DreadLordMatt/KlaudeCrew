@@ -20,20 +20,27 @@
  * cited a de/it parity failure that shipping German and Italian has since fixed;
  * all 134 i18n tests now pass):
  *
- * `node scripts/i18n-codemod.mjs --merge` extracts **88 ops keys** cleanly. The
- * blocker is that it is a whole-corpus pass: the same run rewrote **14 files this
- * app does not own** (ChatPage, ComputerUsePanel, ChatInput, SkillsTab, …) and added
- * **58 keys belonging to parallel in-flight work**. Extracting this app therefore
- * cannot be separated from someone else's uncommitted changes, and each of the 88
- * keys then needs a value in all 10 shipped locales or `catalogParity.test.ts`
- * fails — so it also needs a real translation pass, via
- * `scripts/i18n-shard.mjs split/join` (never hand-assembled; `join` is fail-closed
- * precisely to stop English shipping disguised as a translation).
+ * `node scripts/i18n-codemod.mjs --merge` extracts **93 ops keys** cleanly. The
+ * blocker is that the codemod is **whole-corpus by design** — its only flags are
+ * `--check`, `--dry-run`, `--merge`; there is no path scope. Re-measured on a
+ * PRISTINE branch off `origin/main` (zero working-tree files, so no parallel work to
+ * blame): the same run rewrote **12 files this app does not own** (ChatPage,
+ * ComputerUsePanel, ChatInput, SkillsTab, …) and added **59 non-ops keys**. Those
+ * strings are unextracted on `main` itself, so tree hygiene cannot separate them.
  *
- * Do this as its own change, on a quiet tree, not folded into an app feature. Do
- * NOT hand-edit `en.json` to paper over it — it is generated. Note the codemod
+ * An earlier note here blamed "parallel uncommitted work". That was wrong, and the
+ * measurement above is why: the constraint is the tool's scope, not the tree's state.
+ *
+ * So this is a **core-i18n change, not an ops change**: extracting this app means
+ * extracting the remaining corpus, and each of the 152 keys then needs a value in all
+ * 10 shipped locales or `catalogParity.test.ts` fails — a real translation pass via
+ * `scripts/i18n-shard.mjs split/join` (never hand-assembled; `join` is fail-closed
+ * precisely to stop English shipping disguised as a translation). It belongs in its
+ * own PR.
+ *
+ * Do NOT hand-edit `en.json` to paper over it — it is generated. Note the codemod
  * refuses a non-`--merge` run when the corpus is already converted, which is what
- * stops a rebuild from silently wiping 3906 keys.
+ * stops a rebuild from silently wiping the catalog.
  */
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'

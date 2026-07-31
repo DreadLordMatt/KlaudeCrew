@@ -6,6 +6,24 @@ Working doc. Durable behavior lives in
 
 ---
 
+## Shipped state (2026-07-31)
+
+Branch **`feat/ops-mission-control`**, off `origin/main` (928b63b0), pushed:
+
+- `d39ff34f` — `feat(ops)`: the app + the three core changes it requires (App Kit
+  skill-bridge fixes, the keystone secret-floor entry, the E2E stale-bundle guard).
+  77 files.
+- `52ff27fe` — `fix(chat)`: an embedded agent's approval request can actually be
+  answered. Owner-requested behavior; it was silently non-functional because
+  `ChatEmbed` passed no `onApprove` and `CollapsibleToolGroup` hid the buttons on
+  expand — the state a pending approval auto-enters.
+
+Deliberately NOT on this branch: the `auto_improvement` effort's work, which shares
+the KiroCrew checkout. That tree is untouched on `feat/auto-improvement-app`; the two
+chat files above are also modified there, so whoever lands it will see an overlap.
+
+No PR opened — owner's call.
+
 ## Requested (owner's queue)
 
 - [x] **Move Signals to its own tab** — DONE. `Board · Signals · Settings`. The
@@ -581,15 +599,28 @@ enumerates instances will not catch the next instance.*
   verified two-instance roundtrip incl. the concurrent-write case. See "Shared-memory
   loop" above. The mesh item's prerequisite is therefore met; what mesh still needs is
   cross-instance *claim arbitration*, which is a new contract rather than plumbing.
-- i18n extraction for this app's UI copy. **Scoped and deliberately deferred 2026-07-31**
-  — the reason previously recorded was stale (it blamed a de/it parity failure that
-  shipping German and Italian already fixed; all 134 i18n tests pass today). Measured
-  instead: `i18n-codemod.mjs --merge` extracts **88 ops keys** cleanly, but the same
-  whole-corpus run rewrites **14 files this app does not own** and adds **58 keys
-  belonging to parallel in-flight work** — so it cannot be landed without dragging
-  someone else's uncommitted changes in. Then each key needs a value in all 10 locales
-  (via `i18n-shard.mjs split/join`, fail-closed by design) or catalog parity fails.
-  Its own change, on a quiet tree. Full detail in `SettingsPanel.tsx`'s header.
+- i18n extraction for this app's UI copy. **Deferred — and the reason has now been
+  corrected TWICE, so the current one is measured rather than inferred.**
+
+  Reason v1 (wrong): a de/it catalog-parity failure. Shipping German and Italian had
+  already fixed it; all 134 i18n tests pass.
+
+  Reason v2 (wrong): "cannot land without dragging parallel uncommitted work in."
+  Plausible when measured on a dirty tree, but re-measured on `feat/ops-mission-control`
+  — a **pristine** branch off `origin/main`, zero working-tree files — the codemod still
+  rewrote **12 files this app does not own** and added **59 non-ops keys**. Those strings
+  are unextracted on `main` itself; no amount of tree hygiene changes that.
+
+  Reason v3 (measured, structural): `i18n-codemod.mjs` is **whole-corpus by design**. Its
+  only flags are `--check`, `--dry-run`, `--merge` — there is no path scope, so extracting
+  this app's **93 keys** cannot be separated from extracting the other 12 files. Landing
+  it here would put an unrelated 59-key core-i18n change inside an ops PR, and each of the
+  152 keys then needs a value in all 10 locales (`i18n-shard.mjs split/join`, fail-closed)
+  or catalog parity fails.
+
+  So this is a **core-i18n change, not an ops change** — it belongs in its own PR that
+  extracts the remaining corpus and does the translation pass. Full detail in
+  `SettingsPanel.tsx`'s header.
 
 ## Source-material coverage review (2026-07-31)
 
