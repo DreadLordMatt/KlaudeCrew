@@ -54,6 +54,26 @@
   --shadow-lg:0 12px 28px rgba(0,0,0,.35);
   color-scheme:dark;
 }
+/* ── Settings › About: frosted glass over the Iridescence backdrop ─────────
+   The panel paints a bright animated shader behind the cards, so the normal
+   text/border tokens (tuned for a #12141a surface) lose contrast. Scoped
+   overrides lift them to white-on-glass. Literal rgba() throughout: the theme
+   tokens are raw var(--x) with no <alpha-value>, so Tailwind opacity modifiers
+   would silently generate nothing here. */
+.about-glass .text-muted{color:rgba(255,255,255,.7)}
+.about-glass .text-text{color:#eef2f0}
+.about-glass .text-text-strong{color:#fff}
+.about-glass .text-accent{color:#eafff7}
+.about-glass .text-ok{color:#7cf5c2}
+.about-glass .border-border{border-color:rgba(255,255,255,.16)}
+.about-glass .bg-bg{background:rgba(0,0,0,.3)}
+.about-glass .bg-bg-hover{background:rgba(255,255,255,.12)}
+.about-glass .bg-border{background:rgba(255,255,255,.24)}
+.about-glass h1,.about-glass h2,.about-glass h3{text-shadow:0 1px 14px rgba(0,0,0,.55)}
+/* markdown body inside the changelog well */
+.about-glass .prose,.about-glass .prose *{color:rgba(255,255,255,.82)}
+.about-glass .prose h1,.about-glass .prose h2,.about-glass .prose h3{color:#fff}
+
 [data-theme="light"],[data-theme="amber-light"]{
   --search-highlight:rgba(255,167,38,.35);--search-highlight-current:rgba(255,120,0,.7);--search-highlight-current-border:rgba(0,0,0,.8);
   --bg:#fafafa;--bg-accent:#f5f5f5;--bg-elevated:#ffffff;--bg-hover:#f0f0f0;

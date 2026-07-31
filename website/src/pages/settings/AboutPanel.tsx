@@ -7,6 +7,7 @@ import { useBranding } from '../../hooks/useBranding'
 import { useAppSelector } from '../../store'
 import { codeBrowserBranchUrl, codeBrowserCommitUrl } from '../../lib/codeBrowser'
 import MarkdownRenderer from '../../components/MarkdownRenderer'
+import { Iridescence } from '../../components/Iridescence'
 import SegmentedControl from '../../components/SegmentedControl'
 import { api, ApiError } from '../../api/client'
 import { sanitize } from '../../api/helpers'
@@ -95,17 +96,26 @@ function getUpdateApi(): UpdateAPI | undefined {
   return (window as unknown as { updateAPI?: UpdateAPI }).updateAPI
 }
 
-// Subtle accent tint for the version pill + build chips (works with any theme's
-// --accent via color-mix; avoids depending on a tinted-bg token).
-const ACCENT_TINT: React.CSSProperties = {
-  background: 'color-mix(in oklab, var(--accent) 12%, transparent)',
-  borderColor: 'color-mix(in oklab, var(--accent) 30%, transparent)',
+// Frosted-glass surface for the cards that float on the Iridescence backdrop.
+// Literal rgba() rather than theme tokens: the tokens carry no <alpha-value>,
+// so `bg-card/8` would compile to nothing (see index.css note).
+const GLASS =
+  'bg-[rgba(255,255,255,0.085)] border-[rgba(255,255,255,0.2)] rounded-2xl ' +
+  'backdrop-blur-[44px] backdrop-saturate-[1.8] ' +
+  'shadow-[0_18px_46px_rgba(0,0,0,0.36),inset_0_1px_0_rgba(255,255,255,0.28)]'
+
+// Chips read as thin glass on the shader instead of accent-tinted on flat card.
+const GLASS_CHIP: React.CSSProperties = {
+  background: 'rgba(255,255,255,.1)',
+  borderColor: 'rgba(255,255,255,.22)',
 }
 
-// Accent gradient wash for the identity hero (overrides Card's flat bg-card).
-const HERO_BG: React.CSSProperties = {
-  background:
-    'linear-gradient(135deg, color-mix(in oklab, var(--accent) 14%, transparent), color-mix(in oklab, var(--accent) 3%, transparent) 55%, var(--card))',
+// Status pills need a dark well — at this shader brightness a green-tinted pill
+// on cyan is unreadable.
+const PILL_DARK: React.CSSProperties = {
+  background: 'rgba(6,10,9,.55)',
+  border: '1px solid rgba(255,255,255,.22)',
+  backdropFilter: 'blur(8px)',
 }
 
 /** Row: label on the left, value on the right. */
@@ -384,7 +394,37 @@ export function AboutPanel() {
 
   return (
     <>
-      <Card style={HERO_BG}>
+      <div className="about-glass relative">
+        {/* Iridescence backdrop + scrim, masked to fade out at the bottom.
+            -left-6/-right-6 cancels SidePanelLayout's px-6 so the shader bleeds
+            to the panel edges; inset-y-0 makes it grow with the content instead
+            of stopping at the viewport. Without the mask the backdrop ends in a
+            hard horizontal line where the content does. */}
+        <div
+          aria-hidden
+          className="absolute -left-6 -right-6 top-0 bottom-0 z-0 overflow-hidden"
+          style={{
+            maskImage: 'linear-gradient(to bottom, #000 calc(100% - 130px), transparent 100%)',
+            WebkitMaskImage: 'linear-gradient(to bottom, #000 calc(100% - 130px), transparent 100%)',
+          }}
+        >
+          <Iridescence
+            className="absolute inset-0"
+            color={[0.52, 0.86, 0.76]}
+            speed={0.8}
+          />
+          {/* Scrim: darkens toward the bottom and edges so the lower cards don't
+              sit on the shader's brightest region. */}
+          <div
+            className="absolute inset-0 pointer-events-none"
+            style={{
+              background:
+                'radial-gradient(120% 90% at 50% 0%, rgba(10,11,15,.18), rgba(10,11,15,.56) 62%, rgba(10,11,15,.78) 100%)',
+            }}
+          />
+        </div>
+        <div className="relative z-[2]">
+      <Card className={GLASS}>
         {/* Identity hero */}
         <div className="flex items-center gap-4">
           <img
@@ -397,14 +437,14 @@ export function AboutPanel() {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2.5 flex-wrap">
               <span className="text-[19px] font-extrabold tracking-tight text-text-strong">{botName || 'Kiro Crew'}</span>
-              <span className="text-[12px] font-mono font-semibold text-accent rounded-full px-2.5 py-0.5 border" style={ACCENT_TINT}>{i18nT('pages.settings.aboutPanel.v')}{version}</span>
+              <span className="text-[12px] font-mono font-semibold text-accent rounded-full px-2.5 py-0.5 border" style={GLASS_CHIP}>{i18nT('pages.settings.aboutPanel.v')}{version}</span>
               {!isDesktop && (updateAvailable
                 ? <span className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold rounded-full px-2 py-0.5"
-                    style={{ color: 'var(--warn)', background: 'color-mix(in oklab, var(--warn) 14%, transparent)' }}>
+                    style={{ ...PILL_DARK, color: '#ffd964' }}>
                     <ArrowUp size={11} className="lucide-inline" /> {i18nT('pages.settings.aboutPanel.update_available')}</span>
                 : <span className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold rounded-full px-2 py-0.5"
-                    style={{ color: 'var(--ok)', background: 'color-mix(in oklab, var(--ok) 14%, transparent)' }}>
-                    <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: 'var(--ok)' }} /> {i18nT('pages.settings.aboutPanel.up_to_date')}</span>
+                    style={{ ...PILL_DARK, color: '#7cf5c2' }}>
+                    <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: '#7cf5c2' }} /> {i18nT('pages.settings.aboutPanel.up_to_date')}</span>
               )}
             </div>
             <div className="text-[12.5px] text-muted mt-1">{i18nT('pages.settings.aboutPanel.autonomous_agent_management_runs_locally_open_so')}</div>
@@ -416,14 +456,14 @@ export function AboutPanel() {
           {buildBranch && (
             <a href={codeBrowserBranchUrl(buildBranch)} target="_blank" rel="noopener noreferrer"
                title={i18nT('pages.settings.aboutPanel.browse_this_branch_on_github')}
-               className="inline-flex items-center gap-1.5 text-[12px] font-mono text-accent border rounded-lg px-2.5 py-1 no-underline hover:underline" style={ACCENT_TINT}>
+               className="inline-flex items-center gap-1.5 text-[12px] font-mono text-accent border rounded-lg px-2.5 py-1 no-underline hover:underline" style={GLASS_CHIP}>
               <GitBranch size={12} className="shrink-0" /> <span className="truncate max-w-[220px]">{buildBranch}</span> <ExternalLink size={10} className="opacity-60 shrink-0" />
             </a>
           )}
           {buildCommit && (
             <a href={codeBrowserCommitUrl(buildCommit)} target="_blank" rel="noopener noreferrer"
                title={i18nT('pages.settings.aboutPanel.view_this_commit_on_github')}
-               className="inline-flex items-center gap-1.5 text-[12px] font-mono text-accent border rounded-lg px-2.5 py-1 no-underline hover:underline" style={ACCENT_TINT}>
+               className="inline-flex items-center gap-1.5 text-[12px] font-mono text-accent border rounded-lg px-2.5 py-1 no-underline hover:underline" style={GLASS_CHIP}>
               <GitCommitHorizontal size={12} className="shrink-0" /> {buildCommit} <ExternalLink size={10} className="opacity-60 shrink-0" />
             </a>
           )}
@@ -464,7 +504,7 @@ export function AboutPanel() {
         {isDesktop && info?.platform && <Row label={i18nT('pages.settings.aboutPanel.platform')}>{info.platform}</Row>}
       </Card>
 
-      <Card>
+      <Card className={GLASS}>
         <CardTitle><RefreshCw size={15} className="lucide-inline" /> {i18nT('pages.settings.aboutPanel.updates')}</CardTitle>
         {isDesktop ? (
           updatesDisabled ? (
@@ -560,8 +600,12 @@ export function AboutPanel() {
           )}
         </div>
       </Card>
+        </div>
+      </div>
 
-      {/* Web update confirm — shows the changelog, then applies (which restarts the gateway). */}
+      {/* Web update confirm — shows the changelog, then applies (which restarts the gateway).
+          Deliberately OUTSIDE .about-glass: it is a fixed overlay on bg-card, so
+          the white-on-glass text overrides would wreck its contrast. */}
       {showConfirm && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-bg/60 backdrop-blur-sm animate-rise"
              role="dialog" aria-modal="true" aria-label={i18nT('pages.settings.aboutPanel.update')}
