@@ -70,8 +70,20 @@ _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
     # Datadog API key (32 hex) and application key (40 hex), as standalone words.
     re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE),
     re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE),
-    # Generic "Bearer <token>" / "token=<value>" carriers.
-    re.compile(r"(?i)\b(bearer|token|api[_-]?key|app[_-]?key)\b\s*[:=]\s*\S{12,}"),
+    # Generic carriers: "Bearer <token>", "token=<value>", "api-key: <value>".
+    #
+    # The separator is OPTIONAL, and that matters: this pattern required `[:=]`, so the
+    # single most common form in a real log — `Authorization: Bearer sk-...`, where the
+    # token follows a SPACE — passed straight through. Verified by handing a leaky evidence
+    # adapter four credential shapes: AKIA, PagerDuty and Datadog keys were redacted and
+    # `Bearer sk-...` reached the investigation brief, i.e. the model's prompt, in clear
+    # text. The core redactor missed it too (it catches the `Authorization:` prefix form
+    # only), so nothing downstream caught it either.
+    #
+    # `\s+` OR `\s*[:=]\s*` rather than making the separator a bare `\s*`: without the
+    # alternation, `token` immediately followed by 12+ non-space chars would match ordinary
+    # prose like "tokenization-heavy" and redact real diagnostic text.
+    re.compile(r"(?i)\b(bearer|token|api[_-]?key|app[_-]?key)\b(?:\s*[:=]\s*|\s+)\S{12,}"),
 )
 
 

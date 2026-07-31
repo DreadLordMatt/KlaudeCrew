@@ -12,6 +12,7 @@ so this is the test that catches it.
 """
 
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,7 +61,11 @@ class TestKeystoneProtection(unittest.TestCase):
                 self.assertTrue(security.is_sensitive_path(path))
 
 
-class TestRedaction(unittest.TestCase):
+class TestRedaction(unittest.IsolatedAsyncioTestCase):
+    """IsolatedAsyncioTestCase rather than bare ``asyncio.run``: the spawn audit
+    (``test/test_spawn_audit.py``) scans for ``asyncio.<spawn attr>`` across the package
+    and ``asyncio.run`` trips it — the same convention the other async tests here use."""
+
     def test_pagerduty_token_shape(self):
         out = secrets.redact_tokens("Authorization: Token token=u+AbCdEfGhIjKlMnOpQrStUv")
         self.assertNotIn("AbCdEfGhIjKlMnOpQrStUv", out)
@@ -79,6 +84,110 @@ class TestRedaction(unittest.TestCase):
     def test_bearer_carrier(self):
         out = secrets.redact_tokens("Bearer: sk-abcdefghijklmnop")
         self.assertIn(secrets.REDACTED_PLACEHOLDER, out)
+
+    def test_bearer_without_a_colon_is_redacted(self):
+        """The single most common real form — `Authorization: Bearer sk-...`.
+
+        The pattern required `[:=]` after the keyword, so a token following a SPACE (which
+        is what RFC 6750 actually specifies) passed through. Found by handing a leaky
+        evidence adapter four credential shapes: AKIA, PagerDuty and Datadog were redacted
+        and this one reached the investigation brief — the model's prompt — in clear text.
+        The core redactor missed it too, so nothing downstream caught it.
+        """
+        for text in (
+            "Bearer sk-abcdefghijklmnopqrst",
+            "Authorization: Bearer sk-abcdefghijklmnopqrst",
+            "authorization: bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        ):
+            with self.subTest(text=text):
+                out = secrets.redact_tokens(text)
+                self.assertNotIn("sk-abcdefghijklmnopqrst", out)
+                self.assertNotIn("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", out)
+                self.assertIn(secrets.REDACTED_PLACEHOLDER, out)
+
+    def test_the_separator_form_still_works(self):
+        """Widening the separator must not lose the `token=value` case."""
+        out = secrets.redact_tokens("api_key=abcdefghijklmnopqrstuvwx")
+        self.assertNotIn("abcdefghijklmnopqrstuvwx", out)
+
+    def test_a_keyword_in_prose_is_not_redacted(self):
+        r"""`\s+` is alternated with `\s*[:=]\s*` deliberately.
+
+        A bare `\s*` separator would let `token` followed by any 12+ non-space chars match
+        ordinary prose and redact real diagnostic text — which would corrupt the diagnosis
+        this app exists to produce.
+        """
+        for text in (
+            "the tokenization step failed on row 42",
+            "bearer of bad news: the pipeline stalled",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(secrets.redact_tokens(text), text)
+
+    async def test_a_leaky_adapter_cannot_reach_the_investigation_brief(self):
+        """The property that matters, asserted end to end rather than on the regex.
+
+        `gather_evidence` is the single funnel out of every adapter precisely so an adapter
+        author cannot forget. This drives a deliberately careless adapter through it and
+        into `investigation_brief`, which is what reaches the model.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import (
+            dispatch,
+            registry,
+            store,
+        )
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import Signal
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers.base import (
+            Evidence,
+            EvidenceBudget,
+        )
+
+        leaked = {
+            "akia": "AKIAIOSFODNN7EXAMPLE",
+            "pagerduty": "u+AbCdEfGhIjKlMnOpQrStUv",
+            "datadog": "d" * 32,
+            "bearer": "Bearer sk-abcdefghijklmnopqrst",
+        }
+
+        class _Leaky:
+            id = "leaky-test"
+            display_name = "Leaky"
+
+            def configured(self):
+                return True
+
+            async def gather(self, signal, budget):
+                body = "\n".join(f"{k}={v}" for k, v in leaked.items())
+                return [Evidence(source=self.id, kind="logs", title="raw dump", body=body)]
+
+        import os
+        import tempfile
+
+        tmp = tempfile.mkdtemp()
+        prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = tmp
+        registry.reset_registry()
+        reg = registry.get_registry()
+        reg.register_evidence_source(_Leaky())
+        try:
+            signal = Signal.create(
+                source="cloudwatch", native_id="alarm/leak-redaction", title="t", resource="q"
+            )
+            evidence = await reg.gather_evidence(signal, EvidenceBudget())
+            incident = store.claim(signal, operating_mode="observe")
+            assert incident is not None
+            claimed = dispatch.ClaimedIncident(incident=incident, evidence=list(evidence))
+            brief = dispatch.investigation_brief(claimed)
+            for name, secret in leaked.items():
+                with self.subTest(credential=name):
+                    self.assertNotIn(secret, brief, f"{name} leaked into the model prompt")
+        finally:
+            registry.reset_registry()
+            if prev is None:
+                os.environ.pop("KIROCREW_HOME", None)
+            else:
+                os.environ["KIROCREW_HOME"] = prev
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_ordinary_text_survives(self):
         """Redaction must not mangle a normal diagnosis."""

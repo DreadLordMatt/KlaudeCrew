@@ -49,6 +49,36 @@ different set. Re-read them against what shipped:
       equivalents are structural — confidence decay and the 500-entry prune — so porting the
       annotations would add ceremony without adding information.
 
+## Credential leak into the model prompt (2026-07-31)
+
+Continued the audit that keeps paying: check each enforcement seam *empirically* rather than
+by reading its comment. Provider writes turned out sound — `ActionSink.execute` has exactly
+ONE call site and it authorizes two lines earlier, and the app exposes no MCP tools, so
+`/incident/action` is the only write path. Redaction did not hold up.
+
+- [x] **A `Bearer sk-…` token reached the investigation brief in clear text.** Handed a
+      deliberately leaky evidence adapter four credential shapes and drove them through
+      `gather_evidence` into `investigation_brief` — which is the model's prompt. AKIA,
+      PagerDuty and Datadog keys were redacted; the bearer token was not.
+
+      Cause: the carrier pattern required `[:=]` after the keyword, so `Authorization: Bearer
+      sk-…` — where the token follows a **space**, which is what RFC 6750 actually specifies
+      — passed straight through. The core redactor missed it too (it matches only the
+      `Authorization:` prefix form), so nothing downstream caught it either.
+
+      Separator is now `\s*[:=]\s*` **or** `\s+`. The alternation is deliberate: a bare
+      `\s*` would match prose like "tokenization-heavy" and redact real diagnostic text,
+      corrupting the diagnosis this app exists to produce. Verified both directions —
+      all four shapes redacted, and "the tokenization step failed" survives intact.
+
+      The end-to-end test drives a leaky adapter through the real funnel rather than
+      asserting on the regex, because the claim being defended is *"an adapter author cannot
+      forget"*, not *"this pattern matches"*. Confirmed it fails against the old pattern.
+
+- [x] **`scrub-lint` caught me pasting the internal hostname into `features.md`.** Removed;
+      the section now describes the source without naming the host. Worth recording that the
+      gate did its job on my own carelessness.
+
 ## Third instance of the same pattern: off-shift writes (2026-07-31)
 
 Went looking for other places where "correct at the layer I tested, defeated one layer up"
@@ -115,7 +145,8 @@ not a bug; added `leader: alice` to the shared fixture and it resolved to one ow
 
 ## Source-material re-review: the workflow SITE (2026-07-31)
 
-Read `https://ops.meshclaw.zedmor.sci.motor.aws.dev/` — the goal's FIRST artifact, which I
+Read the workflow site the goal names first (an internal URL, deliberately not repeated
+here — `scrub-lint.sh` correctly flagged the hostname when I first pasted it) — which I
 had never opened. All prior work came from the two local packages. It carries the outcome
 metrics and a three-tier table, and comparing them found two bugs.
 
