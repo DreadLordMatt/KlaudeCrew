@@ -77,8 +77,15 @@ _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
     # token follows a SPACE — passed straight through. Verified by handing a leaky evidence
     # adapter four credential shapes: AKIA, PagerDuty and Datadog keys were redacted and
     # `Bearer sk-...` reached the investigation brief, i.e. the model's prompt, in clear
-    # text. The core redactor missed it too (it catches the `Authorization:` prefix form
-    # only), so nothing downstream caught it either.
+    # text.
+    #
+    # Core's own bearer pattern requires the literal `Authorization` (deliberately — so a
+    # bare `Bearer` cannot over-capture), so it did not catch this SHAPE either. But core is
+    # not the weak link: it matches real vendor keys by their OWN patterns regardless of any
+    # `Bearer` prefix — verified for OpenAI `sk-proj-`, Anthropic `sk-ant-`, Slack `xoxb-`,
+    # Stripe `sk_live_`, GitHub `ghp_`, JWTs and AKIA. What slips through core is only an
+    # opaque token with no recognizable prefix, which is exactly the residual case this
+    # app-level carrier pattern exists to cover.
     #
     # `\s+` OR `\s*[:=]\s*` rather than making the separator a bare `\s*`: without the
     # alternation, `token` immediately followed by 12+ non-space chars would match ordinary

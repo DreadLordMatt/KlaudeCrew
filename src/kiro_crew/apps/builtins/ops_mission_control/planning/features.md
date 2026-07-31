@@ -63,8 +63,17 @@ ONE call site and it authorizes two lines earlier, and the app exposes no MCP to
 
       Cause: the carrier pattern required `[:=]` after the keyword, so `Authorization: Bearer
       sk-…` — where the token follows a **space**, which is what RFC 6750 actually specifies
-      — passed straight through. The core redactor missed it too (it matches only the
-      `Authorization:` prefix form), so nothing downstream caught it either.
+      — passed straight through.
+
+      **Correction to my first read of this.** I reported that core's `security.redact` "has
+      the same blind spot… affects every caller" and left it as a PR note. That was wrong,
+      and I checked before leaving it: core matches real vendor keys by their OWN patterns
+      regardless of any `Bearer` prefix — verified for OpenAI `sk-proj-`, Anthropic
+      `sk-ant-`, Slack `xoxb-`, Stripe `sk_live_`, GitHub `ghp_`, JWTs and AKIA, all
+      redacted. Its bearer pattern requires the literal `Authorization` *deliberately*, so a
+      bare `Bearer` cannot over-capture. My "leak" test had used a fabricated `sk-abcdef…`
+      that matches no real provider's format, and I generalized from it. The residual gap is
+      an opaque token with no recognizable prefix — narrow, real, and now covered here.
 
       Separator is now `\s*[:=]\s*` **or** `\s+`. The alternation is deliberate: a bare
       `\s*` would match prose like "tokenization-heavy" and redact real diagnostic text,

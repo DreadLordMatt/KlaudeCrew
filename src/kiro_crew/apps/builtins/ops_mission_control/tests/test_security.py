@@ -92,7 +92,11 @@ class TestRedaction(unittest.IsolatedAsyncioTestCase):
         is what RFC 6750 actually specifies) passed through. Found by handing a leaky
         evidence adapter four credential shapes: AKIA, PagerDuty and Datadog were redacted
         and this one reached the investigation brief — the model's prompt — in clear text.
-        The core redactor missed it too, so nothing downstream caught it.
+        Core's pattern requires the literal `Authorization` by design, so it does not catch
+        this shape either — but core is not the weak link: it matches real vendor keys
+        (`sk-proj-`, `sk-ant-`, `xoxb-`, `sk_live_`, `ghp_`, JWT, AKIA) by their own
+        patterns whatever precedes them. Only a prefix-less opaque token reaches this
+        app-level carrier check.
         """
         for text in (
             "Bearer sk-abcdefghijklmnopqrst",
@@ -142,11 +146,21 @@ class TestRedaction(unittest.IsolatedAsyncioTestCase):
             EvidenceBudget,
         )
 
+        # REAL vendor prefixes, not invented ones. The first version of this test used a
+        # fabricated `sk-abcdef…` that matches no provider's actual format, which made core
+        # look broken when it was not — the leak was genuine but the diagnosis overreached.
         leaked = {
             "akia": "AKIAIOSFODNN7EXAMPLE",
             "pagerduty": "u+AbCdEfGhIjKlMnOpQrStUv",
             "datadog": "d" * 32,
-            "bearer": "Bearer sk-abcdefghijklmnopqrst",
+            "openai_bearer": "Bearer sk-proj-AbCdEfGhIjKlMnOpQrStUv",
+            "anthropic_bearer": "Bearer sk-ant-AbCdEfGhIjKlMnOpQrStUv",
+            "github_bearer": "Bearer ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123",
+            "slack_bearer": "Bearer xoxb-123456789012-abcdefghijkl",
+            "jwt_bearer": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghijkl",
+            # The residual case: opaque, no recognizable vendor prefix. Core cannot match
+            # this on shape alone, so the app's carrier pattern is the only thing that does.
+            "opaque_bearer": "Bearer Zm9vYmFyYmF6cXV1eGNvcmdlZ3JhdWx0",
         }
 
         class _Leaky:
