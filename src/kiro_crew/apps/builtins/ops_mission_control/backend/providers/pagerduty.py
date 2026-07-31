@@ -1,0 +1,227 @@
+"""PagerDuty adapter — signals, rotation, and actions.
+
+One class implements three Protocols because PagerDuty genuinely answers all three
+questions with the same credential: what is paging (incidents), who is on shift
+(on-call schedules), and how to respond (acknowledge / resolve / note). Splitting
+it into three classes would triple the config surface for no gain.
+
+The API token is a live credential against the user's production paging system —
+it can acknowledge and resolve real pages. It is therefore stored in the
+keystone-protected secret store (see ``secrets.py``), never in the app config, and
+never returned by any read endpoint.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+
+from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+    ACTION_ACK,
+    ACTION_COMMENT,
+    ACTION_RESOLVE,
+    SEVERITY_CRITICAL,
+    SEVERITY_WARNING,
+    STATE_FIRING,
+    Signal,
+)
+from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
+    config_list,
+    config_value,
+    provider_enabled,
+)
+from kiro_crew.apps.builtins.ops_mission_control.backend.providers.base import (
+    DEFAULT_POLL_LIMIT,
+    ActionResult,
+    ShiftStatus,
+)
+from kiro_crew.apps.builtins.ops_mission_control.backend.providers.http import (
+    HttpError,
+    request_json,
+)
+from kiro_crew.apps.builtins.ops_mission_control.backend.secrets import (
+    get_secret,
+    has_secrets,
+)
+
+logger = logging.getLogger(__name__)
+
+PROVIDER_ID = "pagerduty"
+
+_API_BASE = "https://api.pagerduty.com"
+_SECRET_TOKEN = "api_token"
+_REQUIRED_SECRETS: tuple[str, ...] = (_SECRET_TOKEN,)
+
+#: Incident statuses that constitute open work. ``acknowledged`` is included:
+#: an acknowledged page is still unresolved, and the whole point is to be working
+#: it rather than to stop at the ack.
+_OPEN_STATUSES: tuple[str, ...] = ("triggered", "acknowledged")
+
+#: PagerDuty urgency -> our normalized severity.
+_URGENCY_SEVERITY: dict[str, str] = {"high": SEVERITY_CRITICAL, "low": SEVERITY_WARNING}
+
+#: PagerDuty requires a From header carrying a valid user email for write
+#: operations. Without it, writes 400 — so a missing email disables writes rather
+#: than failing at execute time.
+_CONFIG_FROM_EMAIL = "from_email"
+
+
+def _headers(*, for_write: bool = False) -> dict[str, str]:
+    token = get_secret(PROVIDER_ID, _SECRET_TOKEN)
+    headers = {
+        "Authorization": f"Token token={token}",
+        "Accept": "application/vnd.pagerduty+json;version=2",
+    }
+    if for_write:
+        email = config_value(PROVIDER_ID, _CONFIG_FROM_EMAIL)
+        if email:
+            headers["From"] = email
+    return headers
+
+
+class PagerDutyAdapter:
+    """SignalSource + RotationSource + ActionSink over the PagerDuty REST API."""
+
+    id = PROVIDER_ID
+    display_name = "PagerDuty"
+    detail = "Incidents as signals, on-call schedules as rotation, ack/resolve/note as actions."
+    config_fields: tuple[str, ...] = (
+        "enabled",
+        "service_ids",
+        "schedule_ids",
+        "user_id",
+        _CONFIG_FROM_EMAIL,
+    )
+    secret_fields: tuple[str, ...] = _REQUIRED_SECRETS
+
+    def configured(self) -> bool:
+        return provider_enabled(PROVIDER_ID) and has_secrets(PROVIDER_ID, _REQUIRED_SECRETS)
+
+    # -- SignalSource ------------------------------------------------------
+
+    async def poll(self) -> list[Signal]:
+        if not self.configured():
+            return []
+        return await asyncio.to_thread(self._poll_sync)
+
+    def _poll_sync(self) -> list[Signal]:
+        params: dict[str, Any] = {
+            "statuses[]": list(_OPEN_STATUSES),
+            "limit": DEFAULT_POLL_LIMIT,
+            "sort_by": "created_at:desc",
+        }
+        service_ids = config_list(PROVIDER_ID, "service_ids")
+        if service_ids:
+            params["service_ids[]"] = service_ids
+
+        data = request_json(f"{_API_BASE}/incidents", headers=_headers(), params=params)
+        incidents = data.get("incidents", []) if isinstance(data, dict) else []
+
+        signals: list[Signal] = []
+        for incident in incidents:
+            if not isinstance(incident, dict):
+                continue
+            incident_id = str(incident.get("id", ""))
+            if not incident_id:
+                continue
+            service = incident.get("service") or {}
+            signals.append(
+                Signal.create(
+                    source=PROVIDER_ID,
+                    native_id=f"incident/{incident_id}",
+                    title=str(incident.get("title", "") or f"incident {incident_id}"),
+                    severity=_URGENCY_SEVERITY.get(
+                        str(incident.get("urgency", "")).lower(), SEVERITY_WARNING
+                    ),
+                    state=STATE_FIRING,
+                    fired_at=str(incident.get("created_at", "")),
+                    resource=str(service.get("summary", "")) if isinstance(service, dict) else "",
+                    url=str(incident.get("html_url", "")),
+                    labels={
+                        "incident_number": str(incident.get("incident_number", "")),
+                        "status": str(incident.get("status", "")),
+                        "pd_incident_id": incident_id,
+                    },
+                )
+            )
+        return signals
+
+    # -- RotationSource ----------------------------------------------------
+
+    async def on_shift(self) -> ShiftStatus:
+        if not self.configured():
+            return ShiftStatus(on_shift=True, unknown=True)
+        return await asyncio.to_thread(self._on_shift_sync)
+
+    def _on_shift_sync(self) -> ShiftStatus:
+        schedule_ids = config_list(PROVIDER_ID, "schedule_ids")
+        user_id = config_value(PROVIDER_ID, "user_id")
+        if not schedule_ids:
+            # No schedule configured means we cannot answer. Report unknown so the
+            # tier gate fails OPEN — a missing config must not silently disable a
+            # team's incident response.
+            return ShiftStatus(on_shift=True, unknown=True)
+
+        params: dict[str, Any] = {"schedule_ids[]": schedule_ids, "earliest": "true"}
+        if user_id:
+            params["user_ids[]"] = [user_id]
+        data = request_json(f"{_API_BASE}/oncalls", headers=_headers(), params=params)
+        oncalls = data.get("oncalls", []) if isinstance(data, dict) else []
+
+        for entry in oncalls:
+            if not isinstance(entry, dict):
+                continue
+            user = entry.get("user") or {}
+            who = str(user.get("summary", "")) if isinstance(user, dict) else ""
+            if user_id and isinstance(user, dict) and str(user.get("id", "")) != user_id:
+                continue
+            return ShiftStatus(on_shift=True, who=who, until=str(entry.get("end", "") or ""))
+        return ShiftStatus(on_shift=False)
+
+    # -- ActionSink --------------------------------------------------------
+
+    def supported_actions(self) -> frozenset[str]:
+        # Writes need the From header; without it PagerDuty rejects them, so we
+        # advertise no actions rather than failing at execute time.
+        if not config_value(PROVIDER_ID, _CONFIG_FROM_EMAIL):
+            return frozenset()
+        return frozenset({ACTION_ACK, ACTION_RESOLVE, ACTION_COMMENT})
+
+    async def execute(self, signal: Signal, action: str, payload: dict[str, Any]) -> ActionResult:
+        if not self.configured():
+            return ActionResult(ok=False, action=action, error="pagerduty is not configured")
+        if action not in self.supported_actions():
+            return ActionResult(
+                ok=False,
+                action=action,
+                error=(
+                    f"action {action!r} unavailable — set "
+                    f"{_CONFIG_FROM_EMAIL} in the PagerDuty config to enable writes"
+                ),
+            )
+        incident_id = signal.labels.get("pd_incident_id", "")
+        if not incident_id:
+            return ActionResult(ok=False, action=action, error="signal carries no PagerDuty id")
+        return await asyncio.to_thread(self._execute_sync, incident_id, action, payload)
+
+    def _execute_sync(self, incident_id: str, action: str, payload: dict[str, Any]) -> ActionResult:
+        try:
+            if action == ACTION_COMMENT:
+                request_json(
+                    f"{_API_BASE}/incidents/{incident_id}/notes",
+                    method="POST",
+                    headers=_headers(for_write=True),
+                    body={"note": {"content": str(payload.get("note", ""))[:1000]}},
+                )
+            else:
+                status = "acknowledged" if action == ACTION_ACK else "resolved"
+                request_json(
+                    f"{_API_BASE}/incidents/{incident_id}",
+                    method="PUT",
+                    headers=_headers(for_write=True),
+                    body={"incident": {"type": "incident_reference", "status": status}},
+                )
+        except HttpError as exc:
+            return ActionResult(ok=False, action=action, error=str(exc))
+        return ActionResult(ok=True, action=action, detail=f"pagerduty {action} {incident_id}")

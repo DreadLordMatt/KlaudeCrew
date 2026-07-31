@@ -2505,6 +2505,17 @@ _CREW_SECRET_LEAVES: list[str] = [
     # handler is the only writer and it opens the path directly, not through this
     # gate, so the operator's Settings toggle still works.
     "computer_use.json",
+    # Ops Mission Control's third-party provider tokens (PagerDuty / Datadog
+    # API + application keys). These are live credentials against a user's
+    # production incident tooling: a leaked one can acknowledge or resolve real
+    # pages. They are here rather than in ``config.json`` for two concrete
+    # reasons — an app's ``data/config.json`` is served over
+    # ``/api/apps/<name>/config`` WITHOUT session auth, and ``config.json``
+    # itself is writable by any auto-approved agent shell. The read+write
+    # keystone floor is the only placement where the agent can neither read the
+    # tokens nor overwrite them. The authenticated dashboard PUT handler is the
+    # sole writer and opens the path directly, so Settings still works.
+    "ops_mission_control_secrets.json",
     "token_signing.key",
     "refresh_chains.json",
     ".local_secret",

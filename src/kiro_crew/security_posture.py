@@ -166,6 +166,14 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
         "StreamRedactor on the live edit stream plus a full pass on the final posted " "message.",
     ),
     (
+        "Ops Mission Control Slack board",
+        "apps/builtins/ops_mission_control/backend/slack_out.py",
+        "Incident titles, resources, and diagnoses mirrored to an ops channel. A "
+        "separate egress boundary from slack/handler.py: this text originates in a "
+        "third-party provider's alarm payload (not a model turn) and lands in a "
+        "channel whose audience is usually wider than the dashboard's.",
+    ),
+    (
         "Slack cron / notification posts",
         "slack/gateway.py",
         "Job names, cron results, and error strings before they reach a channel.",
@@ -285,6 +293,15 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
         ".meta.json values/keys) is redacted at the pending detail-read choke "
         "before it is returned by the dashboard skills API, and again in-place "
         "before an approved candidate is promoted to the live skills dir.",
+    ),
+    (
+        "Ops provider evidence",
+        "apps/builtins/ops_mission_control/backend/registry.py",
+        "Third-party ops payloads (CloudWatch log lines, Datadog monitor context, "
+        "and any companion-contributed EvidenceSource) are redacted at the single "
+        "gather_evidence choke before they reach a model prompt, a transcript, or "
+        "Slack — centrally, so an adapter author cannot leak a credential by "
+        "forgetting to redact.",
     ),
 )
 
@@ -431,6 +448,16 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         # Bundled dev-skill script: prints CI/review findings to a
         # developer terminal, not an agent-output egress path.
         "builtin_skills/kirocrew-dev/prepare-pr/scripts/pr_findings.py",
+        # Ops Mission Control provider-token redactor. ``secrets.py`` DEFINES
+        # ``redact_tokens`` (the PagerDuty/Datadog token shapes) rather than
+        # crossing a boundary with it — the same self-referential case as
+        # ``security.py`` itself. ``providers/http.py`` applies it to an
+        # ``HttpError`` message so a 401 body echoing a token cannot reach a log;
+        # that is a log/diagnostic scrub, not agent output on its way to a user.
+        # The real egress choke for this app is ``gather_evidence`` in
+        # ``.../backend/registry.py``, a registered sink above.
+        "apps/builtins/ops_mission_control/backend/secrets.py",
+        "apps/builtins/ops_mission_control/backend/providers/http.py",
     }
 )
 

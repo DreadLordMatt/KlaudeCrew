@@ -1,0 +1,741 @@
+"""Tests for the config-write surface.
+
+The load-bearing test here is ``test_secret_field_is_refused``. The app's
+``data/config.json`` is served over ``/api/apps/<name>/config`` WITHOUT session
+auth, so a settings form that posted a token to the config route would put a live
+PagerDuty credential behind nothing but the gateway port. The route refuses it;
+this pins that refusal.
+"""
+
+import json
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from aiohttp import web
+
+from kiro_crew.apps.builtins.ops_mission_control.backend import routes
+
+
+def _request(body=None, match_info=None):
+    """A MagicMock request whose ``.json()`` resolves to ``body``."""
+    request = mock.MagicMock(spec=web.Request)
+    request.match_info = match_info or {}
+
+    async def _json():
+        if body is None:
+            raise ValueError("no body")
+        return body
+
+    request.json = _json
+    return request
+
+
+def _payload(response):
+    return json.loads(response.body.decode("utf-8"))
+
+
+class _HomeIsolationMixin:
+    """Redirects the data home so config writes land in a temp dir."""
+
+    def _enter_isolation(self) -> None:
+        import os
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import registry
+
+        self.tmp = Path(tempfile.mkdtemp())
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = str(self.tmp)
+        self._clear_caches()
+        registry.reset_registry()
+
+    def _exit_isolation(self) -> None:
+        import os
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import registry
+
+        registry.reset_registry()
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        self._clear_caches()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _clear_caches():
+        from kiro_crew.config import loader
+
+        for name in ("config_dir", "_config_dir"):
+            fn = getattr(loader, name, None)
+            if fn is not None and hasattr(fn, "cache_clear"):
+                fn.cache_clear()
+
+
+class _HomeIsolatedAsync(_HomeIsolationMixin, unittest.IsolatedAsyncioTestCase):
+    """Async base for tests that await a route handler directly.
+
+    ``IsolatedAsyncioTestCase`` rather than a bare ``asyncio.run`` per test: the
+    subprocess-spawn audit (``test/test_spawn_audit.py``) scans for
+    ``asyncio.<spawn attr>`` calls across the package and ``asyncio.run`` trips it,
+    so the convention here matches the other builtins' async tests.
+    """
+
+    def setUp(self):
+        self._enter_isolation()
+
+    def tearDown(self):
+        self._exit_isolation()
+
+
+class TestProviderConfigRoute(_HomeIsolatedAsync):
+    async def test_secret_field_is_refused(self):
+        """A token must never be writable into the unauthenticated config file."""
+        response = await routes._handle_put_provider_config(
+            _request({"api_token": "u+SuperSecret"}, {"provider_id": "pagerduty"})
+        )
+        self.assertEqual(response.status, 400)
+        body = _payload(response)
+        self.assertIn("secret field", body["error"])
+        # And nothing was written.
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
+            provider_config,
+        )
+
+        self.assertEqual(provider_config("pagerduty"), {})
+
+    async def test_unknown_field_is_refused(self):
+        """The config file must not become a place to stash arbitrary data."""
+        response = await routes._handle_put_provider_config(
+            _request({"totally_made_up": "x"}, {"provider_id": "cloudwatch"})
+        )
+        self.assertEqual(response.status, 400)
+        self.assertIn("no config field", _payload(response)["error"])
+
+    async def test_unknown_provider_is_404(self):
+        response = await routes._handle_put_provider_config(
+            _request({"enabled": True}, {"provider_id": "nope"})
+        )
+        self.assertEqual(response.status, 404)
+
+    async def test_declared_field_is_saved(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
+            provider_config,
+        )
+
+        response = await routes._handle_put_provider_config(
+            _request({"enabled": True, "region": "eu-west-1"}, {"provider_id": "cloudwatch"})
+        )
+        self.assertEqual(response.status, 200)
+        saved = provider_config("cloudwatch")
+        self.assertTrue(saved["enabled"])
+        self.assertEqual(saved["region"], "eu-west-1")
+
+    async def test_merge_preserves_untouched_fields(self):
+        """A form that submits one field must not wipe the rest."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
+            provider_config,
+        )
+
+        await routes._handle_put_provider_config(
+            _request({"enabled": True, "region": "us-east-1"}, {"provider_id": "cloudwatch"})
+        )
+        await routes._handle_put_provider_config(
+            _request({"region": "ap-south-1"}, {"provider_id": "cloudwatch"})
+        )
+        saved = provider_config("cloudwatch")
+        self.assertEqual(saved["region"], "ap-south-1")
+        self.assertTrue(saved["enabled"])  # survived the second write
+
+    async def test_empty_body_is_refused(self):
+        response = await routes._handle_put_provider_config(
+            _request({}, {"provider_id": "cloudwatch"})
+        )
+        self.assertEqual(response.status, 400)
+
+    async def test_non_json_body_is_400(self):
+        response = await routes._handle_put_provider_config(
+            _request(None, {"provider_id": "cloudwatch"})
+        )
+        self.assertEqual(response.status, 400)
+
+
+class TestSettingsRoute(_HomeIsolatedAsync):
+    async def test_valid_mode_is_applied(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        response = await routes._handle_put_settings(_request({"mode": "propose"}))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(rotation.app_mode(), "propose")
+
+    async def test_unknown_mode_is_refused_not_silently_defaulted(self):
+        """A typo must not quietly change what the agent is allowed to do."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        response = await routes._handle_put_settings(_request({"mode": "yolo"}))
+        self.assertEqual(response.status, 400)
+        # Still the safe default.
+        self.assertEqual(rotation.app_mode(), "observe")
+
+    async def test_primary_flag_round_trips(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        await routes._handle_put_settings(_request({"primary_instance": False}))
+        self.assertFalse(rotation.is_primary())
+
+    async def test_non_positive_tuning_is_refused(self):
+        response = await routes._handle_put_settings(_request({"max_claims_per_cycle": 0}))
+        self.assertEqual(response.status, 400)
+
+    async def test_non_integer_tuning_is_refused(self):
+        response = await routes._handle_put_settings(_request({"stale_after_secs": "soon"}))
+        self.assertEqual(response.status, 400)
+
+    async def test_unrecognized_keys_are_refused(self):
+        response = await routes._handle_put_settings(_request({"nonsense": 1}))
+        self.assertEqual(response.status, 400)
+
+
+class TestManifestCrons(unittest.TestCase):
+    """The app is inert unless the manifest declares its crons."""
+
+    def _manifest(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import store
+        from kiro_crew.apps.manifest import AppManifest
+
+        path = Path(__file__).resolve().parents[1] / "app.json"
+        assert path.is_file(), path
+        del store  # only imported to assert the package layout is intact
+        return AppManifest.from_json_file(path)
+
+    def test_manifest_is_valid(self):
+        self.assertEqual(self._manifest().validate(), [])
+
+    def test_all_four_sops_have_a_cron(self):
+        names = {c.name for c in self._manifest().crons}
+        self.assertEqual(names, {"dispatch", "reconcile", "rotation-check", "ledger-hygiene"})
+
+    def test_secrets_live_outside_the_app_dir_so_uninstall_cannot_reach_them(self):
+        """Pins the credential-retention boundary, which is easy to get wrong twice.
+
+        The keystone secret file MUST sit at the crew-home root: that is what puts it
+        on ``security._CREW_SECRET_LEAVES`` so the agent's own tools cannot read or
+        overwrite it. The consequence is that ``uninstall_app``, which removes
+        ``apps/<name>/``, cannot delete it — a PagerDuty/Datadog token outlives an
+        uninstall.
+
+        That is the right trade (moving it under the app dir would hand the agent its
+        own credentials, and silently wiping tokens would break uninstall/reinstall),
+        but it must be DISCLOSED rather than discovered. Settings says so next to the
+        Revoke button, which is the only control that changes it.
+
+        If a future change moves the file under the app dir, this test fails — and the
+        keystone protection would have been quietly lost.
+        """
+        import os
+        import tempfile
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend.secrets import secrets_path
+
+        prev = os.environ.get("KIROCREW_HOME")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["KIROCREW_HOME"] = tmp
+            try:
+                path = secrets_path()
+                self.assertEqual(
+                    path.parent.resolve(),
+                    Path(tmp).resolve(),
+                    "secrets must sit at the crew-home root for the keystone floor",
+                )
+                self.assertNotIn(
+                    "apps",
+                    path.relative_to(Path(tmp)).parts,
+                    "secrets must NOT live under apps/ — uninstall would delete them "
+                    "and the sensitive-path floor would no longer cover them",
+                )
+            finally:
+                if prev is None:
+                    os.environ.pop("KIROCREW_HOME", None)
+                else:
+                    os.environ["KIROCREW_HOME"] = prev
+
+    def test_settings_discloses_that_uninstall_keeps_credentials(self):
+        """The retention boundary is invisible unless the UI says it.
+
+        A user who uninstalls to "remove the app and its data" would otherwise leave a
+        live third-party token on disk with nothing having told them.
+        """
+        # parents[6] is the repo root (…/tests/ops_mission_control/builtins/apps/
+        # kiro_crew/src/<root>). Resolved by counting rather than guessed — an
+        # off-by-one here makes this test skip, which reads as passing.
+        panel = (
+            Path(__file__).resolve().parents[6]
+            / "website/src/apps/ops-mission-control/SettingsPanel.tsx"
+        )
+        if not panel.is_file():  # pragma: no cover - python-only checkout
+            self.skipTest("website/ not present in this checkout")
+        text = panel.read_text(encoding="utf-8")
+        self.assertIn("uninstalling this app does not delete", text)
+
+    def test_only_tier_armed_crons_ship_paused(self):
+        """A cron may ship paused ONLY if some tier will actually resume it.
+
+        This replaces a broader "everything except rotation-check ships paused" rule.
+        That rule's stated concern was "they must not fire before a provider is
+        configured" — but shipping paused is the wrong mechanism for it, and the step-0
+        cheap exit is the right one (which is why rotation-check was already exempted on
+        exactly that basis). Enforced as "paused" it silently killed two more crons:
+        ``ledger-hygiene`` and ``reconcile`` sit on tiers the rotation-check SOP is
+        forbidden to touch, so nothing ever resumed them.
+
+        Only ``on_shift`` crons may ship paused, because rotation-check arms that tier.
+        The cheap-exit guarantee is asserted separately for every enabled cron.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        on_shift = {name.split("/", 1)[1] for name in rotation.TIER_CRONS[rotation.TIER_ON_SHIFT]}
+        for cron in self._manifest().crons:
+            if cron.enabled:
+                continue
+            with self.subTest(cron=cron.name):
+                self.assertIn(
+                    cron.name,
+                    on_shift,
+                    f"{cron.name!r} ships paused but no tier resumes it — it would never run",
+                )
+
+    def test_rotation_check_ships_enabled_or_nothing_ever_arms(self):
+        """The cold-start deadlock this fixes, pinned.
+
+        `dispatch` is armed by the `on_shift` tier, and the only thing that arms that
+        tier is the rotation-check cron. Ship rotation-check paused too and NOTHING
+        resumes it — no code path flips a manifest `enabled: false` — so a user
+        enables the app, configures CloudWatch, and the app never fires. The store
+        listing promises "the on-shift tier arms and disarms itself", which was
+        impossible.
+
+        It is safe to ship enabled because its SOP's step 0 exits with no output when
+        no provider is configured, so a fresh install pays nothing for it.
+        """
+        rotation_check = [c for c in self._manifest().crons if c.name == "rotation-check"]
+        self.assertEqual(len(rotation_check), 1)
+        self.assertTrue(
+            rotation_check[0].enabled,
+            "rotation-check must ship enabled — it is the only thing that arms the "
+            "on_shift tier, so pausing it strands the whole app",
+        )
+
+    def test_every_cron_no_tier_resumes_ships_enabled(self):
+        """Generalizes the cold-start rule the rotation-check test above pins for one job.
+
+        Nothing in the codebase flips a manifest ``enabled: false``. The rotation-check
+        SOP resumes **only** ``tier_crons.on_shift`` — it is explicitly forbidden from
+        touching the ``always`` and ``primary`` tiers ("out of scope and, in the first
+        case, unrecoverable"). So any cron NOT on the ``on_shift`` tier that ships
+        disabled stays disabled forever.
+
+        That had silently happened twice more:
+
+        - ``ledger-hygiene`` (``primary``) — proven dead on a real install: still
+          ``enabled=False`` after days of uptime, ``last_run_at=None``. It is the ONLY
+          caller of the git ledger sync, the vector-index import, and the closed-incident
+          pruning, so all three could never run in production no matter how well tested.
+        - ``reconcile`` (``always``) — a tier whose name means "always armed" shipped
+          disarmed, so the board was never reconciled against provider truth and drifted
+          into fiction exactly as its own SOP warns.
+
+        Only ``dispatch`` may ship disabled, because ``rotation-check`` genuinely arms it.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        on_shift = {name.split("/", 1)[1] for name in rotation.TIER_CRONS[rotation.TIER_ON_SHIFT]}
+        for cron in self._manifest().crons:
+            if cron.name in on_shift:
+                continue
+            with self.subTest(cron=cron.name):
+                self.assertTrue(
+                    cron.enabled,
+                    f"{cron.name!r} is not on the on_shift tier, so nothing will ever "
+                    "resume it — shipping it disabled means it never runs at all",
+                )
+
+    def test_every_enabled_cron_exits_cheaply_when_unconfigured(self):
+        """Enabled means it runs on installs that are not set up.
+
+        Every self-arming cron's prompt must tell the agent to check for a configured
+        provider FIRST and stop, or a fresh install burns agent turns forever on an app
+        the user has not configured. Applied to all of them, not just rotation-check,
+        because enabling two more crons is exactly when this stops being checked.
+        """
+        for cron in self._manifest().crons:
+            if not cron.enabled:
+                continue
+            with self.subTest(cron=cron.name):
+                self.assertIn("configured=true", cron.message)
+                self.assertIn("NO output", cron.message)
+
+    def test_rotation_check_exits_cheaply_when_unconfigured(self):
+        """Enabled means it runs every 5 minutes on installs that are not set up.
+
+        Its prompt must tell the agent to check for a configured provider FIRST and
+        stop, or a fresh install burns an agent turn every five minutes forever.
+        """
+        rotation_check = [c for c in self._manifest().crons if c.name == "rotation-check"][0]
+        self.assertIn("configured=true", rotation_check.message)
+        self.assertIn("NO output", rotation_check.message)
+
+    def test_crons_are_silent_and_stateless(self):
+        """Silence-by-default, and no unbounded session growth on a poller."""
+        for cron in self._manifest().crons:
+            with self.subTest(cron=cron.name):
+                self.assertTrue(cron.silent)
+                self.assertFalse(cron.persistent_session)
+
+    def test_each_cron_has_exactly_one_schedule(self):
+        for cron in self._manifest().crons:
+            with self.subTest(cron=cron.name):
+                self.assertTrue(bool(cron.every) != bool(cron.cron_expr))
+
+    def test_dispatch_cadence_matches_the_spec(self):
+        dispatch_cron = next(c for c in self._manifest().crons if c.name == "dispatch")
+        self.assertEqual(dispatch_cron.every, 120)
+
+    def test_manifest_declares_no_app_local_skills(self):
+        """A builtin's app dir is NOT copied into the data home.
+
+        ``register_builtin_apps`` writes only ``app.json`` + ``installed.json``, so a
+        ``manifest.skills`` entry pointing at an app-local directory registers
+        nothing at all — silently. This app's skill therefore lives in
+        ``builtin_skills/`` (packaged, copied by ``_ensure_builtin_skills``), and
+        the manifest must NOT claim otherwise.
+        """
+        self.assertEqual(self._manifest().skills, [])
+
+
+class TestSkillDelivery(unittest.TestCase):
+    """The skill and its SOPs must actually reach an installed user.
+
+    The crons reference the SOPs by absolute path, so if the files are not copied
+    into the data home every scheduled job fails at its first instruction — with
+    no import error and no failing test to catch it. Hence this test.
+    """
+
+    def _skill_root(self) -> Path:
+        import kiro_crew
+
+        return Path(kiro_crew.__file__).resolve().parent / "builtin_skills" / "ops-mission-control"
+
+    def test_setup_cfg_packages_every_runtime_dir_the_app_has(self):
+        """A runtime directory absent from ``package_data`` ships as nothing.
+
+        Verified once by building a real wheel and running the app from it, which is
+        the only way to be sure — but a wheel build is far too slow for the per-commit
+        gate, so this asserts the *rule* the wheel obeys: every directory under the app
+        that holds runtime files must be matched by a ``setup.cfg`` glob.
+
+        ``planning/`` and ``tests/`` are deliberately unlisted: planning docs are
+        working notes with no runtime role, and ``tests/`` reaches installs via
+        ``packages = find:`` (it has an ``__init__.py``, matching every sibling
+        builtin) rather than via ``package_data``.
+        """
+        repo_root = Path(__file__).resolve().parents[6]
+        cfg = (repo_root / "setup.cfg").read_text(encoding="utf-8")
+
+        app_root = Path(__file__).resolve().parents[1]
+        runtime_dirs = {
+            p.relative_to(app_root).parts[0]
+            for p in app_root.rglob("*")
+            if p.is_file() and "__pycache__" not in p.parts and p.parent != app_root
+        }
+        # Not runtime: working notes, and tests which ship via packages=find:.
+        runtime_dirs -= {"planning", "tests"}
+        self.assertIn("backend", runtime_dirs, "sanity: backend/ must be detected")
+
+        for name in sorted(runtime_dirs):
+            with self.subTest(directory=name):
+                self.assertIn(
+                    f"apps/builtins/*/{name}/**/*",
+                    cfg,
+                    f"{name}/ holds runtime files but no setup.cfg glob matches it — "
+                    "it would be missing from the wheel and the app would break only "
+                    "for pip-installed users",
+                )
+
+    def test_app_is_registered_in_builtin_names(self):
+        """Without this entry the app does not exist to the loader at all.
+
+        Every other test in this suite imports the app's modules directly, so all of
+        them pass whether or not the app is registered — the one thing that makes it
+        REACHABLE is a single line in a shared list that a merge can silently drop.
+        The frontend half is covered by `website/src/test/opsMissionControl.test.ts`;
+        this is the backend half.
+        """
+        from kiro_crew.apps.builtins import BUILTIN_NAMES
+
+        self.assertIn("ops_mission_control", BUILTIN_NAMES)
+
+    def test_frontend_route_is_registered(self):
+        """The dashboard page must be reachable, or the nav entry leads nowhere.
+
+        Asserted from Python as well as vitest because the two registrations live in
+        different languages and a sync that copies one repo's backend without its
+        frontend leaves a half-registered app — which looks fine in the API and blank
+        in the browser.
+        """
+        repo_root = Path(__file__).resolve().parents[6]
+        registry = repo_root / "website/src/apps/builtinRegistry.ts"
+        if not registry.is_file():  # pragma: no cover - python-only checkout
+            self.skipTest("website/ not present in this checkout")
+        self.assertIn("'/ops-mission-control'", registry.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _registered_routes() -> dict:
+        """Path -> {methods} as actually registered by ``register_routes``."""
+        import re
+
+        source = (
+            Path(routes.__file__).read_text(encoding="utf-8") if hasattr(routes, "__file__") else ""
+        )
+        found: dict = {}
+        for match in re.finditer(
+            r'add\.add_(get|post|put|delete)\(\s*f?"\{_BASE\}([^"]*)"', source
+        ):
+            path = f"/api/apps/ops-mission-control{match.group(2)}"
+            found.setdefault(path, set()).add(match.group(1).upper())
+        return found
+
+    def _sop_calls(self):
+        """Every ops API call the SOPs instruct the agent to make.
+
+        Matches the PATH, not a prefix. It previously required the literal
+        ``GATEWAY/api/apps/...``, which silently narrowed the check to whichever lines
+        happened to spell it that way: once the SOPs were rewritten to derive
+        ``$BASE``/``$TOKEN`` from ``kirocrew token``, the scanner saw **4** endpoints out
+        of the **10** actually referenced — so six routes could have been renamed with
+        nothing failing at build time, which is the exact failure this test exists to
+        prevent. A test whose input filter can quietly shrink is worse than no test,
+        because the green tick still claims coverage.
+        """
+        import re
+
+        # parents[4] is src/kiro_crew (routes.py -> backend -> app -> builtins ->
+        # apps -> kiro_crew). Counted, not guessed: an off-by-one makes this SKIP,
+        # and a skip reads as a pass in the summary line.
+        sops = Path(routes.__file__).resolve().parents[4] / "builtin_skills/ops-mission-control"
+        if not sops.is_dir():  # pragma: no cover - python-only checkout
+            self.skipTest("builtin_skills not present in this checkout")
+        calls = []
+        for md in sorted(sops.rglob("*.md")):
+            for line in md.read_text(encoding="utf-8").splitlines():
+                # Trailing punctuation (``.`` / ``,`` / ``)``) is excluded by the charset;
+                # a query string is cut at ``?`` since routes register the path only.
+                for path in re.findall(r"/api/apps/ops-mission-control[a-zA-Z0-9/_-]*", line):
+                    method_match = re.search(r"-X\s+([A-Z]+)", line)
+                    if method_match:
+                        method = method_match.group(1)
+                    elif re.search(r"\bPOST\b", line):
+                        # The SOPs also write prose like "POST /api/apps/.../dispatch".
+                        method = "POST"
+                    else:
+                        method = "GET"
+                    calls.append((md.name, method, path))
+        return calls
+
+    def test_the_sop_scanner_actually_sees_the_sop_calls(self):
+        """Guards the guard: assert the scanner's own yield, not just its verdict.
+
+        ``test_every_sop_endpoint_resolves_to_a_real_route`` passes trivially when the
+        scanner finds nothing, and that is precisely how it silently degraded from 10
+        endpoints to 4. Pinning a floor turns a narrowing filter into a failure instead
+        of a still-green tick.
+        """
+        calls = self._sop_calls()
+        distinct = {path for _, _, path in calls}
+        self.assertGreaterEqual(
+            len(distinct),
+            10,
+            f"scanner sees only {len(distinct)} distinct ops endpoint(s) in the SOPs: "
+            f"{sorted(distinct)} — the filter has narrowed, so routes are unguarded",
+        )
+
+    def test_every_sop_endpoint_resolves_to_a_real_route(self):
+        """The SOPs are the agent's API contract, and a wrong path fails silently.
+
+        An agent told to curl a path that does not exist gets a 404 mid-investigation
+        and has no way to tell "the app is broken" from "I was given the wrong URL". No
+        import error and no failing test would catch it — the same shape as the `omc-*`
+        cron names that made tier arming inert.
+        """
+        registered = self._registered_routes()
+        self.assertTrue(registered, "sanity: routes must be discoverable")
+        for filename, _method, path in self._sop_calls():
+            with self.subTest(sop=filename, path=path):
+                self.assertIn(
+                    path,
+                    registered,
+                    f"{filename} tells the agent to call {path}, which is not registered",
+                )
+
+    def test_every_sop_call_uses_a_method_the_route_accepts(self):
+        """A right path with the wrong verb is a 405 the agent cannot diagnose either.
+
+        Note when writing this test: `-sS` sits before `-X POST` in these curls, so a
+        regex that treats `-X` as optional right after `curl` silently defaults every
+        call to GET and reports three false mismatches. Match `-X` anywhere on the line.
+        """
+        registered = self._registered_routes()
+        for filename, method, path in self._sop_calls():
+            with self.subTest(sop=filename, path=path, method=method):
+                self.assertIn(
+                    method,
+                    registered.get(path, set()),
+                    f"{filename} calls {method} {path}, which accepts "
+                    f"{sorted(registered.get(path, set()))}",
+                )
+
+    def test_readme_exists_and_is_packaged(self):
+        """A public app with no README leaves a stranger — and a companion author —
+        with nowhere to start. Siblings ship one; the packaging glob already exists."""
+        readme = Path(__file__).resolve().parents[1] / "README.md"
+        self.assertTrue(readme.is_file(), "the app must ship a README")
+        repo_root = Path(__file__).resolve().parents[6]
+        cfg = (repo_root / "setup.cfg").read_text(encoding="utf-8")
+        self.assertIn("apps/builtins/*/README.md", cfg)
+
+    def test_readme_companion_contract_names_the_real_symbols(self):
+        """The README documents the companion entry point and the four Protocols.
+
+        A doc that drifts from the code it teaches is worse than none, so pin the
+        load-bearing names against their definitions rather than trusting prose.
+        """
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+        from kiro_crew.apps.builtins.ops_mission_control.backend import companion
+
+        self.assertIn(companion.PROVIDER_GROUP, readme)
+        self.assertIn("register_adapters", readme)
+        for protocol in ("SignalSource", "RotationSource", "ActionSink", "EvidenceSource"):
+            self.assertIn(protocol, readme)
+        # The registrar methods the example calls must exist on the registry.
+        from kiro_crew.apps.builtins.ops_mission_control.backend.registry import (
+            OpsProviderRegistry,
+        )
+
+        for method in ("register_signal_source", "register_action_sink"):
+            self.assertIn(method, readme)
+            self.assertTrue(hasattr(OpsProviderRegistry, method))
+
+    def test_app_manifest_is_packaged(self):
+        """Without app.json the app does not exist to the loader at all."""
+        repo_root = Path(__file__).resolve().parents[6]
+        cfg = (repo_root / "setup.cfg").read_text(encoding="utf-8")
+        self.assertIn("apps/builtins/*/app.json", cfg)
+
+    def test_skill_is_in_the_packaged_builtin_skills_tree(self):
+        self.assertTrue((self._skill_root() / "SKILL.md").is_file())
+
+    def test_every_sop_ships_beside_the_skill(self):
+        sops = self._skill_root() / "sops"
+        found = {p.name for p in sops.glob("*.md")} if sops.is_dir() else set()
+        self.assertEqual(
+            found,
+            {
+                "dispatch.md",
+                "investigate.md",
+                "reconcile.md",
+                "rotation-check.md",
+                "ledger-hygiene.md",
+                # Not cron-driven: a handover is read by a person at a moment they
+                # choose, and a scheduled one nobody reads is the noise this app
+                # exists to avoid. It still must SHIP, or the skill points the agent
+                # at a file that is not there.
+                "handover.md",
+            },
+        )
+
+    def test_every_sop_tells_the_agent_how_to_authenticate(self):
+        """Every SOP calls HTTP endpoints, so every SOP must say how to get a token.
+
+        Regression test for an observed unattended failure. The SKILL and all six SOPs
+        instructed the agent to call routes and NEVER mentioned auth, so a
+        ``rotation-check`` run improvised: it hardcoded a port that belonged to a
+        different gateway, collected ``{"error": "Token required"}`` 65 times, burned 41
+        tool calls hunting for a token the cron runner deliberately destroys before the
+        first tool call, and hit the 1800s cron timeout without ever reaching the API.
+        That reads as "the app is broken" when the fix was six lines of documentation.
+
+        A cron agent may read ONLY its own SOP, so a single note in SKILL.md is not
+        enough — each SOP carries the recipe.
+        """
+        sops = sorted((self._skill_root() / "sops").glob("*.md"))
+        self.assertEqual(len(sops), 6)
+        for sop in sops:
+            text = sop.read_text(encoding="utf-8")
+            self.assertIn("kirocrew token", text, f"{sop.name} never says how to authenticate")
+            self.assertIn("?token=", text, f"{sop.name} does not show how to pass the token")
+
+    def test_the_auth_recipe_does_not_hardcode_a_port(self):
+        """A hardcoded port is the exact failure that cost the timed-out run.
+
+        The recipe must DERIVE the base URL from `kirocrew token`, because the port
+        varies per instance (5476 default, but any operator may run another).
+        """
+        import re
+
+        root = self._skill_root()
+        for doc in [root / "SKILL.md", *sorted((root / "sops").glob("*.md"))]:
+            text = doc.read_text(encoding="utf-8")
+            for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+                if "kirocrew token" not in block:
+                    continue
+                # Inside the auth recipe itself, no literal host:port may appear.
+                self.assertNotRegex(
+                    block,
+                    r"(?:127\.0\.0\.1|localhost):\d+",
+                    f"{doc.name} hardcodes a host:port in the auth recipe",
+                )
+
+    def test_the_auth_recipe_is_runnable_shell(self):
+        """The snippet is copy-pasted by an agent, so it must parse as shell.
+
+        Asserted with `bash -n` on the extracted block rather than by eye: the recipe
+        contains `${URL%%\\?*}`, whose backslash is easy to mangle when editing markdown,
+        and a snippet that fails to parse sends the agent straight back to improvising.
+        """
+        import re
+        import shutil
+        import subprocess
+
+        bash = shutil.which("bash")
+        if not bash:  # pragma: no cover - CI images all have bash
+            self.skipTest("bash not available")
+
+        text = (self._skill_root() / "sops" / "rotation-check.md").read_text(encoding="utf-8")
+        blocks = [b for b in re.findall(r"```bash\n(.*?)```", text, re.S) if "kirocrew token" in b]
+        self.assertTrue(blocks, "the auth recipe block is missing")
+        proc = subprocess.run(
+            [bash, "-n"], input=blocks[0].encode(), capture_output=True, timeout=30
+        )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"auth recipe is not valid shell: {proc.stderr.decode('utf-8', 'replace')}",
+        )
+
+    def test_cron_prompts_point_at_paths_that_will_exist(self):
+        """Each cron's SOP reference must resolve in a real install."""
+        from kiro_crew.apps.manifest import AppManifest
+
+        manifest = AppManifest.from_json_file(Path(__file__).resolve().parents[1] / "app.json")
+        prefix = "~/.kiro/crew/skills/ops-mission-control/sops/"
+        for cron in manifest.crons:
+            with self.subTest(cron=cron.name):
+                self.assertIn(prefix, cron.message)
+                # The referenced file must exist in the packaged tree.
+                referenced = cron.message.split(prefix, 1)[1].split(".md", 1)[0] + ".md"
+                self.assertTrue((self._skill_root() / "sops" / referenced).is_file())
+
+
+if __name__ == "__main__":
+    unittest.main()

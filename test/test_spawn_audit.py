@@ -138,6 +138,23 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
     {
         "acp/runtime.py::_get_rss_mb",
         "acp/runtime.py::_get_rss_tree_mb",
+        # Ops Mission Control ledger-sync tests: fixed `git` argv (init --bare / ls-files)
+        # against a per-test tempdir. Nothing here is agent-influenced — the repo path is
+        # `tempfile.mkdtemp()` and every argument is a literal in the test file. These are
+        # the TEST harness, not shipped code; the module under test (`ledger_sync._git`)
+        # is itself routed through `sandboxed_spawn_argv` and is asserted to be.
+        # Sandboxing them would defeat the point: the tests exist to exercise real git
+        # against a real bare remote, which is how four fatal sync bugs were found that
+        # every mocked-git test passed.
+        "apps/builtins/ops_mission_control/tests/test_ledger_sync_git.py::_git",
+        "apps/builtins/ops_mission_control/tests/test_ledger_sync_git.py::setUp",
+        # Syntax-checks the auth recipe the SOPs hand to an agent, via `bash -n` on the
+        # extracted code block. Fixed argv, no shell, input piped on stdin and never
+        # executed. The snippet contains `${URL%%\?*}`, whose backslash is easy to
+        # mangle when editing markdown, and a recipe that will not parse sends the cron
+        # agent back to improvising — which is the failure this whole test exists for.
+        "apps/builtins/ops_mission_control/tests/test_config_routes.py"
+        "::test_the_auth_recipe_is_runnable_shell",
         "apps/backend.py::_proc_start_time",
         "apps/backend.py::_resolve_nvm_path",
         "apps/backend.py::stop_app_backend",
