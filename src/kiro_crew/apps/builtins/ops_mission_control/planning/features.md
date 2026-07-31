@@ -49,6 +49,37 @@ different set. Re-read them against what shipped:
       equivalents are structural — confidence decay and the 500-entry prune — so porting the
       annotations would add ceremony without adding information.
 
+## Third instance of the same pattern: off-shift writes (2026-07-31)
+
+Went looking for other places where "correct at the layer I tested, defeated one layer up"
+could hide. Audited the `or`-widened booleans (the other two are a `changed` summary and a
+display fallback — both fine), then the autonomy gate, and found a real hole.
+
+- [x] **An off-shift instance could execute a provider write.** `authorize_action` never
+      consulted shift status. The tier gate only pauses SCHEDULED work, and `/incident/action`
+      is reachable independently — as is an investigation already in flight when a shift
+      ends. So an off-shift teammate with `act` mode and a matching rule could acknowledge or
+      resolve a real page in the operator's production tooling. Verified before fixing: bob
+      off shift, `dispatch` tier disarmed, `authorize_action` → *"granted by rule on
+      cloudwatch"*.
+
+      Now refused, and **deliberately narrow**: only a DEFINITE "someone else owns this
+      shift" blocks. An indeterminate schedule (unparseable, expired) must not stop an
+      operator driving an action by hand — that would let a broken file disable the app
+      rather than just its automation. A solo install with no schedule is unaffected. 4 tests.
+
+      *This is arming vs. authority: the tier decides WHEN we look, this decides whether we
+      may act. Both have to be enforced where they are checked — a gate upstream does not
+      protect a path that bypasses it.*
+
+      **Three of my own fixture errors made this take longer than it should have**, and each
+      produced a confident-looking wrong answer: I wrote rules to `cfg["rules"]` instead of
+      `autonomy_rules` (refusal for the wrong reason, which read as a pass); I used a shift
+      window that did not cover the real clock (so the INDETERMINATE path ran and the guard
+      correctly declined to fire — read as the guard being broken); and the test base class
+      stubs `_resolve_login_sync` to `octocat`, shadowing the configured login so an on-call
+      instance read as off-shift. All three are now noted where they bit.
+
 ## Re-verified multi-user gating at the CRON layer (2026-07-31)
 
 The `tier_states` bug meant my earlier three-teammate verification had tested the wrong

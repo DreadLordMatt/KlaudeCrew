@@ -580,3 +580,98 @@ class TestLeader(_Env):
         """So the panel can mark who owns hygiene without a second call."""
         self._write(self.SCHEDULE)
         self.assertEqual(schedule_file.roster()["leader"], "alice")
+
+
+class TestOffShiftCannotWrite(_Env):
+    """An off-shift instance must not execute a provider write.
+
+    The tier gate only pauses SCHEDULED work. `/incident/action` is reachable
+    independently, and an investigation already in flight when a shift ends keeps running —
+    so before this an off-shift teammate with `act` mode and a matching rule could
+    acknowledge or resolve a real page in the operator's production tooling. Verified:
+    dispatch tier disarmed, and `authorize_action` still returned
+    "granted by rule on cloudwatch".
+
+    Third instance of one pattern: a gate one layer up does not protect a path that does
+    not pass through it.
+    """
+
+    #: A window covering any plausible test clock. An earlier version of this fixture used
+    #: 2026-08-01..08 and silently tested the INDETERMINATE path instead, because the real
+    #: clock fell outside it — the guard correctly did not fire and it read as a failure.
+    WIDE = "timezone: UTC\nshifts:\n  - from: 2026-01-01\n    to: 2027-12-31\n    who: alice\n"
+
+    def _grant_act(self, login: str) -> None:
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
+            read_config,
+            write_config,
+        )
+
+        cfg = read_config()
+        cfg["mode"] = "act"
+        # `act` rules must name a resource_glob — no wildcard grants (AutonomyRule).
+        cfg["autonomy_rules"] = [
+            {
+                "source": "cloudwatch",
+                "mode": "act",
+                "resource_glob": "r",
+                "actions": ["ack"],
+            }
+        ]
+        cfg.setdefault("providers", {}).setdefault("schedule-file", {})["github_login"] = login
+        write_config(cfg)
+        schedule_file.reset_login_cache()
+        # The base class stubs `_resolve_login_sync` to "octocat", which would shadow the
+        # config written above — that shadowing made an on-call instance read as off-shift
+        # and looked like a bug in the guard. Repoint the stub at the login under test.
+        self._login.stop()
+        self._login = mock.patch.object(schedule_file, "_resolve_login_sync", return_value=login)
+        self._login.start()
+
+    @staticmethod
+    def _signal():
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import Signal
+
+        return Signal.create(source="cloudwatch", native_id="alarm/X", title="t", resource="r")
+
+    def test_an_off_shift_instance_is_refused(self) -> None:
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        self._write(self.WIDE)
+        self._grant_act("bob")
+        allowed, reason = rotation.authorize_action(self._signal(), "ack")
+        self.assertFalse(allowed, "off shift must not write to a provider")
+        self.assertIn("off shift", reason)
+
+    def test_the_on_call_instance_is_still_allowed(self) -> None:
+        """The refusal must not break the legitimate configured case."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        self._write(self.WIDE)
+        self._grant_act("alice")
+        allowed, reason = rotation.authorize_action(self._signal(), "ack")
+        self.assertTrue(allowed, reason)
+
+    def test_an_indeterminate_schedule_does_not_block_the_operator(self) -> None:
+        """Deliberately narrow: refuse only a DEFINITE "someone else owns this".
+
+        An unparseable or expired schedule must not stop an operator deliberately driving
+        an action by hand — that would make a broken file disable the app rather than just
+        its automation.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        self._write("shifts: [unclosed\n")
+        self._grant_act("bob")
+        self.assertFalse(rotation._definitely_off_shift())
+        allowed, _ = rotation.authorize_action(self._signal(), "ack")
+        self.assertTrue(allowed, "indeterminate must not block a manual action")
+
+    def test_no_schedule_at_all_does_not_block(self) -> None:
+        """Solo install: no rotation configured, so nobody is "off shift"."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        self._grant_act("bob")
+        self.assertFalse(rotation._definitely_off_shift())
+        allowed, _ = rotation.authorize_action(self._signal(), "ack")
+        self.assertTrue(allowed)

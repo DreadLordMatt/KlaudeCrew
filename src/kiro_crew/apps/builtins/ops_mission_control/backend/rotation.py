@@ -184,6 +184,32 @@ def resolve_mode(signal: Signal) -> str:
     return effective_mode(base, best.mode)
 
 
+def _definitely_off_shift() -> bool:
+    """True only when the rotation POSITIVELY says this instance is not on call.
+
+    Synchronous, because ``authorize_action`` is called from a request handler that already
+    holds the answer's inputs on disk — and because an await here would make every action
+    authorization depend on a provider round trip.
+
+    Reads the committed schedule directly rather than ``registry.resolve_shift`` (async, and
+    fans out to every source). ``unknown`` is NOT off-shift: a missing or unparseable
+    schedule must not block an operator who is deliberately driving an action by hand.
+    Returns False on any fault, so a broken schedule can never make the app unusable.
+    """
+    try:
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
+            schedule_file,
+        )
+
+        if not schedule_file.schedule_path().exists():
+            return False  # no rotation configured — solo install
+        status = schedule_file.resolve_now()
+        return bool(not status.on_shift and not status.unknown)
+    except Exception:  # noqa: BLE001 — never let a schedule fault block the operator
+        logger.debug("ops-mission-control: off-shift check unavailable", exc_info=True)
+        return False
+
+
 def authorize_action(signal: Signal, action: str) -> tuple[bool, str]:
     """Decide whether ``action`` may actually execute against ``signal``.
 
@@ -193,6 +219,32 @@ def authorize_action(signal: Signal, action: str) -> tuple[bool, str]:
     """
     if action not in VALID_ACTIONS:
         return _audited(signal, action, False, f"unknown action {action!r}")
+
+    # An OFF-SHIFT instance may not write to a provider, even with `act` mode and a
+    # matching rule.
+    #
+    # The tier gate only pauses SCHEDULED work. This path is reachable independently — the
+    # `/incident/action` route, and an investigation already in flight when a shift ends —
+    # so an off-shift teammate could acknowledge or resolve a real page in the operator's
+    # production tooling. Verified before fixing: bob off shift, `dispatch` tier disarmed,
+    # and `authorize_action` still returned "granted by rule on cloudwatch".
+    #
+    # Same lesson as the two bugs before it: a gate one layer up does not protect a path
+    # that does not pass through it. Arming decides WHEN we look; this decides whether we
+    # may act, and both have to be checked where they are enforced.
+    #
+    # A solo install is unaffected: with no rotation source, `resolve_shift` reports
+    # `unknown=True` and this only refuses a DEFINITE off-shift answer — the same
+    # distinction strict gating draws. Deliberately narrow: refuse when the rotation
+    # positively says someone else owns the shift, never when it merely cannot tell.
+    off_shift = _definitely_off_shift()
+    if off_shift:
+        return _audited(
+            signal,
+            action,
+            False,
+            "this instance is off shift — the on-call instance owns provider writes",
+        )
 
     mode = resolve_mode(signal)
     if MODE_ORDER.get(mode, 0) < MODE_ORDER[MODE_ACT]:
