@@ -532,15 +532,65 @@ class TestAutonomyGate(_HomeIsolated):
 
 
 class TestTierArming(_HomeIsolated):
-    def test_unknown_rotation_arms_the_tier(self):
-        """Fail-open: an unreachable rotation API must not disable response."""
+    def test_a_failing_rotation_api_still_arms_the_tier(self):
+        """Fail-open is preserved — but the SOURCE decides it, not the gate.
+
+        This test used to construct ``on_shift=False, unknown=True`` and assert the tier
+        armed anyway, which encoded ``on_shift or unknown`` into the gate. That silently
+        defeated strict gating: a committed schedule that cannot say whether this operator
+        is on call returns exactly that shape, and the ``or`` re-armed every teammate —
+        verified before the fix (``on_shift=False`` yet ``dispatch armed=True``).
+
+        The intent was always "an unreachable API must not disable response", and that is
+        still true: ``pagerduty.on_shift`` returns ``on_shift=True, unknown=True`` on any
+        failure, which is the shape asserted here. Two sources, two policies for "cannot
+        tell", one gate that just reads ``on_shift``.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers.base import (
+            ShiftStatus,
+        )
+
+        # Exactly what pagerduty.py returns when its API cannot answer.
+        states = rotation.tier_states(ShiftStatus(on_shift=True, unknown=True))
+        self.assertTrue(states[rotation.TIER_ON_SHIFT])
+
+    def test_an_indeterminate_schedule_disarms_the_tier(self):
+        """The other half: a strict source's "cannot tell" must reach the crons.
+
+        `resolve_now` returning ``on_shift=False`` is only meaningful if the tier map
+        honours it. This is the assertion whose absence let the ``or`` survive.
+        """
         from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
         from kiro_crew.apps.builtins.ops_mission_control.backend.providers.base import (
             ShiftStatus,
         )
 
         states = rotation.tier_states(ShiftStatus(on_shift=False, unknown=True))
-        self.assertTrue(states[rotation.TIER_ON_SHIFT])
+        self.assertFalse(states[rotation.TIER_ON_SHIFT])
+        self.assertTrue(states[rotation.TIER_ALWAYS], "rotation-check must survive to re-arm")
+
+    def test_reconcile_is_on_shift_gated_not_always(self):
+        """It mutates SHARED state, so exactly one instance may run it.
+
+        `reconcile` POSTs `incident/transition` and rewrites the incident's Slack message.
+        On the `always` tier every teammate raced to resolve the same incidents and edit
+        the same thread — the shared-state mutation the single-owner model prevents, on the
+        reconciliation path instead of the claim path. The source workflow gates its
+        equivalent (`dispatch-snapshot`) the same way.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+
+        on_shift = rotation.crons_for_tier(rotation.TIER_ON_SHIFT)
+        self.assertIn("ops-mission-control/reconcile", on_shift)
+        self.assertNotIn(
+            "ops-mission-control/reconcile",
+            rotation.crons_for_tier(rotation.TIER_ALWAYS),
+        )
+        # rotation-check must stay always-on, or nothing can re-arm the gated tier.
+        self.assertEqual(
+            rotation.crons_for_tier(rotation.TIER_ALWAYS), ("ops-mission-control/rotation-check",)
+        )
 
     def test_off_shift_disarms(self):
         from kiro_crew.apps.builtins.ops_mission_control.backend import rotation

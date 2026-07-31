@@ -61,8 +61,19 @@ TIER_PRIMARY = "primary"
 _CRON_PREFIX = "ops-mission-control"
 
 TIER_CRONS: dict[str, tuple[str, ...]] = {
-    TIER_ALWAYS: (f"{_CRON_PREFIX}/rotation-check", f"{_CRON_PREFIX}/reconcile"),
-    TIER_ON_SHIFT: (f"{_CRON_PREFIX}/dispatch",),
+    # `rotation-check` is the ONLY always-tier job, and it must be: on a gated tier an
+    # off-shift instance could never re-arm itself.
+    TIER_ALWAYS: (f"{_CRON_PREFIX}/rotation-check",),
+    # `reconcile` is ON-SHIFT, not always. It POSTs `incident/transition` and edits the
+    # incident's Slack message, so on a team every instance would race to resolve the same
+    # incidents and rewrite the same thread — the shared-state mutation the single-owner
+    # model exists to prevent, just on the reconciliation path instead of the claim path.
+    #
+    # It sat on the `always` tier because that read as "keeping the board honest is
+    # everyone's job". It is not: the board is shared, so exactly one instance may correct
+    # it. The source workflow places its equivalent (`dispatch-snapshot`) on the
+    # oncall-gated tier for the same reason.
+    TIER_ON_SHIFT: (f"{_CRON_PREFIX}/dispatch", f"{_CRON_PREFIX}/reconcile"),
     TIER_PRIMARY: (f"{_CRON_PREFIX}/ledger-hygiene",),
 }
 
@@ -273,10 +284,23 @@ def _schedule_me() -> str:
 def tier_states(shift: ShiftStatus) -> dict[str, bool]:
     """Which tiers should be armed, given the current shift status.
 
-    ``shift.unknown`` arms the on-shift tier: failing to reach a rotation API must
-    not silently switch off incident response.
+    **``on_shift`` alone decides.** ``unknown`` is an explanation for the UI, never an
+    arming input.
+
+    This used to read ``shift.on_shift or shift.unknown``, which silently defeated strict
+    gating for exactly the case it was written for: a schedule that cannot say whether this
+    operator is on call returns ``on_shift=False, unknown=True``, and the ``or`` re-armed
+    it anyway. Verified before fixing — an instance with no resolvable login reported
+    ``on_shift=False`` and ``dispatch armed=True``, so every teammate would still pick up
+    the same alarm.
+
+    The fail-open intent is still available and now lives where it belongs: each
+    ``RotationSource`` decides what "cannot tell" means for it. A rotation *API* returns
+    ``on_shift=True, unknown=True`` (a network fault must not disable response); the
+    committed schedule returns ``on_shift=False, unknown=True`` under ``strict_gating``.
+    Two sources, two policies, one gate that just reads the answer.
     """
-    on_shift_armed = bool(shift.on_shift or shift.unknown)
+    on_shift_armed = bool(shift.on_shift)
     return {
         TIER_ALWAYS: True,
         TIER_ON_SHIFT: on_shift_armed,

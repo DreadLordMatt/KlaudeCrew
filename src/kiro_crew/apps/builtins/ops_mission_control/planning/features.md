@@ -49,6 +49,43 @@ different set. Re-read them against what shipped:
       equivalents are structural — confidence decay and the 500-entry prune — so porting the
       annotations would add ceremony without adding information.
 
+## Source-material re-review: the workflow SITE (2026-07-31)
+
+Read `https://ops.meshclaw.zedmor.sci.motor.aws.dev/` — the goal's FIRST artifact, which I
+had never opened. All prior work came from the two local packages. It carries the outcome
+metrics and a three-tier table, and comparing them found two bugs.
+
+Their three named mechanisms behind a 72% median-TTR drop (23.3h → 6.6h), all present here:
+continuous 2-min dispatch (ours: `every=120`, exact match), the known-pattern fast path
+(`fast_path`), and the Slack pin board edited in place. Their tier model matches ours, and
+their `leader:` role confirms the fix from the previous review.
+
+- [x] **`reconcile` was on the wrong tier.** It POSTs `incident/transition` and rewrites the
+      incident's Slack message, but sat on the `always` tier — so on a team EVERY instance
+      raced to resolve the same incidents and edit the same thread. The same shared-state
+      mutation the single-owner model prevents, on the reconciliation path instead of the
+      claim path. The source gates its equivalent (`dispatch-snapshot`) on the oncall tier;
+      moved to match. `rotation-check` stays the sole `always` job, or nothing could re-arm.
+
+- [x] **`tier_states` silently defeated strict gating.** It computed
+      `on_shift or shift.unknown`, so a schedule that cannot say whether this operator is on
+      call — `on_shift=False, unknown=True` — **re-armed anyway**. Verified before fixing: an
+      instance with no resolvable login reported `on_shift=False` and `dispatch armed=True`.
+      Every teammate would still have picked up the same alarm; the strict gating built two
+      commits earlier never reached the crons.
+
+      The gate now reads `on_shift` alone. Fail-open is preserved where it belongs — in the
+      SOURCE: `pagerduty` returns `on_shift=True, unknown=True` on any API failure, the
+      schedule returns `on_shift=False, unknown=True` under strict gating. Two sources, two
+      policies for "cannot tell", one gate that just reads the answer. Verified both: API
+      unreachable → armed; indeterminate schedule → disarmed.
+
+      *An old test had encoded the bug.* `test_unknown_rotation_arms_the_tier` constructed
+      `on_shift=False, unknown=True` and asserted the tier armed — but that is not the shape
+      a rotation API returns. Its intent ("an unreachable API must not disable response")
+      was right and still holds; it now asserts the real `pagerduty` shape, plus a new test
+      for the disarm half whose absence let the `or` survive.
+
 ## Source-material re-review: the context package (2026-07-31)
 
 Audited `InscopeTeamContext` itself, which I had cited for the shared-memory idea but never
