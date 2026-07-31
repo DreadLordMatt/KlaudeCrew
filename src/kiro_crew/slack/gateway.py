@@ -3054,7 +3054,18 @@ class GatewayOrchestrator:
             return None
         if parent_key.startswith("dashboard:"):
             return {"slot": parent_key.removeprefix("dashboard:")}
-        if ":" in parent_key and not parent_key.startswith(("cron:", "subagent:", "hook:")):
+        # A permalink needs a real "<channel-id>:<ts>" pair. Testing only for a
+        # colon meant every other namespaced key minted a bogus Slack URL: a
+        # ``slack:<ts>`` session key yielded channel "slack" (a dead link), and a
+        # ``discord:``/``telegram:`` key produced a fabricated Slack permalink for
+        # a conversation that never happened on Slack.
+        #
+        # Allowlist on the channel-id shape, not a denylist of prefixes to skip:
+        # the taxonomy owns session-key shapes, so registering a new kind can
+        # never leak back into this branch.
+        from kiro_crew.session_kind import is_slack_channel_composite
+
+        if is_slack_channel_composite(parent_key):
             chan, ts = parent_key.split(":", 1)
             return {
                 "slack_link": f"https://amzn-aws.slack.com/archives/{chan}/p{ts.replace('.', '')}"

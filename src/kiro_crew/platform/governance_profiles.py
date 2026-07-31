@@ -34,6 +34,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+from kiro_crew import session_kind
 from kiro_crew.config.paths import config_dir
 from kiro_crew.platform.context import PlatformCompositionError
 from kiro_crew.platform.governance import (
@@ -187,7 +188,19 @@ def audit_governance_degraded(
 # such a surface has no explicitly-bound profile AND its identity is unproven,
 # it resolves to deny-all rather than the (permissive) no-profile path — these
 # are the high-blast-radius surfaces the profile layer exists to contain.
-_UNATTENDED_SURFACES = frozenset({"cron", "subagent", "background", "heartbeat", "taskrunner"})
+#
+# DERIVED, not restated: the taxonomy owns which kinds are unattended, so a new
+# unattended kind is contained here the moment it is registered.  The previous
+# hand-typed set had already drifted narrower than the taxonomy's (it omitted
+# ``hook``/``side``/``channel-agent``/``wf-pool``) — the exact duplication this
+# module's unification exists to remove.
+#
+# Widening to the taxonomy's full set is behaviour-preserving: the branch below
+# is reachable only when identity is UNPROVEN, which is true solely for an empty
+# key and the ``_bg``/``_hb`` sentinels.  Every added member (``hook:``, ``side:``,
+# ``channel-agent:``, ``wf-pool:``) is always carried by a non-empty key, so it
+# proves identity and never reaches the deny-all path.
+_UNATTENDED_SURFACES = session_kind.UNATTENDED_KINDS
 
 # Session-key sentinel for an in-process HOST action that is not driven by any
 # user-facing surface (app activation, Slack workspace admission).  Classifies to
@@ -209,15 +222,73 @@ def _profiles_dir() -> Path:
     return config_dir() / "profiles"
 
 
+#: Surfaces the pre-unification ``sel._infer_source`` returned DIRECTLY. Every
+#: other key hit its terminal ``else -> "slack"``, so anything outside this set
+#: must keep binding to ``"slack"`` — see ``_infer_surface``. Deliberately an
+#: allowlist: a new session kind defaults to the conservative pin rather than
+#: escaping to the policy ceiling.
+_PRE_UNIFICATION_SURFACES = frozenset(
+    {
+        "host",
+        "dashboard",
+        "cron",
+        "subagent",
+        "taskrunner",
+        "background",
+        "heartbeat",
+        "cli",
+    }
+)
+
+#: Key forms ``classify()`` recognises that the pre-unification parser did NOT:
+#: the filename-folded ``dashboard_`` / ``cron_`` / ``subagent_`` variants, the
+#: bare ``chat-`` slot form, and ``cli_chat:`` (the old parser matched only the
+#: exact ``cli_chat`` sentinel). All of these hit the old terminal ``-> "slack"``,
+#: so they stay pinned even though the classifier can now name them properly.
+_POST_UNIFICATION_ONLY_PREFIXES: tuple[str, ...] = (
+    "dashboard_",
+    "cron_",
+    "subagent_",
+    "chat-",
+    "cli_chat:",
+)
+
+
 def _infer_surface(session_key: str) -> str:
-    """Classify a session key to its surface.
+    """Classify a session key to the surface its governance profile binds to.
 
-    Delegates to ``sel._infer_source`` — the single canonical classifier — so
-    governance never grows a 4th, drifting copy of the taxonomy parser.
+    Delegates to the canonical classifier so governance never grows a drifting
+    copy of the taxonomy parser.
+
+    ONE deliberate divergence: any surface the pre-unification classifier did NOT
+    recognise binds to ``"slack"``. The classifier itself reports the true origin
+    (a Discord session reads ``"discord"``, a webhook session ``"hook"``), which is
+    correct for audit and display — but the value returned HERE selects which
+    policy profile applies, and a profile is bound by surface name. Adopting the
+    true origin would move such a session off any ``slack``-bound profile and onto
+    the policy ceiling alone (see the no-bound-profile branch in
+    ``profile_for_session``) -- a RELAXATION for anyone who has bound a Slack
+    profile expecting it to cover these sessions.
+
+    Stated as an allowlist of what the old parser returned DIRECTLY rather than a
+    list of what pins to Slack, so the conservative pin is the default: a kind
+    added to the classifier later cannot silently escape to the ceiling without
+    someone editing this set on purpose.
+
+    Splitting the collapse is a policy decision (does a Slack-bound profile govern
+    Discord? a webhook?) that needs an owner and a migration note, not a side
+    effect of fixing the labels.
     """
-    from kiro_crew.sel import _infer_source
+    from kiro_crew.session_kind import classify
 
-    return _infer_source(session_key)
+    if not session_key:
+        # The empty key is the documented ungoverned opt-out and classified to
+        # "unknown" before unification too.
+        return "unknown"
+    if session_key.startswith(_POST_UNIFICATION_ONLY_PREFIXES):
+        return "slack"
+    surface = classify(session_key).source
+    return surface if surface in _PRE_UNIFICATION_SURFACES else "slack"
 
 
 def _salvage_bind(data: object) -> Optional[Bind]:

@@ -83,6 +83,13 @@ def _default_session_title(key: str, kind: str) -> str:
             return f"Task Runner {key.split(':', 2)[-1]}"
         if "_" in key:
             return f"Task Runner {key.split('_', 2)[-1]}"
+    # A channel-born session used to fall through to `return key`, rendering the
+    # raw session key (e.g. "slack_1785457986.925389") as its user-visible title.
+    from kiro_crew.session_kind import KIND_CHANNEL, classify
+
+    classified = classify(key)
+    if classified.kind == KIND_CHANNEL and classified.channel:
+        return f"{classified.channel.capitalize()} conversation"
     return key
 
 

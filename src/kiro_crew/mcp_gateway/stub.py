@@ -288,16 +288,11 @@ def _build_caller_block(channel_id: Optional[str]) -> dict[str, str]:
     principal = (
         os.environ.get("KIROCREW_PRINCIPAL") or os.environ.get("USER") or ""
     )
-    if session_key.startswith("cron:"):
-        session_type = "cron"
-    elif session_key.startswith("hook:"):
-        session_type = "hook"
-    elif session_key.startswith("dashboard:"):
-        session_type = "dashboard"
-    elif session_key:
-        session_type = "slack-thread"
-    else:
-        session_type = "unknown"
+    # One implementation, shared with the claim path so both ends of the wire
+    # cannot drift (they were hand-mirrored copies before).
+    from kiro_crew.mcp_gateway.claim import classify_session_type
+
+    session_type = classify_session_type(session_key)
     return {
         "session_key": session_key,
         "session_type": session_type,

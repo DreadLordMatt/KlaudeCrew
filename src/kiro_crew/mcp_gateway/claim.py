@@ -45,16 +45,25 @@ _CLAIM_TIMEOUT_SECS = 5.0
 
 
 def classify_session_type(session_key: str) -> str:
-    """Session-type label for a caller block. Mirrors ``stub._build_caller_block``."""
-    if session_key.startswith("cron:"):
-        return "cron"
-    if session_key.startswith("hook:"):
-        return "hook"
-    if session_key.startswith("dashboard:"):
-        return "dashboard"
-    if session_key:
-        return "slack-thread"
-    return "unknown"
+    """Session-type label for a caller block. THE single implementation.
+
+    ``stub._build_caller_block`` calls this rather than keeping its own copy —
+    the two used to be hand-mirrored prefix chains, and both ended in a terminal
+    ``else`` that labelled every non-cron/hook/dashboard key ``slack-thread``,
+    so a Discord or Telegram caller was reported as a Slack thread.
+
+    ``slack-thread`` is preserved verbatim for actual Slack keys: the value goes
+    out on the claim wire, so this is a bug fix for the other transports, not a
+    rename of the existing one.
+    """
+    from kiro_crew.session_kind import KIND_CHANNEL, KIND_UNKNOWN, classify
+
+    kind = classify(session_key)
+    if kind.kind == KIND_CHANNEL:
+        return "slack-thread" if kind.channel == "slack" else kind.channel
+    if kind.kind == KIND_UNKNOWN:
+        return "unknown"
+    return kind.source
 
 
 def build_claim_frame(pid: int, session_key: str, channel_id: Optional[str]) -> dict:

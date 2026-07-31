@@ -564,10 +564,17 @@ class TestOmissionDetection:
         """The audited-surface list must track ``sel._infer_source``'s branches.
 
         Guards the drift the previous hand-typed 8-tuple had already suffered.
+
+        The transport probes are GENERATED from ``messaging.link``'s registry
+        rather than typed out. A hand-typed probe set is what let ``whatsapp``
+        through: it was a registered transport absent from both the vocabulary and
+        this guard, so the two agreed with each other and disagreed with reality.
         """
         from kiro_crew import sel as sel_mod
+        from kiro_crew.messaging.link import CHANNEL_SESSION_NAMESPACES
 
-        # Every source _infer_source can return must be in the published tuple...
+        # Non-channel origins: one literal probe each, since their key shapes are
+        # sentinels and prefixes rather than registry entries.
         probes = {
             "": "unknown",
             "_host": "host",
@@ -578,8 +585,16 @@ class TestOmissionDetection:
             "_bg": "background",
             "_hb": "heartbeat",
             "cli_chat": "cli",
-            "C123:456.789": "slack",
+            "hook:abc": "hook",
+            "side:chat-1": "side",
+            "channel:C123": "channel-agent",
+            "wf-pool:run1": "wf-pool",
         }
+        # One probe per REGISTERED transport, generated so a transport added to
+        # the registry is exercised here without editing this test.
+        for namespace in sorted(CHANNEL_SESSION_NAMESPACES):
+            probes[f"{namespace}:kirocrew:direct:probe"] = namespace
+
         for key, expected in probes.items():
             assert sel_mod._infer_source(key) == expected, key
         assert set(probes.values()) == set(sel_mod.audit_sources()), (

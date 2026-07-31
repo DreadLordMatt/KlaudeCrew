@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from kiro_crew.history import ConversationLog
     from kiro_crew.slack.client import SlackClientOps
 
+from kiro_crew.session_kind import source_of
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,12 +35,7 @@ def list_recent_sessions(
         key = s.get("key", "")
         if not key:
             continue
-        if key.startswith("dashboard:") or key.startswith("dashboard_"):
-            source = "dashboard"
-        elif key.startswith("cron:") or key.startswith("cron_"):
-            source = "cron"
-        else:
-            source = "slack"
+        source = source_of(key)
         result.append(
             {
                 "key": key,

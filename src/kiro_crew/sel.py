@@ -28,6 +28,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from kiro_crew import platform_compat
@@ -867,28 +868,14 @@ def _infer_source(session_key: str) -> str:
     honest bind target (``bind: {type: surface, id: host}``) instead of the
     accidental ``slack`` an empty key used to classify to.
     """
-    if not session_key:
-        return "unknown"
-    if session_key == "_host":
-        return "host"
-    if session_key.startswith("dashboard:"):
-        return "dashboard"
-    if session_key.startswith("cron:"):
-        return "cron"
-    if session_key.startswith("subagent:"):
-        return "subagent"
-    if session_key.startswith("taskrunner"):
-        return "taskrunner"
-    if session_key == "_bg":
-        return "background"
-    if session_key == "_hb":
-        return "heartbeat"
-    if session_key == "cli_chat":
-        return "cli"
-    return "slack"
+    from kiro_crew.session_kind import source_of
+
+    return source_of(session_key)
 
 
-_AUDIT_SOURCES: tuple[str, ...] = (
+#: Preferred display order for the surfaces that existed before the session
+#: taxonomy was unified. Ordering only -- membership is NOT decided here.
+_AUDIT_SOURCE_ORDER: tuple[str, ...] = (
     "unknown",
     "host",
     "dashboard",
@@ -902,6 +889,25 @@ _AUDIT_SOURCES: tuple[str, ...] = (
 )
 
 
+@lru_cache(maxsize=1)
+def _audit_sources() -> tuple[str, ...]:
+    """Every ``source`` :func:`_infer_source` can stamp.
+
+    DERIVED from the canonical classifier's own vocabulary, not restated: any
+    transport registered in ``messaging.link`` must be stampable or its events
+    cannot be audited at all. Hand-typing this list is how ``whatsapp`` was
+    omitted on the first cut of the unified taxonomy -- it was a registered
+    transport that the classifier reported and this tuple denied.
+
+    Computed on first use rather than at import: ``session_kind`` reaches the
+    transport registry through ``messaging.link``, which imports ``acp`` ->
+    ``security`` -> back into this module. Deferring the read breaks that cycle.
+    """
+    from kiro_crew.session_kind import all_sources
+
+    return _AUDIT_SOURCE_ORDER + tuple(sorted(all_sources() - set(_AUDIT_SOURCE_ORDER)))
+
+
 def audit_sources() -> tuple[str, ...]:
     """Every ``source`` value :func:`_infer_source` can stamp on an event.
 
@@ -912,7 +918,7 @@ def audit_sources() -> tuple[str, ...]:
     ``_infer_source``'s actual branches, so adding a surface there without adding
     it here fails CI.
     """
-    return _AUDIT_SOURCES
+    return _audit_sources()
 
 
 def sel() -> SecurityEventLog:

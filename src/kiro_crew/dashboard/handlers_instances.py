@@ -53,17 +53,24 @@ def _audit(operation: str, outcome: str, *, request_id: str = "", error: str = "
         logger.debug("SEL audit failed for instances_%s", operation, exc_info=True)
 
 
-def _is_slack_origin(request: web.Request) -> bool:
-    """True if the request arrived via the Slack path (X-Session-Key 'slack:*')."""
-    sk = request.headers.get("X-Session-Key", "")
-    return sk.startswith("slack:")
+def _is_channel_origin(request: web.Request) -> bool:
+    """True if the request arrived from a messaging channel, not the dashboard.
+
+    Covers EVERY transport, not just Slack. This gate previously tested
+    ``sk.startswith("slack:")``, so a request whose ``X-Session-Key`` named any
+    other channel — Discord, Telegram, Teams, Webex, WeCom, Weixin — passed the
+    owner-only check that an identical Slack request was denied.
+    """
+    from kiro_crew.messaging.link import is_channel_session_key
+
+    return is_channel_session_key(request.headers.get("X-Session-Key", ""))
 
 
 def _guard(request: web.Request, operation: str) -> web.Response | None:
     """Shared gate: enabled-check + owner-only (non-Slack). Returns a denial
     Response to short-circuit, or None to proceed. Audits every denial."""
-    if _is_slack_origin(request):
-        _audit(operation, "denied", error="slack-origin rejected")
+    if _is_channel_origin(request):
+        _audit(operation, "denied", error="channel-origin rejected")
         return web.json_response(
             {"error": "instances control plane is owner-only (not reachable via Slack)"},
             status=403,

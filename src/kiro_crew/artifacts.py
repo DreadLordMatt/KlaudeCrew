@@ -43,6 +43,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from dataclasses import fields as fields_of
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterator
 from typing import List as _List
@@ -108,12 +109,9 @@ ALLOWED_KINDS = frozenset(
     }
 )
 
-#: Allowed source markers (provenance).
-ALLOWED_SOURCES = frozenset(
+#: Provenance/creation buckets that predate the unified session taxonomy.
+_LEGACY_SOURCES = frozenset(
     {
-        # Provenance/creation buckets (back-compat) + actual session origins from
-        # ``infer_use_case`` so an artifact's source can reflect WHERE the saving
-        # session came from rather than a generic "manual".
         "chat",
         "cron",
         "subagent",
@@ -126,6 +124,27 @@ ALLOWED_SOURCES = frozenset(
         "unknown",
     }
 )
+
+
+@lru_cache(maxsize=1)
+def allowed_sources() -> frozenset[str]:
+    """Allowed source markers (provenance).
+
+    The legacy creation buckets above, PLUS every source the canonical session
+    classifier can report -- derived from ``session_kind.all_sources()`` rather
+    than restated. ``infer_use_case`` stamps those, and :func:`_validate_source`
+    rejects anything absent, so a transport registered in ``messaging.link`` but
+    missing here would turn an artifact save into a 400.
+
+    Read on first use rather than at import: the classifier reaches the transport
+    registry through ``messaging``, which imports ``acp.runtime`` -> ``validation``
+    -> back into this module. ``validation`` needs only ``MAX_CONTENT_BYTES`` from
+    here, so deferring keeps that partial import satisfiable.
+    """
+    from kiro_crew.session_kind import all_sources
+
+    return _LEGACY_SOURCES | all_sources()
+
 
 #: Allowed lifecycle event types. ``referenced`` is reserved for chat-mention
 #: scanning (added in a follow-up CR); the in-line save/update path emits
@@ -550,9 +569,9 @@ def _markdown_misclassification_reason(content: str, source_path: str) -> str | 
 
 
 def _validate_source(source: str) -> str:
-    if source not in ALLOWED_SOURCES:
+    if source not in allowed_sources():
         raise ArtifactValidationError(
-            f"invalid source {source!r}: must be one of {sorted(ALLOWED_SOURCES)}"
+            f"invalid source {source!r}: must be one of {sorted(allowed_sources())}"
         )
     return source
 

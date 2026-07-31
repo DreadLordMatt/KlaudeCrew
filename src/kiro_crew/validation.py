@@ -141,23 +141,28 @@ def infer_use_case(session_key: str) -> str:
     invocations into one session each. Both can be fixed in a follow-up
     by appending a ``:<uuid>`` suffix at the entry point.
     """
-    if not session_key:
-        return "unknown"
-    if session_key.startswith("cron:") or session_key.startswith("cron_"):
-        return "cron"
-    if session_key.startswith("subagent:") or session_key.startswith("subagent_"):
-        return "subagent"
-    if session_key == "_bg":
-        return "subagent"
-    if session_key.startswith("taskrunner_") or session_key.startswith("taskrunner:"):
-        return "task-runner"
-    if session_key.startswith("dashboard:") or session_key.startswith("chat-"):
-        return "dashboard"
-    if session_key == "cli_chat" or session_key.startswith("cli_chat:"):
-        return "cli"
-    if SLACK_THREAD_TS_RE.match(session_key):
+    from kiro_crew.session_kind import (
+        KIND_BACKGROUND,
+        KIND_TASKRUNNER,
+        KIND_UNKNOWN,
+        classify,
+    )
+
+    if SLACK_THREAD_TS_RE.match(session_key or ""):
+        # A bare Slack thread ts predates the namespaced form; the classifier
+        # only recognises `slack:<ts>`, so keep honouring the legacy shape.
         return "slack"
-    return "unknown"
+    kind = classify(session_key)
+    # This function's vocabulary is persisted (``Artifact.source``) and emitted as
+    # a metric attribute, so two labels stay pinned to their historical spelling
+    # rather than adopting the canonical constants.
+    if kind.kind == KIND_TASKRUNNER:
+        return "task-runner"
+    if kind.kind == KIND_BACKGROUND:
+        return "subagent"
+    if kind.kind == KIND_UNKNOWN:
+        return "unknown"
+    return kind.source
 
 
 # Valid Jira project key pattern (e.g. PROJ, TEAM_X)

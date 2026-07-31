@@ -640,6 +640,18 @@ _AUDIT_SURFACE_DETAIL: dict[str, str] = {
     "cli": "Terminal chat sessions",
     "host": "In-process governance checks not driven by a user-facing surface",
     "unknown": "Events that carry no surface signal (classified rather than misattributed)",
+    "discord": "Discord messages, approvals, and owner-authorization decisions",
+    "telegram": "Telegram messages, approvals, and owner-authorization decisions",
+    "teams": "Microsoft Teams messages and owner-authorization decisions",
+    "webex": "Webex messages and owner-authorization decisions",
+    "wecom": "WeCom messages (inbound-bound replies only)",
+    "weixin": "Weixin messages and owner-authorization decisions",
+    "whatsapp": "WhatsApp messages and owner-authorization decisions",
+    "unified": "Cross-transport direct messages under a unified DM scope",
+    "hook": "Inbound webhook-triggered sessions",
+    "side": "Sidecar question-and-answer sessions",
+    "channel-agent": "Channel-scoped agent sessions with reduced tool access",
+    "wf-pool": "Pooled workflow-execution sessions",
 }
 
 

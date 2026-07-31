@@ -28,7 +28,7 @@ class TestListRecentSessions:
     def test_returns_sessions_with_source(self, tmp_path):
         log = ConversationLog(base_dir=tmp_path)
         log.append("dashboard_chat-1-100", "user", "hello")
-        log.append("thread-slack-1", "user", "hi from slack")
+        log.append("slack_1785457986.925389", "user", "hi from slack")
         log.append("cron_job-1", "user", "cron msg")
         result = list_recent_sessions(log, limit=10)
         sources = {s["source"] for s in result}

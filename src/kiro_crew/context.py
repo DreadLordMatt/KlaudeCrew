@@ -579,7 +579,16 @@ _RUNTIME_DISPLAY = {
     "taskrunner": "KiroCrew task runner",
     "background": "KiroCrew background",
     "cli": "CLI terminal",
+    "heartbeat": "KiroCrew heartbeat",
     "slack": "Slack",
+    "discord": "Discord",
+    "telegram": "Telegram",
+    "teams": "Teams",
+    "webex": "Webex",
+    "wecom": "WeCom",
+    "weixin": "Weixin",
+    "whatsapp": "WhatsApp",
+    "unified": "direct message",
 }
 
 
@@ -589,20 +598,9 @@ def _runtime_display_name(session_key: str) -> str:
     Uses the same prefix heuristic as ``sel.py:_infer_source()`` so both
     SEL audit logs and LLM context agree on the runtime.
     """
-    if session_key.startswith("dashboard:") or session_key.startswith("dashboard_"):
-        source = "dashboard"
-    elif session_key.startswith("cron:") or session_key.startswith("cron_"):
-        source = "cron"
-    elif session_key.startswith("subagent:"):
-        source = "subagent"
-    elif session_key.startswith("taskrunner"):
-        source = "taskrunner"
-    elif session_key == "_bg":
-        source = "background"
-    elif session_key == "cli_chat":
-        source = "cli"
-    else:
-        source = "slack"
+    from kiro_crew.session_kind import source_of
+
+    source = source_of(session_key)
     return _RUNTIME_DISPLAY.get(source, source)
 
 

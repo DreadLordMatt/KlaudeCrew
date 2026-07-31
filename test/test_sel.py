@@ -350,7 +350,17 @@ class TestInferSource:
         ("_bg", "background"),
         ("cli_chat", "cli"),
         ("C08HZAWV4TP:thread123", "slack"),
-        ("random_key", "slack"),
+        # Every other messaging transport is now identified rather than being
+        # swept into "slack" by a terminal fallback.
+        ("slack:1785457986.925389", "slack"),
+        ("discord:kirocrew:direct:9:gen3", "discord"),
+        ("telegram:kirocrew:forum:22:gen1", "telegram"),
+        ("teams:kirocrew:direct:a@b.com", "teams"),
+        # An unrecognised key carries no surface signal → "unknown", NOT "slack".
+        # Guessing Slack here mislabelled every non-Slack transport in the audit
+        # log; the governance bind target keeps its historical value separately
+        # (see governance_profiles._infer_surface).
+        ("random_key", "unknown"),
         # An empty key carries no surface signal → "unknown", NOT "slack"
         # (an app-activation governance degrade passes no session_key).
         ("", "unknown"),
