@@ -49,6 +49,39 @@ different set. Re-read them against what shipped:
       equivalents are structural — confidence decay and the 500-entry prune — so porting the
       annotations would add ceremony without adding information.
 
+## Re-verified multi-user gating at the CRON layer (2026-07-31)
+
+The `tier_states` bug meant my earlier three-teammate verification had tested the wrong
+layer: it asserted `resolve_now` and `tier_states` separately, and passed because a named
+login always resolves a definite answer — the indeterminate path never went through the
+gate. Re-ran it against the real repo, asserting **what the crons see**:
+
+| instance | dispatch | reconcile | hygiene |
+|---|---|---|---|
+| alice (on call + leader) | ARMED | ARMED | ARMED |
+| bob | paused | paused | paused |
+| carol | paused | paused | paused |
+| no resolvable login | paused | paused | — (`rotation-check` stays ARMED to re-arm) |
+
+All three crons now gate correctly on a real shared schedule, including the case the old
+test never reached through the map.
+
+*First run showed hygiene ARMED on all three — because the remote schedule had no `leader:`
+key, so every instance correctly fell back to `primary_instance=True`. Documented behavior,
+not a bug; added `leader: alice` to the shared fixture and it resolved to one owner.*
+
+- [x] **Known consequence documented rather than papered over.** The pre-merge commit that
+      makes ledger pulls possible at all is `TRACKED_FILES`-wide, so an instance holding a
+      local `rotation.yaml` commits it, the merge conflicts against the remote's, and
+      resolve-to-theirs **discards the local edit**. Observed on a first pull.
+
+      Left as-is deliberately: taking the remote is the right convergence rule for a
+      single-owner fact, and skipping the pre-merge commit for the schedule alone would
+      reintroduce git's "untracked file would be overwritten" refusal that made pulls
+      impossible. The discard logs at WARNING with re-apply instructions and survives in the
+      reflog. The real fix is editing the schedule through the repo — which is what the
+      shared-file model already asks for.
+
 ## Source-material re-review: the workflow SITE (2026-07-31)
 
 Read `https://ops.meshclaw.zedmor.sci.motor.aws.dev/` — the goal's FIRST artifact, which I

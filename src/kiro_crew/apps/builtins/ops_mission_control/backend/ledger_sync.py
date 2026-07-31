@@ -334,6 +334,22 @@ async def pull() -> tuple[bool, str]:
     # Committing first is also the correct semantic: this instance's entries are real
     # work, and the merge is meant to UNION them with the team's, which is exactly what
     # the conflict reconciler below does.
+    #
+    # KNOWN CONSEQUENCE for the SCHEDULE, which does not union. Staging is
+    # ``TRACKED_FILES``-wide, so an instance holding a local ``rotation.yaml`` commits it
+    # here and the merge then conflicts against the remote's — resolved to "theirs", which
+    # DISCARDS the local edit. Observed on a first pull in the three-instance run, where a
+    # freshly-written local schedule met a remote one.
+    #
+    # Left as-is deliberately: taking the remote is the correct convergence rule for a
+    # single-owner fact (see ``_resolve_schedule_conflict``), and the alternative — skipping
+    # the pre-merge commit for the schedule alone — would reintroduce git's
+    # "untracked file would be overwritten" refusal that made pulls impossible at all.
+    # The discard is logged at WARNING with the re-apply instruction, and the operator's
+    # edit survives in the reflog.
+    #
+    # The right FIX is a schedule edited through one path (the repo, reviewed) rather than
+    # locally on each instance — which is what the shared-file model already asks for.
     await _stage_and_commit("local ops ledger before merge")
 
     # ``--allow-unrelated-histories`` is REQUIRED here, not a convenience. Every instance
