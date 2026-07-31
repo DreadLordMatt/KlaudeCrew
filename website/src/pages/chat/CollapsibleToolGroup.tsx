@@ -113,13 +113,20 @@ const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, autoExp
         <span>{labelNode}</span>
       </button>
 
-      {/* Inline approval: command preview + action buttons */}
+      {/* Inline approval: command preview + action buttons.
+          The BUTTONS render whether the group is expanded or collapsed. They used to
+          be collapsed-only, which hid them exactly when they matter: a group with a
+          live pending approval AUTO-EXPANDS (`autoExpand` while running), so the one
+          turn waiting on you was the one turn you could not answer — the agent then
+          sat parked with no visible way to unblock it. The PREVIEW stays
+          collapsed-only on purpose: expanded, the children already show the tool
+          call, so repeating it is noise. */}
       {needsAttention && !expanded && onApprove && truncated && (
         <div className="mt-1 ml-4 border-l-[3px] border-l-amber-400 pl-3">
           <pre className="bg-bg-hover rounded-md px-3 py-2 text-[13px] font-mono overflow-x-auto whitespace-pre-wrap break-all max-h-[4.5em] overflow-y-auto mb-1.5"><ToolInputText text={truncated} /></pre>
         </div>
       )}
-      {needsAttention && !expanded && onApprove && (
+      {needsAttention && onApprove && (
         <div className="mt-1 ml-4 pl-3 flex gap-1.5 flex-wrap">
           <button disabled={submitting} className="px-2.5 py-1 rounded-md border border-border bg-transparent text-muted text-[13px] cursor-pointer font-body hover:text-text hover:border-border-strong hover:bg-bg-hover transition-all disabled:opacity-50 disabled:cursor-not-allowed" onClick={e => { e.stopPropagation(); submitDecision('approved') }}><CheckCircle className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.approve')}</button>
           <button disabled={submitting} className="px-2.5 py-1 rounded-md border border-border bg-transparent text-muted text-[13px] cursor-pointer font-body hover:text-text hover:border-border-strong hover:bg-bg-hover transition-all disabled:opacity-50 disabled:cursor-not-allowed" onClick={e => { e.stopPropagation(); submitDecision('trust') }}><Handshake className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.trust')}</button>

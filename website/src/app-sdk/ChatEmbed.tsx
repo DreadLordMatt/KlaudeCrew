@@ -73,6 +73,47 @@ function ChatEmbed({ slotKey, agent, placeholder }: ChatEmbedProps) {
     sendMutation.mutate(msg)
   }, [input, sendMutation])
 
+  /**
+   * Resolve a tool-approval request from inside the embed.
+   *
+   * Without this the approval card RENDERS but its buttons do nothing, so an
+   * embedded agent that asks permission (e.g. an ops investigation wanting to run
+   * a read-only probe) stalls forever with no way to answer it — and the stall is
+   * silent, because the card looks interactive.
+   *
+   * `trust*` decisions map to `approve`: the embed has no session-scoped trust
+   * store of its own, so the honest behavior is to allow this one call rather than
+   * to imply a persistent grant the embed cannot make. Anything else rejects, so an
+   * unrecognized decision fails CLOSED — the safe direction when the alternative is
+   * running a tool the operator did not sanction.
+   *
+   * Requires `/api/approvals/*` in the host app's `allowedApiPaths` — the scoped
+   * API throws on an undeclared path, which would otherwise surface only here.
+   * `POST /api/approvals/{id}/{action}` accepts exactly `approve` or `reject`
+   * (`handlers/sessions.py::api_approval_resolve`); anything else is a 400.
+   */
+  const approveMutation = useMutation({
+    mutationFn: ({ approvalId, decision }: { approvalId: string; decision: string }) => {
+      const action =
+        decision === 'approved' || decision.startsWith('trust') ? 'approve' : 'reject'
+      return api
+        .post(`/api/approvals/${encodeURIComponent(approvalId)}/${action}`, {})
+        .catch((err) => {
+          // Some resolve responses are empty/non-JSON — the same expected parse
+          // failure the send path above tolerates.
+          if (err instanceof SyntaxError) return
+          throw err
+        })
+    },
+  })
+
+  const handleApprove = useCallback(
+    (approvalId: string, decision: string) => {
+      approveMutation.mutate({ approvalId, decision })
+    },
+    [approveMutation],
+  )
+
   return (
     <div className="flex flex-col h-full min-h-0 border border-border rounded-lg overflow-hidden bg-bg">
       <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-card shrink-0">
@@ -86,7 +127,7 @@ function ChatEmbed({ slotKey, agent, placeholder }: ChatEmbedProps) {
         {messages.length === 0 && !running && (
           <div className="text-center text-muted text-[13px] py-10">{i18nT('appSdk.chatEmbed.session_ready_type_a_message_to_start')}</div>
         )}
-        <ChatMessageList messages={messages} running={running} />
+        <ChatMessageList messages={messages} running={running} onApprove={handleApprove} />
         <div ref={endRef} />
       </div>
 
