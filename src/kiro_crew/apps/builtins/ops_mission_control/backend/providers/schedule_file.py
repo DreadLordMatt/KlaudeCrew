@@ -244,6 +244,47 @@ def read_schedule() -> tuple[list[dict[str, Any]], str, str]:
     return entries, tz_name, ""
 
 
+#: Config key for STRICT gating. Default TRUE for a committed schedule, which is the
+#: opposite of the fail-open default a rotation *API* needs — and the difference is the
+#: whole point of this source.
+#:
+#: With a remote API, "cannot tell" means the network is down: arming is right, because
+#: wrongly disarming one instance loses incident response and the API is not something
+#: the team controls.
+#:
+#: With a schedule file every instance reads, "cannot tell" means the SCHEDULE is wrong
+#: (expired, unparseable, or this operator's login is missing). Arming then makes *every*
+#: instance in the mesh pick up the same work — the exact double-claim the shared schedule
+#: exists to prevent. So the safe direction inverts: when the file cannot say you are on
+#: call, you are not.
+#:
+#: Set false to restore fail-open for a single-instance install that would rather over-fire
+#: than miss an alarm.
+_CONFIG_STRICT = "strict_gating"
+
+
+def strict_gating() -> bool:
+    """Whether an indeterminate schedule DISARMS this instance (default: yes)."""
+    raw = config_value(PROVIDER_ID, _CONFIG_STRICT)
+    if raw is None or str(raw).strip() == "":
+        return True
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+
+def _indeterminate(reason: str) -> ShiftStatus:
+    """The schedule cannot say whether this operator is on call.
+
+    Under strict gating (the default) this DISARMS: ``on_shift=False`` with
+    ``unknown=True`` so the UI can still distinguish "the file says someone else" from
+    "the file cannot tell". ``rotation.tier_states`` reads ``on_shift`` for arming, so the
+    tier goes down while the reason stays visible.
+    """
+    logger.debug("ops-mission-control: rotation indeterminate (%s)", reason)
+    if strict_gating():
+        return ShiftStatus(on_shift=False, unknown=True)
+    return ShiftStatus(on_shift=True, unknown=True)
+
+
 def resolve_now(now: datetime | None = None) -> ShiftStatus:
     """Who is on shift right now, per the committed schedule.
 
@@ -252,8 +293,7 @@ def resolve_now(now: datetime | None = None) -> ShiftStatus:
     """
     shifts, tz_name, error = read_schedule()
     if error:
-        # Unknown, not off-shift: see the module docstring on fail-open.
-        return ShiftStatus(on_shift=True, unknown=True)
+        return _indeterminate(error)
 
     tz = _tzinfo(tz_name)
     moment = now or datetime.now(timezone.utc)
@@ -262,8 +302,7 @@ def resolve_now(now: datetime | None = None) -> ShiftStatus:
 
     me = _resolve_login_sync()
     if not me:
-        logger.debug("ops-mission-control: no GitHub login resolved; rotation is unknown")
-        return ShiftStatus(on_shift=True, unknown=True)
+        return _indeterminate("no GitHub login resolved for this instance")
 
     for entry in shifts:
         start = _parse_moment(entry.get("from"), tz, end=False)
@@ -283,10 +322,10 @@ def resolve_now(now: datetime | None = None) -> ShiftStatus:
         if logins:
             return ShiftStatus(on_shift=False, who=", ".join(logins), until=end.isoformat())
 
-    # No window covers now. That is a real gap in the schedule (a rotation that ran
-    # out, or a not-yet-filled week) — report unknown so the tier stays armed rather
-    # than letting an expired file quietly disable everyone's response.
-    return ShiftStatus(on_shift=True, unknown=True)
+    # No window covers now: an expired rotation or a not-yet-filled week. Under strict
+    # gating nobody picks up work, which is the correct behavior for a team schedule — an
+    # unfilled slot means the team has not assigned the shift, not that everyone owns it.
+    return _indeterminate("no shift window covers the current time")
 
 
 class ScheduleFileRotationSource:
@@ -312,6 +351,77 @@ class ScheduleFileRotationSource:
             return ShiftStatus(on_shift=True, unknown=True)
         # File read, YAML parse, and a possible `gh` spawn are all synchronous.
         return await asyncio.to_thread(resolve_now)
+
+
+def roster(now: datetime | None = None) -> dict[str, Any]:
+    """The whole team and its shift order — not just whoever holds the pager now.
+
+    Exists because "who is on call" alone cannot answer the questions an operator
+    actually has: is my instance idle because someone else has it, or because the file is
+    broken? Who is up next? Am I even ON this rotation? A single ``who`` string makes all
+    three indistinguishable, and an instance that has quietly stopped picking up work
+    looks identical to one that is simply off shift.
+
+    Returns members in first-shift order (stable, so the UI does not reshuffle between
+    polls), each with their shift count and whether they hold the current window. ``me``
+    is this instance's resolved login so the UI can mark "you" without a second call.
+    """
+    shifts, tz_name, error = read_schedule()
+    tz = _tzinfo(tz_name)
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+
+    members: dict[str, dict[str, Any]] = {}
+    windows: list[dict[str, Any]] = []
+    for entry in shifts:
+        start = _parse_moment(entry.get("from"), tz, end=False)
+        end = _parse_moment(entry.get("to"), tz, end=True)
+        logins = _whos(entry)
+        if start is None or end is None or end <= start or not logins:
+            # Same skip the resolver applies. Counting a malformed row would inflate a
+            # member's shift count and imply coverage that does not exist.
+            continue
+        current = start <= moment < end
+        windows.append(
+            {
+                "from": start.isoformat(),
+                "to": end.isoformat(),
+                "who": logins,
+                "current": current,
+            }
+        )
+        for login in logins:
+            slot = members.setdefault(
+                login.lower(), {"login": login, "shifts": 0, "on_call_now": False}
+            )
+            slot["shifts"] += 1
+            if current:
+                slot["on_call_now"] = True
+
+    windows.sort(key=lambda w: str(w["from"]))
+    # First-appearance order, derived from the sorted windows so it is deterministic.
+    ordered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for window in windows:
+        for login in window["who"]:
+            key = login.lower()
+            if key not in seen:
+                seen.add(key)
+                ordered.append(members[key])
+
+    me = _resolve_login_sync()
+    return {
+        "members": ordered,
+        "windows": windows,
+        "timezone": tz_name or "UTC",
+        "me": me,
+        # Distinguishes "you are not on the rotation at all" from "you are, but not now" —
+        # the former is a setup mistake, the latter is normal.
+        "me_on_roster": bool(me) and me.lower() in seen,
+        "strict_gating": strict_gating(),
+        "error": error,
+    }
 
 
 def status() -> dict[str, Any]:

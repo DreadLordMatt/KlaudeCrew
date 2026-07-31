@@ -266,3 +266,87 @@ class TestFaultTolerance(_TwoInstances):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestScheduleConflicts(_TwoInstances):
+    """A conflicted `rotation.yaml` is far more dangerous than a conflicted ledger.
+
+    Conflict markers make the YAML unparseable, and an unparseable schedule means NO
+    instance can tell whether it is on call. Found by a real three-teammate run through a
+    private GitHub repo: an early sync pushed a schedule containing markers, and from then
+    on every teammate's pull faithfully received a file that could not be parsed —
+    `team=[]` for everyone, and under fail-open every instance re-armed. That is the exact
+    double-claim a shared schedule exists to prevent, and no downstream conflict handling
+    can recover it, because "theirs" is already corrupt.
+    """
+
+    def _schedule(self, ledger_mod, body: str):
+        path = ledger_mod.ledger_path().parent / "rotation.yaml"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    async def test_push_refuses_a_conflicted_schedule(self):
+        """The guard that stops one operator breaking the whole team's gating."""
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        self._schedule(
+            ledger,
+            "shifts:\n  - from: 2026-08-01\n    to: 2026-08-08\n"
+            "<<<<<<< HEAD\n    who: alice\n=======\n    who: bob\n>>>>>>> origin/main\n",
+        )
+        detail = await sync.sync_safely(direction="push")
+        self.assertIn("refused", detail)
+        self.assertIn("rotation.yaml", detail)
+
+    async def test_a_clean_schedule_still_pushes(self):
+        """The refusal must not become a blanket block on publishing a schedule."""
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        self._schedule(
+            ledger, "shifts:\n  - from: 2026-08-01\n    to: 2026-08-08\n    who: alice\n"
+        )
+        self.assertEqual(await sync.sync_safely(direction="push"), "pushed")
+
+    async def test_detector_is_scoped_to_the_schedule(self):
+        """`has_conflict` is ledger-only; the schedule needed its own detector.
+
+        Sharing one would have made a conflicted ledger trigger the schedule refusal and
+        blocked every push.
+        """
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        self._schedule(
+            ledger, "shifts:\n  - from: 2026-08-01\n    to: 2026-08-08\n    who: alice\n"
+        )
+        self.assertFalse(sync.schedule_has_conflict())
+        self._schedule(ledger, "<<<<<<< HEAD\nshifts: []\n=======\nshifts: []\n>>>>>>> x\n")
+        self.assertTrue(sync.schedule_has_conflict())
+
+    async def test_no_schedule_is_not_a_conflict(self):
+        """The common single-user case must not read as conflicted."""
+        _, sync, _ = self._use(self.home_a)
+        self.assertFalse(sync.schedule_has_conflict())
+
+    async def test_a_conflicting_schedule_edit_resolves_to_the_remote(self):
+        """Two teammates editing the same shift: converge on what the team already sees.
+
+        A shift is a single-owner fact, so there is no union to compute — one edit must
+        lose. Taking the remote keeps every instance's view of who is on call identical,
+        which is the property that makes the file usable as a lock.
+        """
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        self._schedule(
+            ledger, "shifts:\n  - from: 2026-08-01\n    to: 2026-08-08\n    who: alice\n"
+        )
+        await sync.sync_safely(direction="push")
+
+        ledger, sync, entry = self._use(self.home_b)
+        ledger.upsert(entry.create(pattern="b lesson to carry", fix="b fix"))
+        self._schedule(ledger, "shifts:\n  - from: 2026-08-01\n    to: 2026-08-08\n    who: bob\n")
+        detail = await sync.sync_safely(direction="pull")
+
+        text = (ledger.ledger_path().parent / "rotation.yaml").read_text(encoding="utf-8")
+        self.assertNotIn("<<<<<<<", text, "markers must never survive a pull")
+        self.assertIn("alice", text, "the remote's version wins")
+        self.assertIn("schedule conflict", detail)

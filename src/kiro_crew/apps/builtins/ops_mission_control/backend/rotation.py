@@ -267,4 +267,30 @@ def describe(shift: ShiftStatus) -> dict[str, Any]:
         "rules": len(load_rules()),
         "primary": is_primary(),
         "modes_available": [MODE_OBSERVE, MODE_PROPOSE, MODE_ACT],
+        # The whole team, when a committed schedule is the rotation source. `who` alone
+        # cannot tell an operator whether this instance is idle because a teammate holds
+        # the pager or because the file is broken — and a silently-idle instance is the
+        # failure mode a shared schedule introduces. Empty dict when no schedule is in
+        # use, so the UI simply renders nothing rather than an empty team.
+        "roster": _roster_safely(),
     }
+
+
+def _roster_safely() -> dict[str, Any]:
+    """The schedule-file roster, or ``{}``. Never raises.
+
+    Read through a guarded call because ``describe`` backs the dashboard's main poll: a
+    malformed schedule a teammate pushed must not 500 the board. The rotation ITSELF
+    already degrades safely; this protects the display path too.
+    """
+    try:
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
+            schedule_file,
+        )
+
+        if not schedule_file.schedule_path().exists():
+            return {}
+        return schedule_file.roster()
+    except Exception:  # noqa: BLE001 — a display extra must never break the board
+        logger.debug("ops-mission-control: roster unavailable", exc_info=True)
+        return {}

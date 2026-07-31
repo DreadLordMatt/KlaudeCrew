@@ -6,6 +6,57 @@ Working doc. Durable behavior lives in
 
 ---
 
+## Owner redirect: single-owner on-call via the shared schedule (2026-07-31)
+
+Owner: *"we need different model — some common oncall schedule file in the repo readable by
+all instances and only who is oncall at this moment will pick up tasks and other instances
+will not with clear display of the team composition"*, then *"test multiuser functionality
+end to end through repo — memory publishing/reading and oncall management"*.
+
+This **supersedes** the claim-arbitration design (`mesh-claim-arbitration.md`). That design
+let every instance claim and then reconciled the race; this model prevents the race by
+making exactly one instance eligible. Simpler and stronger — no arbitration to get wrong.
+The spec is kept for the reasoning, marked superseded.
+
+- [x] **Strict gating (default ON).** An indeterminate schedule now DISARMS instead of
+      arming. The inversion is the whole point: for a rotation *API*, "cannot tell" means
+      the network is down and arming is right; for a file every instance reads, "cannot
+      tell" means the SCHEDULE is wrong, and arming makes the whole team pick up the same
+      alarm. `unknown` survives so the UI can say *why*; only `on_shift` gates work.
+      Opt out via `strict_gating: false` for a solo install that prefers over-firing.
+
+- [x] **Team composition display.** `roster()` returns every member, their shift count, who
+      is on call now, and whether THIS instance is on the rotation at all — surfaced on the
+      board above the ledger. `who` alone could not distinguish "a teammate has it" from
+      "the schedule is broken", and under strict gating the second means this instance has
+      silently stopped working. The panel names both, plus the case where no `gh` login
+      resolved.
+
+- [x] **Verified end to end through a REAL private GitHub repo**
+      (`Zedmor/ops-mission-control-test`, created for this):
+      - three teammates join by pulling; all three see `team=['alice','bob','carol']`
+      - **only alice (on call) arms** — `dispatch_armed=True`; bob and carol idle
+      - memory publishes and reads BOTH ways: alice's lesson reaches bob and carol,
+        carol's reaches alice, converging on 3 shared lessons
+      - shift handover follows the file: alice's week arms `['alice']`, the next week
+        arms `['bob','carol']`
+
+- [x] **Two real bugs the multi-user run exposed — neither reachable by a single instance:**
+      1. **A conflicted `rotation.yaml` was left with markers**, making the YAML
+         unparseable, so `team=[]` for everyone and (under the old fail-open) EVERY
+         instance re-armed. `has_conflict` was ledger-only. Now `schedule_has_conflict` +
+         resolve-to-**theirs** on pull: a shift is a single-owner fact with no union to
+         compute, and the remote is what the team is already acting on.
+      2. **`push` would publish a conflicted schedule.** It did, in the first run — after
+         which every teammate's pull faithfully received a broken file and no downstream
+         handling could recover it, because "theirs" was already corrupt. Push now
+         **refuses** rather than guessing: one operator fixes a push by hand instead of the
+         whole team losing its gating. Repairing the test repo required an out-of-band
+         commit, which is exactly the cost this guard prevents.
+
+      *Both were invisible to 425 passing tests and to every single-instance run. The
+      three-teammate test through a real repo is what found them.*
+
 ## Shipped state (2026-07-31)
 
 Branch **`feat/ops-mission-control`**, off `origin/main` (928b63b0), pushed:

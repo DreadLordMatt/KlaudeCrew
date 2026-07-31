@@ -68,11 +68,47 @@ export interface ProviderInfo {
   secrets: Record<string, string>
 }
 
+/** One member of a committed on-call schedule. */
+export interface RosterMember {
+  login: string
+  /** How many shift windows this member holds — makes an unbalanced rotation visible. */
+  shifts: number
+  on_call_now: boolean
+}
+
+/**
+ * The team behind a committed `rotation.yaml`, when that is the rotation source.
+ *
+ * `who` alone cannot answer the question an operator actually has: is my instance idle
+ * because a teammate holds the pager, or because the schedule is broken? Under strict
+ * gating an indeterminate schedule DISARMS, so a silently-idle instance is a real
+ * failure mode — the roster is what makes it legible.
+ */
+export interface RotationRoster {
+  members: RosterMember[]
+  windows: { from: string; to: string; who: string[]; current: boolean }[]
+  timezone: string
+  /** This instance's resolved GitHub login, so the UI can mark "you". */
+  me: string
+  /** False when `me` appears nowhere in the schedule — a setup mistake, not a quiet shift. */
+  me_on_roster: boolean
+  strict_gating: boolean
+  error: string
+}
+
 export interface RotationInfo {
   on_shift: boolean
   who: string
   until: string
-  /** True when no rotation source could answer. The on-shift tier stays ARMED. */
+  /**
+   * The rotation source could not say whether THIS operator is on call.
+   *
+   * Under strict gating (the default for a committed schedule) this comes back with
+   * `on_shift: false` — the tier is DISARMED, because with a file every instance reads,
+   * "cannot tell" means the schedule is wrong, and arming would make every instance in
+   * the team pick up the same work. Read `on_shift` for arming; `unknown` only explains
+   * WHY, so the UI can distinguish "someone else has it" from "the file is broken".
+   */
   unknown: boolean
   tiers: Record<string, boolean>
   armed_crons: string[]
@@ -80,6 +116,8 @@ export interface RotationInfo {
   rules: number
   primary: boolean
   modes_available: OperatingMode[]
+  /** Empty object when no committed schedule is in use. */
+  roster?: RotationRoster
 }
 
 export interface LedgerEntry {

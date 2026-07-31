@@ -226,6 +226,63 @@ def has_conflict() -> bool:
     return any(line.startswith(CONFLICT_MARKERS) for line in text.splitlines())
 
 
+#: The on-call schedule. Named here rather than imported from ``schedule_file`` to keep
+#: this module free of a dependency on a provider (the transport must not know which
+#: rotation source exists); ``TRACKED_FILES`` already carries the same literal.
+_SCHEDULE_FILENAME = "rotation.yaml"
+
+
+def schedule_has_conflict() -> bool:
+    """True when ``rotation.yaml`` currently holds git conflict markers.
+
+    Separate from ``has_conflict`` (which is ledger-only) because a conflicted schedule
+    is far more dangerous than a conflicted ledger: markers make the YAML unparseable,
+    and an unparseable schedule means no instance can tell whether it is on call.
+    """
+    path = _repo_root() / _SCHEDULE_FILENAME
+    if not path.exists():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(line.startswith(CONFLICT_MARKERS) for line in text.splitlines())
+
+
+async def _resolve_schedule_conflict() -> bool:
+    """Take the REMOTE's schedule when it conflicts. Returns whether it did.
+
+    "Theirs" rather than a merge attempt: a shift is a single-owner fact, so there is no
+    union to compute — one of the two edits has to lose, and the remote is the version the
+    rest of the team is already acting on. Converging on it keeps every instance's view of
+    who is on call identical, which is the property that makes the file usable as a lock.
+    The local edit is not destroyed; it stays in the reflog and the operator can re-apply
+    and push it.
+    """
+    if not schedule_has_conflict():
+        return False
+    rc, _, err = await _git("checkout", "--theirs", "--", _SCHEDULE_FILENAME)
+    if rc != 0:
+        logger.warning(
+            "ops-mission-control: could not take the remote schedule: %s", err.strip()[:200]
+        )
+        return False
+    await _git("add", "--", _SCHEDULE_FILENAME)
+    sel().log_api_access(
+        caller="core:ops-mission-control",
+        operation="ledger_sync_schedule_conflict",
+        outcome="success",
+        resources="resolution=theirs",
+    )
+    logger.warning(
+        "ops-mission-control: %s conflicted on pull; took the remote version. A local "
+        "edit to the on-call schedule was NOT merged — re-apply and push it if it is "
+        "still wanted.",
+        _SCHEDULE_FILENAME,
+    )
+    return True
+
+
 def resolve_conflict() -> int:
     """Rewrite the ledger from its own reconciled entries, dropping markers.
 
@@ -294,10 +351,32 @@ async def pull() -> tuple[bool, str]:
         "merge", "--no-edit", "--allow-unrelated-histories", f"origin/{branch()}"
     )
     if rc != 0:
+        # The SCHEDULE is checked first and handled differently from the ledger, because
+        # the two have opposite merge semantics.
+        #
+        # A ledger conflict is reconcilable: entries are content-addressed, so the union
+        # is unambiguously correct. A rotation.yaml conflict is a genuine disagreement —
+        # two people edited the same shift — and there is no safe automatic answer.
+        #
+        # Left alone, the markers made the YAML unparseable, which under fail-open
+        # RE-ARMED EVERY INSTANCE: observed in a three-teammate run through a real repo,
+        # where a conflicted schedule reported `team=[]` and all three instances armed —
+        # the exact double-claim the shared schedule exists to prevent. Taking THEIRS is
+        # the safe resolution: the remote is what the rest of the team is already acting
+        # on, so converging on it keeps every instance's view identical, and the local
+        # edit is recoverable from the reflog rather than silently merged into nonsense.
+        schedule_conflicted = await _resolve_schedule_conflict()
+
         if has_conflict():
             kept = resolve_conflict()
             await _stage_and_commit("merge team ledger", allow_empty_message_only=True)
-            return True, f"merged with conflict, reconciled to {kept} entries"
+            detail = f"merged with conflict, reconciled to {kept} entries"
+            if schedule_conflicted:
+                detail += "; schedule conflict resolved to the remote's version"
+            return True, detail
+        if schedule_conflicted:
+            await _stage_and_commit("take remote schedule", allow_empty_message_only=True)
+            return True, "schedule conflict resolved to the remote's version"
         return False, f"merge failed: {err.strip()[:200]}"
     return True, "pulled"
 
@@ -341,6 +420,32 @@ async def push(*, message: str = "update ops ledger") -> tuple[bool, str]:
     if has_conflict():
         # Never push a conflicted file to teammates.
         resolve_conflict()
+
+    # A conflicted SCHEDULE must never reach the remote, and unlike the ledger it cannot
+    # be auto-reconciled — so REFUSE rather than guess. This is not defensive
+    # hypothesising: an earlier three-teammate run pushed a schedule containing conflict
+    # markers, and from then on every teammate's pull faithfully received a file that
+    # cannot be parsed. An unparseable schedule means no instance can tell whether it is
+    # on call, so one bad push disarms (or, under fail-open, wrongly arms) the entire
+    # team, and no amount of downstream conflict handling can recover it — "theirs" is
+    # already corrupt.
+    #
+    # Refusing costs one operator a push they must fix by hand; publishing costs the whole
+    # team its on-call gating.
+    if schedule_has_conflict():
+        logger.error(
+            "ops-mission-control: refusing to push — %s holds conflict markers. Resolve "
+            "the on-call schedule by hand; pushing it would leave every teammate unable "
+            "to parse who is on call.",
+            _SCHEDULE_FILENAME,
+        )
+        sel().log_api_access(
+            caller="core:ops-mission-control",
+            operation="ledger_sync_push",
+            outcome="refused",
+            resources=f"reason=conflicted_{_SCHEDULE_FILENAME}",
+        )
+        return False, f"refused: {_SCHEDULE_FILENAME} holds conflict markers — resolve it first"
 
     committed = await _stage_and_commit(message)
     # A clean tree is not automatically "nothing to push": a previous run may have

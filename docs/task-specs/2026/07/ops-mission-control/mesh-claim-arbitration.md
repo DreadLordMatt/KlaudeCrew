@@ -1,7 +1,12 @@
 # Team mesh: claim arbitration across instances
 
-**Status:** design, not built. This settles the contract the backlog said to settle
-"before building the transport", so the transport choice stops being blocked on it.
+**Status: SUPERSEDED** by the owner's single-owner on-call model — a shared
+`rotation.yaml` makes exactly ONE instance eligible, so there is no race to arbitrate.
+
+Kept for the reasoning that still applies — why the dispatch index cannot sync, and why
+append-only + content-addressing survives a merge. Originally settled the contract the
+backlog asked for "before building the transport"; the owner's model removes the need for
+it entirely, which is a better outcome than the design it replaces.
 
 ## The problem, measured
 

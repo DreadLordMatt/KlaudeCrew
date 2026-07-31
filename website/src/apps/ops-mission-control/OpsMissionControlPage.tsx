@@ -23,6 +23,7 @@ import {
   ShieldAlert,
   Activity,
   BookOpen,
+  Users,
   CircleDot,
   UserCheck,
   CheckCircle2,
@@ -220,13 +221,21 @@ export default function OpsMissionControlPage() {
     return map
   }, [ledgerEntries])
 
+  // `unknown` no longer implies "armed". Under strict gating a schedule that cannot say
+  // whether this operator is on call DISARMS the dispatch tier, so the label must report
+  // what actually happened — a badge reading "tier armed" beside an instance that has
+  // stopped picking up work is the most misleading thing this header could say.
   const shiftLabel = rotation?.unknown
-    ? 'rotation unknown — tier armed'
+    ? rotation.on_shift
+      ? 'rotation unknown — tier armed'
+      : 'rotation unknown — not picking up work'
     : rotation?.on_shift
       ? rotation.who
         ? `on shift: ${rotation.who}`
         : 'on shift'
-      : 'off shift'
+      : rotation?.who
+        ? `off shift — ${rotation.who} is on call`
+        : 'off shift'
 
   return (
     <>
@@ -485,6 +494,70 @@ export default function OpsMissionControlPage() {
             )}
           </Card>
         </div>
+
+        {/* Team composition. Only rendered when a committed rotation.yaml is the source —
+            a solo install has no team and an empty panel would just be noise. Placed
+            above the ledger because "who is handling this" is the question an operator
+            asks BEFORE "what do we know about it", and because a disarmed instance needs
+            an explanation near the top rather than buried. */}
+        {rotation?.roster?.members?.length ? (
+          <Card className="mb-4">
+            <CardTitle>
+              <Users className="lucide-inline" /> On-call team
+              <span className="text-[12px] text-muted font-normal ml-2">
+                {rotation.roster.timezone}
+                {rotation.roster.strict_gating ? ' · only the on-call instance picks up work' : ''}
+              </span>
+            </CardTitle>
+
+            <ul className="flex flex-col gap-1 mt-2">
+              {rotation.roster.members.map((m) => {
+                const isMe = !!rotation.roster?.me && m.login === rotation.roster.me
+                return (
+                  <li key={m.login} className="flex items-center gap-2 text-sm py-1">
+                    <span className={m.on_call_now ? 'text-success' : 'text-muted'}>
+                      <Radio className="lucide-inline" />
+                    </span>
+                    <span className={isMe ? 'font-semibold text-text-strong' : ''}>
+                      {m.login}
+                      {isMe ? ' (this instance)' : ''}
+                    </span>
+                    {m.on_call_now ? (
+                      <Badge variant="ok">on call now</Badge>
+                    ) : null}
+                    <span className="text-[12px] text-muted ml-auto">
+                      {m.shifts} shift{m.shifts === 1 ? '' : 's'}
+                    </span>
+                  </li>
+                )
+              })}
+            </ul>
+
+            {/* The two states that look identical from the board but mean very different
+                things: a normal off-shift instance vs. one that will never pick up work
+                because it is not on the rotation at all. Saying so here is the difference
+                between "waiting my turn" and a setup mistake nobody notices. */}
+            {rotation.roster.me && !rotation.roster.me_on_roster ? (
+              <p className="text-xs text-warning mt-2">
+                This instance ({rotation.roster.me}) is not named in the schedule, so it
+                will never pick up work. Add it to rotation.yaml, or turn off strict
+                gating.
+              </p>
+            ) : null}
+            {!rotation.roster.me ? (
+              <p className="text-xs text-warning mt-2">
+                No GitHub login resolved for this instance, so it cannot tell whether it is
+                on call. Set the schedule-file provider&apos;s github_login, or authenticate
+                the gh CLI.
+              </p>
+            ) : null}
+            {rotation.roster.error ? (
+              <p className="text-xs text-danger mt-2">
+                Schedule problem: {rotation.roster.error}
+              </p>
+            ) : null}
+          </Card>
+        ) : null}
 
         <Card>
           <CardTitle>
