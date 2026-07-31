@@ -73,6 +73,14 @@ a shape our `rotation.yaml` lacked, and the omission was a real bug.
       panel can mark who owns hygiene. Verified: `leader: alice` → only alice primary; no
       key → falls back to local config. 8 tests.
 
+      **Surfaced in the UI too.** The backend returned `roster.leader` and nothing rendered
+      it — `leader` appeared ZERO times in the frontend, so a team could not see who owns
+      hygiene. The member row now carries a `leader` badge. Verified in Chromium against a
+      live gateway with `leader: alice` and both members on call: exactly one badge, and the
+      API confirmed the two concerns stay independent — bob is on-call (`dispatch armed`)
+      but NOT the hygiene owner (`primary: False`). The browser assertion folded into the
+      existing team-panel spec, so the spec count and floor stay at 234.
+
       *One fact in the file everyone reads beats N local settings agreeing by convention —
       which is the same argument as the on-call schedule itself, applied to maintenance.*
 

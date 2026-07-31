@@ -271,6 +271,17 @@ test.describe('Ops Mission Control — page load', () => {
     }
     // The gating note is what tells an operator WHY this instance may be idle.
     await expect(page.getByText('only the on-call instance picks up work')).toBeVisible()
+
+    // The hygiene owner, when the schedule names one. Asserted as "at most one" rather
+    // than "exactly one": whether this fixture's schedule carries a `leader:` key is not
+    // this spec's business, but MORE than one leader badge would mean the comparison
+    // matched loosely — and the whole point of the key is that exactly one instance
+    // prunes the shared ledger.
+    const leaderBadges = await page.getByText('leader', { exact: true }).count()
+    expect(leaderBadges, 'at most one member may be marked leader').toBeLessThanOrEqual(1)
+    if (roster.leader) {
+      expect(leaderBadges, `schedule names ${roster.leader} as leader; badge must render`).toBe(1)
+    }
   })
 
   test('expanding an incident shows the remembered fix, not just a count', async ({

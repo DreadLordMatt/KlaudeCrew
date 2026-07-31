@@ -93,6 +93,15 @@ export interface RotationRoster {
   /** False when `me` appears nowhere in the schedule — a setup mistake, not a quiet shift. */
   me_on_roster: boolean
   strict_gating: boolean
+  /**
+   * The teammate who runs nightly ledger hygiene, from the schedule's `leader:` key.
+   *
+   * Worth displaying rather than leaving implicit: hygiene prunes the shared ledger, and
+   * before this every instance claimed the job by default (`primary_instance` defaults to
+   * true and is per-instance), so N agents pruned one ledger. Showing the owner makes
+   * "exactly one" visible instead of assumed. Empty when the schedule names no leader.
+   */
+  leader: string
   error: string
 }
 

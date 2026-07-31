@@ -513,6 +513,7 @@ export default function OpsMissionControlPage() {
             <ul className="flex flex-col gap-1 mt-2">
               {rotation.roster.members.map((m) => {
                 const isMe = !!rotation.roster?.me && m.login === rotation.roster.me
+                const rosterLeader = rotation.roster?.leader ?? ''
                 return (
                   <li key={m.login} className="flex items-center gap-2 text-sm py-1">
                     <span className={m.on_call_now ? 'text-success' : 'text-muted'}>
@@ -524,6 +525,15 @@ export default function OpsMissionControlPage() {
                     </span>
                     {m.on_call_now ? (
                       <Badge variant="ok">on call now</Badge>
+                    ) : null}
+                    {/* Who owns nightly ledger hygiene. Shown because that job PRUNES the
+                        shared ledger: before the schedule's `leader:` key existed, every
+                        instance claimed it by default and N agents pruned one ledger.
+                        Displaying the owner makes "exactly one" visible, not assumed. */}
+                    {rosterLeader && m.login.toLowerCase() === rosterLeader.toLowerCase() ? (
+                      <Badge variant="muted" title="Runs nightly ledger hygiene for the team">
+                        leader
+                      </Badge>
                     ) : null}
                     <span className="text-[12px] text-muted ml-auto">
                       {m.shifts} shift{m.shifts === 1 ? '' : 's'}
