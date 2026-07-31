@@ -75,7 +75,15 @@ _WEBSITE = "website"
 # run: a mid-investigation run reported `expected=229, flaky=1, skipped=1, unexpected=1`
 # (= 232 total), and `grep -c '^\s*test('` across `playwright/*.spec.ts` independently
 # counts 232.
-MIN_EXECUTED_SPECS = 232
+# 232 -> 234. One spec added: the on-call team panel renders (owner-requested display,
+# and under strict gating the only thing separating "a teammate has it" from "this instance
+# silently stopped working"). Raised WITH the spec, per the note above.
+#
+# 234 is MEASURED, not derived: I first wrote 233 by adding one to the previous floor, and
+# a real run reported `executed=234, skipped=0, unexpected=0` — the arithmetic was wrong
+# because the previous floor already trailed the suite. `grep -c '^\s*test('` across
+# playwright/*.spec.ts independently agrees at 234. Take the measurement over the sum.
+MIN_EXECUTED_SPECS = 234
 
 # Skips are silent passes. A spec should seed its preconditions rather than skip
 # when they are absent, so the intended steady state is zero. Specs excluded by

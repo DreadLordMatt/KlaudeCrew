@@ -227,6 +227,52 @@ test.describe('Ops Mission Control — page load', () => {
     }
   })
 
+  test('the on-call team panel names every member and explains the gating', async ({
+    page,
+    request,
+  }) => {
+    // The owner asked for "clear display of the team composition", and under strict
+    // gating this panel is the ONLY thing that distinguishes "a teammate holds the pager"
+    // from "the schedule is broken and this instance has silently stopped working". A
+    // source grep cannot prove it renders, so assert it in the browser.
+    //
+    // The schedule is SEEDED through the API rather than assumed: a fixture with no
+    // rotation.yaml renders no panel at all (correct for a solo install), which would
+    // make this spec pass vacuously.
+    await ensureEnabled(request)
+    const seeded = await request.put(`${API}/providers/schedule-file/config`, {
+      data: { github_login: 'carol' },
+    })
+    expect(seeded.ok(), 'seeding the operator login must succeed').toBeTruthy()
+
+    const state = await request.get(`${API}/state`)
+    expect(state.ok()).toBeTruthy()
+    const roster = (await state.json()).rotation?.roster
+    if (!roster?.members?.length) {
+      // No committed schedule on this fixture: the panel is correctly absent, and the
+      // roster's own behavior is covered by tests/test_schedule_file.py::TestRoster.
+      // Assert the ABSENCE rather than skipping — the E2E gate forbids skips because
+      // they report green while verifying nothing.
+      await page.goto(ROUTE, { waitUntil: 'domcontentloaded' })
+      await expect(page.getByText('Board', { exact: true }).first()).toBeVisible({
+        timeout: 20000,
+      })
+      await expect(page.getByText('On-call team')).toHaveCount(0)
+      return
+    }
+
+    await page.goto(ROUTE, { waitUntil: 'domcontentloaded' })
+    await expect(page.getByText('On-call team').first()).toBeVisible({ timeout: 20000 })
+    for (const member of roster.members) {
+      await expect(
+        page.getByText(member.login, { exact: false }).first(),
+        `every member must be listed, missing ${member.login}`,
+      ).toBeVisible()
+    }
+    // The gating note is what tells an operator WHY this instance may be idle.
+    await expect(page.getByText('only the on-call instance picks up work')).toBeVisible()
+  })
+
   test('expanding an incident shows the remembered fix, not just a count', async ({
     page,
     request,

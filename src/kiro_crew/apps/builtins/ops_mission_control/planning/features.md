@@ -41,6 +41,20 @@ The spec is kept for the reasoning, marked superseded.
       - shift handover follows the file: alice's week arms `['alice']`, the next week
         arms `['bob','carol']`
 
+- [x] **The team panel verified IN A BROWSER, not just in the API.** The data layer was
+      already proven end-to-end, but nothing had confirmed the panel renders — and a source
+      grep cannot. Booted a gateway, seeded a real `rotation.yaml` + operator login, and
+      asserted in Chromium: all three members listed, the "only the on-call instance picks
+      up work" gating note, the `(this instance)` marker, and the `on call now` badge.
+      Promoted from a throwaway spec into `ops-mission-control.spec.ts` (26 specs, 0 skips),
+      seeding the schedule through the API so a fixture without one asserts the panel's
+      correct ABSENCE rather than passing vacuously.
+
+      *Floor lesson, again:* I raised `MIN_EXECUTED_SPECS` from 232 to **233** by adding one
+      — and a real run measured **234**, because the previous floor already trailed the
+      suite. Corrected to the measurement. Adding to a stale number reproduces the staleness;
+      `grep -c` independently agreed at 234.
+
 - [x] **Two real bugs the multi-user run exposed — neither reachable by a single instance:**
       1. **A conflicted `rotation.yaml` was left with markers**, making the YAML
          unparseable, so `team=[]` for everyone and (under the old fail-open) EVERY
