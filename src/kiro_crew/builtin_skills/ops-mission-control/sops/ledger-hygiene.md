@@ -44,10 +44,23 @@ port and never hunt for a token elsewhere — see SKILL.md § Calling the API fo
      The cap exists because matched entries are read into an investigation's
      context — an unbounded ledger is an unbounded token cost.
 
-2. Review what remains for entries that contradict each other. Two entries with
-   overlapping fingerprints and different fixes mean the failure has more than one
-   cause — split the pattern descriptions so each is distinguishable, rather than
-   deleting one.
+2. Resolve contradictions. Do NOT scan the ledger by eye — the pass already found them
+   for you, and `summary.contradictions` in step 1's response is the count:
+
+   ```bash
+   curl -s "$BASE/api/apps/ops-mission-control/ledger/contradictions?token=$TOKEN"
+   ```
+
+   Each result is a pair of entries sharing a fingerprint but claiming DIFFERENT fixes,
+   ordered most-used first — so the pairs actively misleading responders come before the
+   speculative ones. If the count is 0, skip this step entirely and say nothing about it.
+
+   Two fixes for one fingerprint almost always means the failure has more than one cause.
+   **Split the pattern descriptions so each names its own cause**, then re-POST both
+   entries. Do not delete one: it is a real fix that worked for somebody, and deleting it
+   means the next responder rediscovers it from scratch. If you genuinely cannot tell the
+   two causes apart, leave the pair alone and report it — an honest "these two conflict
+   and I could not separate them" is worth more than a confident wrong merge.
 
 3. Promote `observed` → `verified` for any entry whose fix has now been applied
    successfully more than once. That promotion is what unlocks the fast path, so it

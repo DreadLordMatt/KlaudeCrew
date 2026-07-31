@@ -6,6 +6,49 @@ Working doc. Durable behavior lives in
 
 ---
 
+## Source-material re-review: agent-sops (2026-07-31)
+
+The earlier coverage review audited the 15 *mission* files and found them all to be
+cron-scheduled SOPs we already ship. It never audited the **7 `agent-sops/`**, which are a
+different set. Re-read them against what shipped:
+
+| Source SOP | Status |
+|---|---|
+| `incident-response` | Covered — `sops/investigate.md` + the dispatch heartbeat |
+| `oncall-triage` | Covered — dispatch claim + brief; rotation now gates who triages |
+| `knowledge-preserve` | Covered — `POST /ledger`, content-addressed, git-synced |
+| `knowledge-dream` (consolidation) | **Gap found**, see below |
+| `setup-conclave` | Not applicable — internal fleet bootstrap, no public analogue |
+| `package-scan` / `wiki-sync` | Deliberately out of scope — internal build + wiki systems |
+
+- [x] **Contradiction detection was a real gap.** `knowledge-dream` asks a leader to
+      "resolve contradictions"; our hygiene SOP asked the same of the agent but gave it **no
+      tooling** — finding them meant an O(n²) eye-scan over the whole ledger, which is both a
+      token cost and precisely the search a model skims once the ledger passes a screenful.
+      `contradiction` appeared only in a cron prompt.
+
+      `ledger.find_contradictions()` now computes them deterministically: entry pairs sharing
+      a fingerprint but claiming DIFFERENT fixes, ordered most-used-first so the pairs
+      actively misleading responders come before speculative ones. Surfaced as
+      `summary.contradictions` from hygiene and as `GET /ledger/contradictions`.
+
+      **It detects and deliberately does not decide.** Two fixes for one fingerprint almost
+      always means the failure has more than one cause, and the right move is to split the
+      patterns so each names its own cause — a judgement about what those causes ARE, which
+      needs the model. Auto-deleting one would discard a fix that worked for somebody and
+      make the next responder rediscover it. The SOP now says exactly that, including "if you
+      genuinely cannot tell the two causes apart, leave the pair and report it".
+
+      Verified the distinction that matters: two different fixes on one fingerprint → 1
+      contradiction; the *same* fix reached twice → 0, because that is the duplicate case
+      dedupe already merges. Conflating them would bury every real conflict under
+      deduplicated noise. 7 tests.
+
+      *Also dropped from `knowledge-dream` on purpose:* stale-`<!-- -->`-marking and history
+      compaction are file-format conventions for a hand-maintained markdown repo. Our
+      equivalents are structural — confidence decay and the 500-entry prune — so porting the
+      annotations would add ceremony without adding information.
+
 ## Owner redirect: single-owner on-call via the shared schedule (2026-07-31)
 
 Owner: *"we need different model — some common oncall schedule file in the repo readable by

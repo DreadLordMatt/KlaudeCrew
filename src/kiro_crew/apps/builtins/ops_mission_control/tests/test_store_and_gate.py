@@ -942,3 +942,88 @@ class TestLedger(_HomeIsolated):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestContradictionDetection(_HomeIsolated):
+    """The source workflow's consolidation SOP asks a leader to "resolve contradictions".
+
+    Ours asked the same of the hygiene agent but gave it no tooling — finding them meant an
+    O(n²) eye-scan across the whole ledger, which is both a token cost and the kind of
+    search a model skims once the ledger is longer than a screenful.
+
+    Detection is deterministic and belongs in Python. RESOLUTION deliberately does not:
+    splitting a pattern requires knowing what the two causes actually are.
+    """
+
+    @staticmethod
+    def _entry(pattern, fix, fingerprints, uses=0):
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import LedgerEntry
+
+        entry = LedgerEntry.create(pattern=pattern, fix=fix, fingerprints=fingerprints)
+        entry.use_count = uses
+        return entry
+
+    def test_two_fixes_for_one_fingerprint_is_a_contradiction(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        ledger.upsert(self._entry("DLQ high", "reattach sqs:DeleteMessage", ["fp1"]))
+        ledger.upsert(self._entry("DLQ high", "raise the visibility timeout", ["fp1"]))
+        found = ledger.find_contradictions()
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["fingerprint"], "fp1")
+
+    def test_the_same_fix_twice_is_not_a_contradiction(self):
+        """That is the duplicate case, which dedupe already merges by content id.
+
+        Conflating the two would make every deduplicated pair look like a conflict and
+        bury the real ones.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        ledger.upsert(self._entry("failure A", "the one true fix", ["fp1"]))
+        ledger.upsert(self._entry("failure A described differently", "the one true fix", ["fp1"]))
+        self.assertEqual(ledger.find_contradictions(), [])
+
+    def test_different_fingerprints_are_not_compared(self):
+        """Two unrelated failures with different fixes are just two lessons."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        ledger.upsert(self._entry("failure A", "fix A", ["fp1"]))
+        ledger.upsert(self._entry("failure B", "fix B", ["fp2"]))
+        self.assertEqual(ledger.find_contradictions(), [])
+
+    def test_most_used_pairs_come_first(self):
+        """A responder reviewing a long list must see what is actively misleading people
+        before the speculative conflicts."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        ledger.upsert(self._entry("rare failure", "rare fix one", ["rare"], uses=0))
+        ledger.upsert(self._entry("rare failure", "rare fix two", ["rare"], uses=1))
+        ledger.upsert(self._entry("hot failure", "hot fix one", ["hot"], uses=9))
+        ledger.upsert(self._entry("hot failure", "hot fix two", ["hot"], uses=8))
+        found = ledger.find_contradictions()
+        self.assertEqual([r["fingerprint"] for r in found], ["hot", "rare"])
+
+    def test_a_pair_sharing_two_fingerprints_is_reported_once(self):
+        """Entries can share several fingerprints; the pair is still one conflict."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        ledger.upsert(self._entry("failure", "fix one", ["fpA", "fpB"]))
+        ledger.upsert(self._entry("failure", "fix two", ["fpA", "fpB"]))
+        self.assertEqual(len(ledger.find_contradictions()), 1)
+
+    def test_hygiene_reports_the_count_without_resolving_them(self):
+        """Detected, never auto-resolved — deleting a fix that worked for somebody would
+        make the next responder rediscover it."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        ledger.upsert(self._entry("DLQ high", "fix one", ["fp1"]))
+        ledger.upsert(self._entry("DLQ high", "fix two", ["fp1"]))
+        summary = ledger.hygiene()
+        self.assertEqual(summary["contradictions"], 1)
+        self.assertEqual(len(ledger.read_entries()), 2, "both entries must survive")
+
+    def test_an_empty_ledger_has_no_contradictions(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        self.assertEqual(ledger.find_contradictions(), [])

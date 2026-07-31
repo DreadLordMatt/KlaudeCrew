@@ -590,6 +590,18 @@ async def _handle_get_ledger(request: web.Request) -> web.StreamResponse:
     return web.json_response({"entries": [e.to_dict() for e in entries], "stats": ledger.stats()})
 
 
+async def _handle_ledger_contradictions(request: web.Request) -> web.StreamResponse:
+    """Entry pairs claiming different fixes for the same fingerprint.
+
+    A read-only diagnostic for the hygiene SOP, which is told to "resolve contradictions"
+    and previously had to find them by eye across the whole ledger. Detection is
+    deterministic and cheap; the resolution (split the two patterns so each names its own
+    cause) needs the model, so this endpoint deliberately changes nothing.
+    """
+    found = await asyncio.to_thread(ledger.find_contradictions)
+    return web.json_response({"contradictions": found, "count": len(found)})
+
+
 async def _handle_post_ledger(request: web.Request) -> web.StreamResponse:
     body = await _json_body(request)
     if body is None:
@@ -816,6 +828,7 @@ def register_routes(app: web.Application) -> None:
     add.add_put(f"{_BASE}/settings", _require_enabled(_handle_put_settings))
     add.add_get(f"{_BASE}/rotation", _require_enabled(_handle_rotation))
     add.add_get(f"{_BASE}/ledger", _require_enabled(_handle_get_ledger))
+    add.add_get(f"{_BASE}/ledger/contradictions", _require_enabled(_handle_ledger_contradictions))
     add.add_post(f"{_BASE}/ledger", _require_enabled(_handle_post_ledger))
     add.add_post(f"{_BASE}/ledger/hygiene", _require_enabled(_handle_ledger_hygiene))
     add.add_delete(f"{_BASE}/ledger", _require_enabled(_handle_delete_ledger))

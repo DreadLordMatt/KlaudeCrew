@@ -32,6 +32,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
     CONFIDENCE_DECAY,
@@ -248,6 +249,61 @@ def remove(entry_id: str) -> bool:
     return True
 
 
+def find_contradictions(entries: list[LedgerEntry] | None = None) -> list[dict[str, Any]]:
+    """Entry pairs that claim DIFFERENT fixes for the SAME failure fingerprint.
+
+    The source workflow's consolidation SOP asks a leader to "resolve contradictions", and
+    ours asks the same of the hygiene agent. But finding them was left entirely to the
+    model's eye across the whole ledger — an O(n²) scan over text, which is exactly the
+    mechanical work that should not cost model turns and is exactly the kind a model skims
+    once the ledger is more than a screenful.
+
+    So this DETECTS and does not decide. Two entries sharing a fingerprint with different
+    fixes usually means the failure has more than one cause, and the right answer is to
+    split the pattern descriptions so each is distinguishable — a judgement call about what
+    the two causes actually are, which needs the model. Deleting one would silently discard
+    a real, working fix.
+
+    Ordered most-proven-first (by combined use count) so a responder reviewing a long list
+    sees the pairs that are actively misleading people before the speculative ones.
+    """
+    rows = entries if entries is not None else read_entries()
+    by_fingerprint: dict[str, list[LedgerEntry]] = {}
+    for entry in rows:
+        for fingerprint in entry.fingerprints:
+            by_fingerprint.setdefault(fingerprint, []).append(entry)
+
+    seen_pairs: set[tuple[str, str]] = set()
+    found: list[dict[str, Any]] = []
+    for fingerprint, group in by_fingerprint.items():
+        if len(group) < 2:
+            continue
+        for i, left in enumerate(group):
+            for right in group[i + 1 :]:
+                # Same fix reached by two entries is not a contradiction — that is the
+                # duplicate case dedupe already merges by content-addressed id.
+                if left.fix.strip() == right.fix.strip():
+                    continue
+                # Explicit 2-tuple: `tuple(sorted(...))` widens to tuple[str, ...] and
+                # loses the arity the set's type declares.
+                first, second = sorted((left.entry_id, right.entry_id))
+                key = (first, second)
+                if key in seen_pairs:
+                    # Two entries can share more than one fingerprint; report the pair
+                    # once rather than once per shared fingerprint.
+                    continue
+                seen_pairs.add(key)
+                found.append(
+                    {
+                        "fingerprint": fingerprint,
+                        "entries": [left.to_dict(), right.to_dict()],
+                        "uses": left.use_count + right.use_count,
+                    }
+                )
+    found.sort(key=lambda row: (-int(row["uses"]), str(row["fingerprint"])))
+    return found
+
+
 def hygiene(*, now: datetime | None = None) -> dict[str, int]:
     """Dedupe, decay unused confidence, and prune. Runs on the ``primary`` tier.
 
@@ -314,6 +370,10 @@ def hygiene(*, now: datetime | None = None) -> dict[str, int]:
         "deduped": dupes_removed,
         "decayed": decayed,
         "pruned": pruned,
+        # Detected, never auto-resolved: splitting a pattern needs to know what the two
+        # causes ARE. Counted here so the hygiene SOP can jump straight to the pairs
+        # instead of re-scanning the ledger by eye, and so a rising count is visible.
+        "contradictions": len(find_contradictions(kept)),
     }
 
 
