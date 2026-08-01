@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from functools import wraps
 from typing import Any, Awaitable, Callable
 
@@ -68,6 +69,16 @@ _MAX_SECRET_LEN = 512
 
 #: Cap on an operator-supplied note attached to an action.
 _MAX_NOTE_LEN = 4000
+
+#: Cap on the shared-ledger git remote URL. An ssh/https remote is short; a longer
+#: value is a paste accident, not a repo.
+_MAX_REMOTE_LEN = 512
+
+#: Branch names we will hand to ``git``. Deliberately narrow: letters, digits, and
+#: ``._/-``, not starting with ``-`` (which would read as an option). The value is
+#: already passed as its own argv entry, never interpolated into a shell string, so
+#: this is about failing clearly rather than about injection.
+_SAFE_BRANCH_RE = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._/-]{0,98}")
 
 
 def _require_enabled(handler: Handler) -> Handler:
@@ -143,6 +154,22 @@ def _slot_state(request: web.Request, slot_key: str) -> dict[str, Any] | None:
     }
 
 
+def _ledger_sync_status() -> dict[str, Any]:
+    """Shared-ledger sync status, tolerating any failure.
+
+    Deferred import for the same reason the hygiene handler defers it: ``ledger_sync``
+    pulls in the git/sandbox machinery. Never raises — ``/state`` paints the whole
+    board, so a probe of an optional feature must not be able to blank it.
+    """
+    try:
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger_sync
+
+        return ledger_sync.status()
+    except Exception:  # noqa: BLE001 — an optional feature must not 500 the board
+        logger.exception("ops-mission-control: ledger sync status failed")
+        return {"enabled": False, "detail": "Sync status unavailable."}
+
+
 async def _handle_state(request: web.Request) -> web.StreamResponse:
     """Everything the board needs in one call: incidents, sources, rotation, ledger.
 
@@ -170,6 +197,10 @@ async def _handle_state(request: web.Request) -> web.StreamResponse:
             "providers": [_provider_dict(p) for p in registry.catalog()],
             "rotation": rotation.describe(shift),
             "ledger": ledger.stats(),
+            # Shared-ledger git sync. ``ledger_sync.status()`` was written to be
+            # "surfaced in Settings" — and then never returned by any route, so the
+            # team memory-exchange repo was invisible as well as unsettable.
+            "ledger_sync": _ledger_sync_status(),
             "slack": slack_out.status(_slack_client(request)),
             # What companion packages are INSTALLED. Reported separately from the
             # provider list because "no companion installed" and "companion
@@ -534,6 +565,53 @@ async def _handle_put_settings(request: web.Request) -> web.StreamResponse:
         chan = str(body["slack_channel"]).strip()
         await asyncio.to_thread(slack_out.set_settings, channel_id=chan)
         applied["slack_channel"] = chan
+
+    # Shared-ledger git sync: the team's memory-exchange repo. A remote URL and a
+    # branch name are not credentials (auth is the operator's own git/ssh/gh
+    # config), so they belong in plain app config like the Slack channel above.
+    #
+    # These were previously settable ONLY by hand-editing ``data/config.json``:
+    # ``ledger_sync.set_settings`` existed and worked, but nothing outside the
+    # tests ever called it, so the app's headline team feature had no way in. An
+    # operator looking for "where do I point this at my team repo?" correctly
+    # found nothing.
+    if (
+        "ledger_sync_remote" in body
+        or "ledger_sync_branch" in body
+        or "ledger_sync_enabled" in body
+    ):
+        # Deferred import, matching the hygiene handler below: ``ledger_sync`` pulls in
+        # the git/sandbox machinery, and this module is imported at gateway start.
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger_sync
+
+        remote_url = (
+            str(body["ledger_sync_remote"]).strip() if "ledger_sync_remote" in body else None
+        )
+        branch_name = (
+            str(body["ledger_sync_branch"]).strip() if "ledger_sync_branch" in body else None
+        )
+        sync_enabled = bool(body["ledger_sync_enabled"]) if "ledger_sync_enabled" in body else None
+        if remote_url is not None and len(remote_url) > _MAX_REMOTE_LEN:
+            return web.json_response({"error": "ledger_sync_remote is too long"}, status=400)
+        if branch_name and not _SAFE_BRANCH_RE.fullmatch(branch_name):
+            # A branch name reaches a ``git`` argv. It is already passed as its own
+            # argument and never interpolated into a shell string, so this is about
+            # refusing option-like or whitespace-bearing values up front rather than
+            # letting them surface later as a confusing sync failure.
+            return web.json_response({"error": "ledger_sync_branch is not a valid ref"}, status=400)
+        await asyncio.to_thread(
+            ledger_sync.set_settings,
+            enabled=sync_enabled,
+            remote_url=remote_url,
+            branch_name=branch_name,
+        )
+        for sync_key, sync_value in (
+            ("ledger_sync_remote", remote_url),
+            ("ledger_sync_branch", branch_name),
+            ("ledger_sync_enabled", sync_enabled),
+        ):
+            if sync_value is not None:
+                applied[sync_key] = sync_value
 
     for numeric_key in ("max_claims_per_cycle", "stale_after_secs"):
         if numeric_key not in body:

@@ -197,6 +197,67 @@ class TestSettingsRoute(_HomeIsolatedAsync):
         response = await routes._handle_put_settings(_request({"nonsense": 1}))
         self.assertEqual(response.status, 400)
 
+    async def test_the_team_memory_repo_is_settable_over_the_api(self):
+        """The shared-ledger remote must be reachable from Settings.
+
+        ``ledger_sync.set_settings`` shipped with NO caller outside the tests, so the
+        app's headline team feature — one repo the whole team syncs its knowledge
+        through — could only be configured by hand-editing ``data/config.json``. An
+        operator looking for where to point it found nothing.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger_sync
+
+        response = await routes._handle_put_settings(
+            _request(
+                {
+                    "ledger_sync_remote": "git@github.com:acme/ops-ledger.git",
+                    "ledger_sync_branch": "main",
+                    "ledger_sync_enabled": True,
+                }
+            )
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(ledger_sync.remote(), "git@github.com:acme/ops-ledger.git")
+        self.assertEqual(ledger_sync.branch(), "main")
+        self.assertTrue(ledger_sync.configured())
+
+    async def test_an_option_like_branch_is_refused(self):
+        """A branch name reaches a ``git`` argv, so refuse it looking like a flag."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger_sync
+
+        for bad in ("--upload-pack=evil", "main evil", "-x"):
+            with self.subTest(branch=bad):
+                response = await routes._handle_put_settings(_request({"ledger_sync_branch": bad}))
+                self.assertEqual(response.status, 400)
+                self.assertNotEqual(ledger_sync.branch(), bad)
+
+    async def test_an_overlong_remote_is_refused(self):
+        response = await routes._handle_put_settings(_request({"ledger_sync_remote": "x" * 600}))
+        self.assertEqual(response.status, 400)
+
+    async def test_sync_status_is_reported_for_the_board(self):
+        """``ledger_sync.status()`` says it is "surfaced in Settings" — so surface it.
+
+        It was written for the UI and then returned by no route, leaving the team repo
+        invisible as well as unsettable. Asserted through the same helper ``/state``
+        calls, so the status cannot go missing from the payload without failing here.
+        """
+        await routes._handle_put_settings(
+            _request({"ledger_sync_remote": "git@github.com:acme/ops-ledger.git"})
+        )
+        status = routes._ledger_sync_status()
+        self.assertEqual(status["remote"], "git@github.com:acme/ops-ledger.git")
+        self.assertIn("detail", status)
+
+    async def test_sync_status_never_breaks_the_board(self):
+        """``/state`` paints everything, so an optional feature must not be able to 500 it."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger_sync
+
+        with mock.patch.object(ledger_sync, "status", side_effect=RuntimeError("git exploded")):
+            status = routes._ledger_sync_status()
+        self.assertFalse(status["enabled"])
+        self.assertIn("detail", status)
+
 
 class TestManifestCrons(unittest.TestCase):
     """The app is inert unless the manifest declares its crons."""

@@ -450,7 +450,28 @@ claiming: a duplicate claim wastes a turn, a duplicate prune deletes knowledge.
 The board shows your full team composition and badges whoever is on call, so
 "who has this?" is answered before anyone asks.
 
-**Sharing memory.** Point the ledger at a git remote and lessons sync both ways.
+**Sharing memory — where to set the repo.** In **Settings → Ops Mission Control**,
+set the shared-ledger remote (any git URL your team can push to, SSH or HTTPS), the
+branch, and turn sync on. Over the API that is:
+
+```bash
+curl -X PUT "$OMC/settings?token=$TOKEN" -H 'Content-Type: application/json' -d '{
+  "ledger_sync_remote": "git@github.com:acme/ops-ledger.git",
+  "ledger_sync_branch": "main",
+  "ledger_sync_enabled": true
+}'
+```
+
+There is **no credential to enter** — sync uses your own git/SSH/`gh` auth, the same
+as running `git push` by hand. `GET /state` reports the sync status (`remote`,
+`branch`, `initialized`, `ready`) plus a `detail` line naming the next step when it
+is not ready.
+
+The repo is created on the first sync; the nightly maintenance job then pulls,
+reconciles, and pushes. Every teammate points at the same remote and the ledgers
+converge. Point it at the **same repo that holds your `rotation.yaml`** — one repo
+carries both the team's memory and its on-call schedule.
+
 Only three files are ever touched: `ledger.jsonl`, `rotation.yaml`, `.gitignore`.
 Conflicts in the ledger resolve as a **union** (nobody's lesson is lost). A conflict
 in `rotation.yaml` **blocks the push** instead of guessing — a mis-merged rotation

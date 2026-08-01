@@ -394,7 +394,11 @@ independently converge on one row.
 
 | # | Case | Steps | Expected |
 |---|---|---|---|
-| 9.1 | Configure a remote | `set_settings(remote, branch)` | `configured()` true |
+| 9.1 | Configure a remote **over the API** | `PUT /settings` `{ledger_sync_remote, ledger_sync_branch, ledger_sync_enabled}` | 200; `configured()` true |
+| 9.1a | Status is readable | `q /state` → `ledger_sync` | `remote`, `branch`, `initialized`, `ready`, `detail` |
+| 9.1b | Option-like branch refused | `{"ledger_sync_branch":"--upload-pack=evil"}` | 400; stored branch unchanged |
+| 9.1c | Over-long remote refused | 600-char URL | 400 |
+| 9.1d | Status cannot break the board | make `status()` raise | `/state` still returns; `enabled: false` + a detail |
 | 9.2 | First push | Local lesson → push | Lands on the remote branch |
 | 9.3 | Pull converges | Teammate's lesson → pull | Both visible on both instances |
 | 9.4 | Unrelated histories | Each instance `git init`s its own | `--allow-unrelated-histories` handles it |
