@@ -28,9 +28,11 @@ port and never hunt for a token elsewhere — see SKILL.md § Calling the API fo
    `configured: true`, produce NO output and stop. There is nothing to arm, and this
    job runs every 5 minutes — on a fresh install it must cost nothing at all.
 
-   This is the ONE cron that ships enabled, because it is the only thing that resumes
-   the others: `dispatch` is armed by the `on_shift` tier, and the tier is armed here.
-   Ship it paused and nothing ever fires no matter what the operator configures.
+   This job ships enabled because it is the only thing that resumes the `on_shift`
+   tier: `dispatch` and `reconcile` both ship paused, and the tier is armed here. Ship
+   this one paused and nothing ever fires no matter what the operator configures.
+   (`ledger-hygiene` also ships enabled — it sits on the `primary` tier, which nothing
+   arms from here, so it self-gates on `is_primary()` at runtime instead.)
 
 1. `GET /api/apps/ops-mission-control/rotation` — returns `on_shift`, `who`,
    `until`, `unknown`, the `tiers` map, `tier_crons` (cron names **per tier**), and
@@ -53,10 +55,14 @@ port and never hunt for a token elsewhere — see SKILL.md § Calling the API fo
 
 ## Rules
 
-- `unknown: true` means the rotation source could not be reached. The tier map
-  already reports `on_shift` as **armed** in that case — fail-open is deliberate.
-  Do not "correct" this by pausing: failing to reach a rotation API must never
-  silently switch off a team's incident response. Log it and move on.
+- `unknown: true` means the rotation source could not answer. **Do not infer arming
+  from it — read `tiers.on_shift` and do exactly what it says.** The two sources
+  answer an indeterminate case differently, on purpose: a rotation *API* reports
+  `on_shift: true, unknown: true` (a network fault must never silently switch off a
+  team's incident response), while a committed `rotation.yaml` reports
+  `on_shift: false, unknown: true` (if the file cannot say this operator owns the
+  shift, assuming they do is how every teammate ends up claiming the same alarm).
+  `unknown` is an explanation for the operator, never an arming input.
 - Only ever pause or resume the names in `tier_crons.on_shift`. The `always` tier
   includes this job, and the `primary` tier owns nightly ledger maintenance —
   touching either from here is out of scope and, in the first case, unrecoverable.
