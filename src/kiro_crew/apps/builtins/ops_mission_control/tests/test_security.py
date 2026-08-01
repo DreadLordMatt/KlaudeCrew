@@ -81,6 +81,38 @@ class TestRedaction(unittest.IsolatedAsyncioTestCase):
         out = secrets.redact_tokens(f"app key {key} trailing")
         self.assertNotIn(key, out)
 
+    def test_datadog_prefixed_keys_are_redacted(self):
+        """Newer Datadog tenants issue ``ddapp_``/``ddapi_`` keys, not bare hex.
+
+        Found with a live tenant. Every fixture above uses bare hex (``"a" * 32``),
+        so the hex patterns matched and the suite looked complete — while the shape
+        real users actually hold was covered by nothing. A prefixed key is not hex,
+        so neither hex pattern applies to it.
+        """
+        # Synthetic values only. The shapes are what matter, and a fixture must never
+        # be a real credential — the point of this test is that keys do not travel.
+        for key in ("ddapp_" + "Aa1" * 11, "ddapi_" + "x" * 32):
+            with self.subTest(key=key[:9]):
+                self.assertNotIn(key, secrets.redact_tokens(f"key is {key} here"))
+
+    def test_the_dd_application_key_header_is_a_carrier(self):
+        """``app[_-]?key`` does NOT match ``DD-APPLICATION-KEY``.
+
+        That is the header Datadog documents, so it is the one an adapter author is
+        most likely to echo into an error string or a reproduced ``curl`` line. With
+        a prefixed key the hex patterns miss the value and this carrier is the only
+        thing left — verified leaking before ``application[_-]?key`` was added.
+        """
+        secret = "SomeOpaqueValueThatIsLongEnough"
+        out = secrets.redact_tokens(f'-H "DD-APPLICATION-KEY: {secret}"')
+        self.assertNotIn(secret, out)
+
+    def test_application_keyword_in_prose_is_not_redacted(self):
+        """The carrier must not fire on ordinary words containing "application"."""
+        for text in ("the application keyboard shortcut", "apply key rotation quarterly"):
+            with self.subTest(text=text):
+                self.assertEqual(secrets.redact_tokens(text), text)
+
     def test_bearer_carrier(self):
         out = secrets.redact_tokens("Bearer: sk-abcdefghijklmnop")
         self.assertIn(secrets.REDACTED_PLACEHOLDER, out)

@@ -70,6 +70,12 @@ _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
     # Datadog API key (32 hex) and application key (40 hex), as standalone words.
     re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE),
     re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE),
+    # Datadog PREFIXED keys. Newer tenants issue keys as ``ddapp_<base62>`` /
+    # ``ddapi_<base62>`` rather than bare hex, and a prefixed key is NOT hex, so
+    # neither pattern above matches it. Found with a real tenant's credentials:
+    # every synthetic fixture in the suite used bare hex, so the shape that ships
+    # to actual users was the one shape nothing covered.
+    re.compile(r"\bdd(?:app|api)_[A-Za-z0-9]{16,}\b"),
     # Generic carriers: "Bearer <token>", "token=<value>", "api-key: <value>".
     #
     # The separator is OPTIONAL, and that matters: this pattern required `[:=]`, so the
@@ -90,7 +96,17 @@ _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
     # `\s+` OR `\s*[:=]\s*` rather than making the separator a bare `\s*`: without the
     # alternation, `token` immediately followed by 12+ non-space chars would match ordinary
     # prose like "tokenization-heavy" and redact real diagnostic text.
-    re.compile(r"(?i)\b(bearer|token|api[_-]?key|app[_-]?key)\b(?:\s*[:=]\s*|\s+)\S{12,}"),
+    #
+    # ``application[_-]?key`` is spelled out separately from ``app[_-]?key`` because
+    # ``app[_-]?key`` does NOT match ``DD-APPLICATION-KEY`` — the real header Datadog
+    # documents and the one an adapter author is most likely to echo into an error
+    # string. Caught with a live tenant: the bare-hex patterns missed the prefixed key
+    # AND this carrier missed the header naming it, so a real application key rode out
+    # in a reproduced ``curl`` trace.
+    re.compile(
+        r"(?i)\b(bearer|token|api[_-]?key|app[_-]?key|application[_-]?key)\b"
+        r"(?:\s*[:=]\s*|\s+)\S{12,}"
+    ),
 )
 
 
