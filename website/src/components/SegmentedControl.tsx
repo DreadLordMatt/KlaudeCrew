@@ -89,6 +89,12 @@ export default function SegmentedControl<T extends string = string>({ segments, 
               {segments.map(s => (
                 <button
                   key={s.key}
+                  // Same `title` the full-width path sets. Without it the collapsed
+                  // control was addressable only by its visible label, so any caller
+                  // targeting a segment by title silently found nothing once the
+                  // container narrowed enough to collapse — and a click that hits no
+                  // segment leaves the view unchanged rather than failing loudly.
+                  title={s.tooltip || s.label}
                   onClick={() => { onChange(s.key); setDropdownOpen(false) }}
                   className={`flex items-center gap-2 w-full px-3 py-1.5 text-[12px] font-medium cursor-pointer border-none bg-transparent text-left hover:bg-bg-hover ${
                     s.key === value ? 'text-accent' : 'text-muted'

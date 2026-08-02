@@ -33,6 +33,8 @@
         "session_sharing": true,
         "max_subagents": 0,
         "spawn_min_memory_gb": 4.0,
+        "resource_pressure_gb": 4.0,
+        "resource_critical_gb": 2.0,
         "workflow_run_timeout_secs": 3600,
         "subagent_mem_buffer_pct": 20,
         "subagent_cost_gb": 0.5,
@@ -341,6 +343,34 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": 4.0
+    },
+    {
+      "path": "agent.resource_pressure_gb",
+      "kind": "core",
+      "type": "number",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Resource Pressure Threshold (GB)",
+      "help": "Available memory (GB) at or below which the agent is told host memory is 'tight' via a compact [RESOURCES] context line, so it can prefer the lighter path for heavy work (targeted tests, smaller sub-agent waves). Advisory only — not enforced. 0 disables the context line. Lower this on small-memory hosts / memory-limited containers (e.g. a 2-4 GB pod) so the advisory only fires under genuine pressure.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 4.0
+    },
+    {
+      "path": "agent.resource_critical_gb",
+      "kind": "core",
+      "type": "number",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Resource Critical Threshold (GB)",
+      "help": "Available memory (GB) at or below which the [RESOURCES] context line escalates to 'critically low' and advises against starting heavy work at all. Should be <= resource_pressure_gb. 0 disables the critical tier.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 2.0
     },
     {
       "path": "agent.workflow_run_timeout_secs",
@@ -1811,6 +1841,7 @@
         "transcribe_profile": "",
         "language_code": "en-US",
         "streaming": false,
+        "endpointing": false,
         "dictation_panel": true
       }
     },
@@ -1973,6 +2004,20 @@
       "tags": [],
       "label": "Streaming",
       "help": "Stream partial transcripts live to the dashboard input (transcribe provider only).",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "stt.endpointing",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Semantic endpointing",
+      "help": "While streaming dictation, run a fast background model on each stable transcript segment to detect when you have finished a complete request, then auto-submit. Transcribe streaming only; off by default.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": false
