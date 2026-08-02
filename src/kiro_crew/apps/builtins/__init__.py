@@ -5,6 +5,7 @@ BUILTIN_NAMES: list[str] = [
     "code_review_sage",
     "issue_radar",
     "meetings",
+    "ops_mission_control",
     "papyrus",
     "mochi",
     "pptx_maker",
