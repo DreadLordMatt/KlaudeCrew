@@ -39,6 +39,25 @@ recursive-include src/kiro_crew/tests_fixtures *
 # --- Pruning: never ship test trees, vendored node deps, or build cruft ------
 prune test
 prune tests
+# Design-review finding, scoped to what it actually affects. The
+# `recursive-include src/kiro_crew/apps *.md` above exists to ship ATTRIBUTION.md/README.md
+# credit and swept in ops-mission-control's development journals as a side effect: 11 files,
+# ~5.2k lines of research notes, feature ledgers and a parity report.
+#
+# SDIST only. Measured both ways: the sdist carried 11 `planning/` files before this line and
+# 0 after, while the wheel carried 0 either way — `[options.package_data]` in setup.cfg globs
+# `apps/builtins/*/*.md`, a SINGLE level, which never reached `planning/`. The review reported
+# this as shipping in the wheel; that half does not reproduce.
+#
+# The files stay in git — reviewers read them and the repo history is their right home — but
+# no installed user has a use for them and nothing shipped references them. `planning/` is
+# unique to this app (no other builtin has one), so this prunes a divergence rather than
+# establishing a rule.
+#
+# In-package `tests/` is deliberately NOT pruned: `code_review_sage` (16 files) and
+# `issue_radar` (11) ship theirs, so that is the established convention for a builtin app and
+# changing it belongs in its own change.
+prune src/kiro_crew/apps/builtins/ops_mission_control/planning
 prune website/node_modules
 prune build
 prune dist

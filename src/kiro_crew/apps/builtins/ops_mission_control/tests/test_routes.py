@@ -1,0 +1,1772 @@
+"""Tests for the HTTP surface.
+
+Two properties matter most here.
+
+**The enabled gate.** Builtin routes are registered at gateway startup and exist
+even while the app is disabled, so every handler must refuse when disabled. A
+missing gate on a default-disabled opt-in app means it is silently callable.
+
+**Secrets are write-only.** No read endpoint may ever return a stored token, even
+to an authenticated caller. The test asserts against the real handler rather than
+inspecting the code, so a future refactor that starts echoing config wholesale is
+caught.
+"""
+
+import json
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from aiohttp import web
+
+from kiro_crew.apps.builtins.ops_mission_control.backend import routes
+
+
+class TestRouteRegistration(unittest.IsolatedAsyncioTestCase):
+    async def test_all_routes_are_namespaced_under_the_app(self):
+        """A builtin registering outside its own namespace would shadow core APIs."""
+        app = web.Application()
+        routes.register_routes(app)
+        paths = [
+            resource.canonical
+            for resource in app.router.resources()
+            if getattr(resource, "canonical", "")
+        ]
+        self.assertTrue(paths)
+        for path in paths:
+            self.assertTrue(
+                path.startswith("/api/apps/ops-mission-control"),
+                f"route escapes the app namespace: {path}",
+            )
+
+    async def test_expected_surface_is_present(self):
+        app = web.Application()
+        routes.register_routes(app)
+        paths = {
+            resource.canonical
+            for resource in app.router.resources()
+            if getattr(resource, "canonical", "")
+        }
+        base = "/api/apps/ops-mission-control"
+        for suffix in (
+            "/state",
+            "/incidents",
+            "/incident",
+            "/incident/transition",
+            "/incident/claim",
+            "/incident/action",
+            "/signals",
+            "/providers",
+            "/rotation",
+            "/ledger",
+            "/webhook",
+        ):
+            self.assertIn(base + suffix, paths)
+
+
+class TestEnabledGate(unittest.IsolatedAsyncioTestCase):
+    """Every handler must refuse while the app is disabled."""
+
+    @staticmethod
+    async def _invoke(handler: routes.Handler, *, enabled: bool) -> web.StreamResponse:
+        """Drive a gated handler with the app enabled or disabled."""
+        request = mock.MagicMock(spec=web.Request)
+        with mock.patch.object(routes, "is_app_enabled", return_value=enabled):
+            wrapped = routes._require_enabled(handler)
+            return await wrapped(request)
+
+    async def test_disabled_app_returns_403(self):
+        async def _never_called(_request: web.Request) -> web.StreamResponse:
+            raise AssertionError("handler ran while the app was disabled")
+
+        response = await self._invoke(_never_called, enabled=False)
+        self.assertEqual(response.status, 403)
+
+    async def test_enabled_app_reaches_the_handler(self):
+        async def _ok(_request: web.Request) -> web.StreamResponse:
+            return web.json_response({"ok": True})
+
+        response = await self._invoke(_ok, enabled=True)
+        self.assertEqual(response.status, 200)
+
+    async def test_every_registered_handler_is_gated(self):
+        """Catches a new route added without the gate."""
+        app = web.Application()
+        routes.register_routes(app)
+        ungated = []
+        for resource in app.router.resources():
+            for route in resource:
+                handler = route.handler
+                # ``_require_enabled`` uses functools.wraps, so a gated handler
+                # carries __wrapped__ pointing at the real implementation.
+                if not hasattr(handler, "__wrapped__"):
+                    ungated.append(getattr(resource, "canonical", str(resource)))
+        self.assertEqual(ungated, [], f"ungated routes: {ungated}")
+
+
+class TestSecretsAreWriteOnly(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        import os
+
+        self.tmp = Path(tempfile.mkdtemp())
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = str(self.tmp)
+        from kiro_crew.config import loader
+
+        for name in ("config_dir", "_config_dir"):
+            fn = getattr(loader, name, None)
+            if fn is not None and hasattr(fn, "cache_clear"):
+                fn.cache_clear()
+
+    def tearDown(self):
+        import os
+
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        from kiro_crew.config import loader
+
+        for name in ("config_dir", "_config_dir"):
+            fn = getattr(loader, name, None)
+            if fn is not None and hasattr(fn, "cache_clear"):
+                fn.cache_clear()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def test_provider_listing_never_contains_a_token(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import registry, secrets
+
+        secret_value = "u+ThisIsTheActualSecretValue"
+        secrets.put_secret("pagerduty", "api_token", secret_value)
+        registry.reset_registry()
+        try:
+            listing = [routes._provider_dict(p) for p in registry.get_registry().catalog()]
+            # ``ensure_ascii=False`` so the placeholder's bullets are not escaped
+            # to • — we are asserting on content, not on JSON encoding.
+            payload = json.dumps(listing, ensure_ascii=False)
+            self.assertNotIn(secret_value, payload)
+            self.assertNotIn("ThisIsTheActualSecretValue", payload)
+
+            # ...but the UI must still learn that the field IS set.
+            pagerduty = next(p for p in listing if p["id"] == "pagerduty")
+            self.assertEqual(pagerduty["secrets"]["api_token"], secrets.REDACTED_PLACEHOLDER)
+
+            # An unset field reports empty, so the UI can distinguish the two.
+            datadog = next(p for p in listing if p["id"] == "datadog")
+            self.assertEqual(datadog["secrets"]["api_key"], "")
+        finally:
+            registry.reset_registry()
+
+
+class TestIncidentsPayloadIsBounded(unittest.IsolatedAsyncioTestCase):
+    """`/incidents` used to serialize the ENTIRE index on every dashboard poll.
+
+    Fine at three incidents. Once a flapping alarm has minted hundreds — which became
+    possible when resolved alarms were made re-claimable — it is an ever-growing payload
+    on a polled endpoint.
+    """
+
+    def setUp(self):
+        import os
+
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = self.tmp
+
+    def tearDown(self):
+        import os
+
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def _get_incidents(self):
+        request = mock.MagicMock(spec=web.Request)
+        request.query = {}
+        response = await routes._handle_incidents(request)
+        return json.loads(getattr(response, "text", "{}") or "{}")
+
+    async def test_response_is_capped_and_says_when_it_truncated(self):
+        """Silent truncation is how someone concludes an incident vanished."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        over = routes.MAX_INCIDENTS_RESPONSE + 5
+        for n in range(over):
+            inc = store.claim(
+                models.Signal.create(
+                    source="cloudwatch", native_id=f"alarm/{n}", title="t", resource="r"
+                ),
+                operating_mode=models.MODE_OBSERVE,
+            )
+            assert inc is not None
+
+        payload = await self._get_incidents()
+        self.assertEqual(len(payload["incidents"]), routes.MAX_INCIDENTS_RESPONSE)
+        self.assertTrue(payload["truncated"])
+        self.assertEqual(payload["total"], over)
+
+    async def test_a_small_board_is_not_marked_truncated(self):
+        """The common case must carry no scary flag."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        store.claim(
+            models.Signal.create(
+                source="cloudwatch", native_id="alarm/one", title="t", resource="r"
+            ),
+            operating_mode=models.MODE_OBSERVE,
+        )
+        payload = await self._get_incidents()
+        self.assertEqual(len(payload["incidents"]), 1)
+        self.assertNotIn("truncated", payload)
+
+
+class TestSignalsSplitsParkedFromFiring(unittest.IsolatedAsyncioTestCase):
+    """`/signals` must expose provider-side suppression as its OWN bucket.
+
+    Three different reasons a signal is absent from ``firing`` — it cleared, we could not
+    look, or a human parked it — and the route is the only place that can tell a caller
+    which. Before this a parked signal appeared ONLY in the raw ``signals`` array with
+    state ``unknown``, so the panel counting that array under a column headed "Firing"
+    rendered "3 firing" above an empty queue with nothing to explain the contradiction.
+    """
+
+    def setUp(self):
+        import os
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import registry
+
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = self.tmp
+        registry.reset_registry()
+        # Only fakes: the public adapters would try to reach real APIs.
+        self.registry = registry.OpsProviderRegistry()
+        registry._registry = self.registry
+
+    def tearDown(self):
+        import os
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import registry
+
+        registry.reset_registry()
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _add_source(self, signals):
+        class _Fake:
+            id = "fake"
+            display_name = "Fake"
+
+            def configured(self):
+                return True
+
+            async def poll(self):
+                return list(signals)
+
+        self.registry.register_signal_source(_Fake())
+
+    async def _get_signals(self):
+        request = mock.MagicMock(spec=web.Request)
+        response = await routes._handle_signals(request)
+        return json.loads(getattr(response, "text", "{}") or "{}")
+
+    @staticmethod
+    def _signal(**kw):
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import Signal
+
+        kw.setdefault("native_id", "a")
+        kw.setdefault("title", "an alarm")
+        return Signal.create(source="fake", **kw)
+
+    async def test_a_parked_signal_lands_in_suppressed_and_nowhere_else(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import STATE_SUPPRESSED
+
+        self._add_source(
+            [
+                self._signal(
+                    state=STATE_SUPPRESSED, suppressed_by="7f3a", suppressed_reason="silenced"
+                )
+            ]
+        )
+        payload = await self._get_signals()
+        self.assertEqual(len(payload["suppressed"]), 1)
+        self.assertEqual(payload["firing"], [])
+        self.assertEqual(payload["cleared"], [])
+        self.assertEqual(payload["unclaimed"], [])
+
+    async def test_the_attribution_reaches_the_client(self):
+        """Without who, "the app ignored my alarm" and "someone silenced it" look the same."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import STATE_SUPPRESSED
+
+        self._add_source(
+            [
+                self._signal(
+                    state=STATE_SUPPRESSED, suppressed_by="7f3a", suppressed_reason="silenced"
+                )
+            ]
+        )
+        payload = await self._get_signals()
+        parked = payload["suppressed"][0]
+        self.assertEqual(parked["suppressed_by"], "7f3a")
+        self.assertEqual(parked["suppressed_reason"], "silenced")
+
+    async def test_parked_is_not_folded_into_cleared(self):
+        """`cleared` asserts recovery, which a suppression does not — reconcile resolves on it."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            STATE_OK,
+            STATE_SUPPRESSED,
+        )
+
+        self._add_source(
+            [
+                self._signal(native_id="parked", state=STATE_SUPPRESSED),
+                self._signal(native_id="recovered", state=STATE_OK),
+            ]
+        )
+        payload = await self._get_signals()
+        self.assertEqual(len(payload["cleared"]), 1)
+        self.assertEqual(payload["cleared"][0]["id"], "fake:recovered")
+        self.assertEqual(payload["suppressed"][0]["id"], "fake:parked")
+
+    async def test_firing_work_is_unaffected_by_a_parked_neighbour(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            STATE_FIRING,
+            STATE_SUPPRESSED,
+        )
+
+        self._add_source(
+            [
+                self._signal(native_id="parked", state=STATE_SUPPRESSED),
+                self._signal(native_id="live", state=STATE_FIRING),
+            ]
+        )
+        payload = await self._get_signals()
+        self.assertEqual([s["id"] for s in payload["firing"]], ["fake:live"])
+        self.assertEqual([s["id"] for s in payload["unclaimed"]], ["fake:live"])
+
+
+class TestIncidentServesItsPostmortem(unittest.IsolatedAsyncioTestCase):
+    """``/incident`` must report the artifact honestly, including its absence.
+
+    ``log`` was served and typed from the day the route shipped while the renderer had no
+    caller, so it was structurally always ``""``. ``log_path`` is new and is the riskier of
+    the two: a path is a promise that a file is at the other end, so it must be empty
+    whenever there is nothing there rather than computed from the id.
+    """
+
+    def setUp(self):
+        import os
+
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = self.tmp
+
+    def tearDown(self):
+        import os
+
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    async def _get(incident_id: str):
+        request = mock.MagicMock(spec=web.Request)
+        request.query = {"id": incident_id}
+        response = await routes._handle_incident(request)
+        return response.status, json.loads(getattr(response, "text", "{}") or "{}")
+
+    async def test_a_closed_incident_serves_its_artifact_and_where_it_lives(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(
+            models.Signal.create(source="cloudwatch", native_id="alarm/dlq", title="DLQ deep"),
+            operating_mode=models.MODE_OBSERVE,
+        )
+        assert inc is not None
+        store.transition(inc.incident_id, models.STATUS_INVESTIGATING)
+        store.transition(inc.incident_id, models.STATUS_RESOLVED, resolution="drained it")
+
+        status, payload = await self._get(inc.incident_id)
+        self.assertEqual(status, 200)
+        self.assertIn("DLQ deep", payload["log"])
+        self.assertIn("drained it", payload["log"])
+        self.assertTrue(payload["log_path"].endswith(f"{inc.incident_id}.md"))
+        self.assertTrue(Path(payload["log_path"]).is_file())
+
+    async def test_an_open_incident_reports_no_path_at_all(self):
+        """A path for a file that does not exist would send the operator to an empty ls."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(
+            models.Signal.create(source="cloudwatch", native_id="alarm/open", title="live"),
+            operating_mode=models.MODE_OBSERVE,
+        )
+        assert inc is not None
+        _status, payload = await self._get(inc.incident_id)
+        self.assertEqual(payload["log"], "")
+        self.assertEqual(payload["log_path"], "")
+
+
+class TestLedgerHygieneWiring(unittest.IsolatedAsyncioTestCase):
+    """The daily pass is where the git-native memory loop gets its only caller.
+
+    ``ledger_sync`` and ``ledger_index.import_pending`` were both built and tested and
+    wired to NOTHING: sync had no caller anywhere, and ``dispatch``'s semantic recall
+    queried an index nothing ever populated — so on a real install recall returned zero
+    hits forever while every unit test passed. These tests exist so that cannot recur.
+
+    The other property pinned here is ORDER. pull → hygiene → index → push is not
+    cosmetic: deduping before the merge leaves freshly-arrived duplicates for tomorrow,
+    indexing before hygiene embeds rows about to be pruned, and pushing before hygiene
+    makes every instance re-derive the same dedupe locally so the repo never converges.
+    """
+
+    def setUp(self):
+        import os
+
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = self.tmp
+
+    def tearDown(self):
+        import os
+
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    async def _run(*, calls=None, sync_result="", index_result=None, hygiene=None):
+        """Drive the handler with sync and indexing stubbed, recording the call order."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, ledger_sync
+
+        order = calls if calls is not None else []
+
+        async def _sync(*, direction="pull"):
+            order.append(f"sync:{direction}")
+            return sync_result
+
+        def _hygiene():
+            order.append("hygiene")
+            return hygiene if hygiene is not None else {"deduped": 0, "decayed": 0, "pruned": 0}
+
+        def _index():
+            order.append("index")
+            return index_result or {"scanned": 0, "written": 0, "skipped": 0, "embedded": 0}
+
+        request = mock.MagicMock(spec=web.Request)
+        with mock.patch.object(ledger_sync, "sync_safely", _sync):
+            with mock.patch.object(ledger, "hygiene", _hygiene):
+                with mock.patch.object(routes, "_index_ledger_safely", _index):
+                    response = await routes._handle_ledger_hygiene(request)
+        return response, order
+
+    async def test_the_pass_runs_sync_hygiene_and_index(self):
+        """Regression: all three were unreachable on a real install."""
+        response, order = await self._run()
+        self.assertEqual(response.status, 200)
+        self.assertIn("sync:pull", order)
+        self.assertIn("hygiene", order)
+        self.assertIn("index", order)
+        self.assertIn("sync:push", order)
+
+    async def test_stage_order_is_pull_hygiene_index_push(self):
+        _, order = await self._run()
+        self.assertEqual(order, ["sync:pull", "hygiene", "index", "sync:push"])
+
+    async def test_a_pull_that_brought_news_marks_the_pass_changed(self):
+        """``changed`` decides whether the cron speaks. A teammate's lesson arriving
+        changes what the agent knows tomorrow, so it is worth saying."""
+        response, _ = await self._run(sync_result="pulled")
+        self.assertTrue(json.loads(getattr(response, "text", "{}") or "{}")["changed"])
+
+    async def test_newly_indexed_rows_mark_the_pass_changed(self):
+        response, _ = await self._run(
+            index_result={"scanned": 5, "written": 5, "skipped": 0, "embedded": 5}
+        )
+        self.assertTrue(json.loads(getattr(response, "text", "{}") or "{}")["changed"])
+
+    async def test_a_quiet_pass_stays_silent(self):
+        """Silence-by-default is a hard requirement — the cron must not speak daily
+        just because it ran."""
+        response, _ = await self._run()
+        self.assertFalse(json.loads(getattr(response, "text", "{}") or "{}")["changed"])
+
+    async def test_hygiene_alone_still_marks_changed(self):
+        response, _ = await self._run(hygiene={"deduped": 2, "decayed": 0, "pruned": 1})
+        self.assertTrue(json.loads(getattr(response, "text", "{}") or "{}")["changed"])
+
+    async def test_the_response_reports_each_stage_separately(self):
+        """An operator debugging "why is recall empty" needs to see WHICH stage did
+        nothing — a single boolean cannot distinguish "no remote" from "no model"."""
+        response, _ = await self._run(
+            sync_result="pulled",
+            index_result={"scanned": 3, "written": 3, "skipped": 0, "embedded": 3},
+        )
+        payload = json.loads(getattr(response, "text", "{}") or "{}")
+        self.assertIn("sync", payload)
+        self.assertIn("pull", payload["sync"])
+        self.assertIn("push", payload["sync"])
+        self.assertEqual(payload["index"]["written"], 3)
+        self.assertIn("summary", payload)
+
+    async def test_indexing_failure_does_not_lose_the_hygiene_pass(self):
+        """Local dedupe is the part that always works and always matters; a missing
+        embedding model must not cost it."""
+        # Import ledger_index explicitly and patch the MODULE OBJECT. A dotted-path
+        # patch target fails in a fresh process ("module ... has no attribute
+        # 'ledger_index'"): the package attribute only exists once something has
+        # imported the submodule, and routes imports it lazily inside the handler.
+        from kiro_crew.apps.builtins.ops_mission_control.backend import (
+            ledger,
+            ledger_index,
+            ledger_sync,
+        )
+
+        async def _sync(*, direction="pull"):
+            return ""
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("no embedding model")
+
+        request = mock.MagicMock(spec=web.Request)
+        with mock.patch.object(ledger_sync, "sync_safely", _sync):
+            with mock.patch.object(ledger, "hygiene", return_value={"deduped": 1}):
+                # Not stubbing _index_ledger_safely: this exercises its real
+                # swallow-everything contract rather than asserting it exists.
+                with mock.patch.object(ledger_index, "import_pending", _boom):
+                    response = await routes._handle_ledger_hygiene(request)
+        self.assertEqual(response.status, 200)
+        payload = json.loads(getattr(response, "text", "{}") or "{}")
+        self.assertEqual(payload["summary"]["deduped"], 1, "hygiene still ran")
+        self.assertEqual(payload["index"]["written"], 0)
+
+    async def test_unconfigured_sync_is_not_an_error(self):
+        """The single-user case: no remote, and nothing scary in the response."""
+        response, _ = await self._run(sync_result="")
+        payload = json.loads(getattr(response, "text", "{}") or "{}")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["sync"]["pull"], "")
+
+    async def test_index_helper_survives_having_no_vector_store(self):
+        """Exercises the real helper with no store available."""
+        with mock.patch(
+            "kiro_crew.vector_memory.VectorMemoryStore",
+            side_effect=RuntimeError("faiss unavailable"),
+        ):
+            result = routes._index_ledger_safely()
+        self.assertEqual(result, {"scanned": 0, "written": 0, "skipped": 0, "embedded": 0})
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestNeedsHumanNotifiesOnTheEdgeOnly(unittest.IsolatedAsyncioTestCase):
+    """``/incident/transition`` must push a desktop notification on the EDGE into
+    ``needs_human`` and nowhere else.
+
+    The pre-transition status is captured before the write for one specific reason:
+    ``store.update_fields`` re-enters ``transition`` with the SAME status on an unrelated
+    field edit, so without the comparison an incident parked on a tool approval would
+    re-toast at critical priority on every subsequent write to it — the unchanged
+    condition ``SKILL.md``'s noise discipline forbids.
+    """
+
+    def setUp(self):
+        import os
+
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = self.tmp
+        self.pushes: list[tuple] = []
+        # Patched by IDENTITY off the module object `routes` itself holds, not by dotted
+        # string. A dotted patch walks package attributes, and `test_ledger_sync_git`
+        # evicts this app's modules from `sys.modules` to simulate two processes — after
+        # which the string can resolve a DIFFERENT `notify_out` copy than the handler
+        # calls, so the mock silently never applies. That is a test-order-dependent
+        # failure that reads as a product bug.
+
+        def _record(*args, **kwargs):
+            # A named function, not a lambda: `append(...) or True` reads as returning
+            # bool but is typed `None | bool`, and mypy is blocking here.
+            self.pushes.append(args)
+            return True
+
+        self._patch = mock.patch.object(
+            routes.notify_out, "notify_needs_human", side_effect=_record
+        )
+        self._patch.start()
+
+    def tearDown(self):
+        import os
+
+        self._patch.stop()
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def _transition(self, incident_id: str, status: str, **extra):
+        request = mock.MagicMock(spec=web.Request)
+        request.app = {"state": object()}
+        request.json = mock.AsyncMock(return_value={"id": incident_id, "status": status, **extra})
+        response = await routes._handle_transition(request)
+        return response.status, json.loads(getattr(response, "text", "{}") or "{}")
+
+    def _claim(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(
+            models.Signal.create(source="cloudwatch", native_id="alarm/dlq", title="DLQ deep"),
+            operating_mode=models.MODE_OBSERVE,
+        )
+        assert inc is not None
+        return inc
+
+    async def test_entering_needs_human_notifies_once(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        inc = self._claim()
+        status, _payload = await self._transition(inc.incident_id, models.STATUS_NEEDS_HUMAN)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.pushes), 1)
+        self.assertIn(inc.incident_id, self.pushes[0])
+
+    async def test_a_second_write_while_still_blocked_notifies_nothing(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        inc = self._claim()
+        await self._transition(inc.incident_id, models.STATUS_NEEDS_HUMAN)
+        await self._transition(
+            inc.incident_id, models.STATUS_NEEDS_HUMAN, diagnosis="still thinking"
+        )
+        self.assertEqual(len(self.pushes), 1, "a re-block must not re-notify")
+
+    async def test_a_transition_to_any_other_status_notifies_nothing(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        inc = self._claim()
+        await self._transition(inc.incident_id, models.STATUS_INVESTIGATING)
+        await self._transition(inc.incident_id, models.STATUS_RESOLVED, resolution="drained it")
+        self.assertEqual(self.pushes, [])
+
+    async def test_a_failing_notifier_cannot_fail_the_transition(self):
+        """The state change is already durable; a notification centre fault is not news."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        inc = self._claim()
+        self._patch.stop()
+        try:
+            with mock.patch.object(
+                routes.notify_out,
+                "notify_needs_human",
+                side_effect=RuntimeError("bus exploded"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    # notify_out itself never raises (see test_notify_out); this proves the
+                    # route does not swallow a genuine programming fault silently, which is
+                    # why the chokepoint and not the caller owns the try/except.
+                    await self._transition(inc.incident_id, models.STATUS_NEEDS_HUMAN)
+        finally:
+            self._patch.start()
+
+
+class TestStateReportsTheNotificationChannel(unittest.IsolatedAsyncioTestCase):
+    """``/state`` must carry ``notify`` so Settings can render it without a new endpoint.
+
+    Readiness depends on live gateway state (is there a notification bus in this process),
+    so it cannot be answered from the unauthenticated config file the panel already has.
+    """
+
+    def setUp(self):
+        import os
+
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = self.tmp
+
+    def tearDown(self):
+        import os
+
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def test_state_carries_the_notify_status_with_every_field_the_ui_types(self):
+        request = mock.MagicMock(spec=web.Request)
+        request.app = {"state": None}
+        response = await routes._handle_state(request)
+        payload = json.loads(getattr(response, "text", "{}") or "{}")
+        self.assertIn("notify", payload)
+        for key in ("enabled", "bus_available", "ready", "detail", "channels"):
+            self.assertIn(key, payload["notify"])
+
+    async def test_a_process_without_a_bus_is_not_reported_ready(self):
+        """`enabled` alone must never paint as active — nothing would be delivered."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import notify_out
+
+        notify_out.set_settings(enabled=True)
+        request = mock.MagicMock(spec=web.Request)
+        request.app = {"state": None}
+        response = await routes._handle_state(request)
+        payload = json.loads(getattr(response, "text", "{}") or "{}")
+        self.assertTrue(payload["notify"]["enabled"])
+        self.assertFalse(payload["notify"]["ready"])
+
+
+class TestAnActionSchedulesItsOwnVerification(unittest.IsolatedAsyncioTestCase):
+    """A 2xx from a provider is no longer the end of the story.
+
+    `_handle_action` used to await `sink.execute`, audit, and return — so the response's
+    `ok` meant only "transmitted". Checkmk documents exactly that gap for its Livestatus
+    command dispatch; Nagios's command pipe returns nothing at all. The route now records
+    what was done and when to look again, and says which of the two it is doing.
+    """
+
+    def setUp(self):
+        import os
+
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = self.tmp
+
+    def tearDown(self):
+        import os
+
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _incident(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(
+            models.Signal.create(source="cloudwatch", native_id="alarm/dlq", title="DLQ deep"),
+            operating_mode=models.MODE_ACT,
+        )
+        assert inc is not None
+        return inc
+
+    async def test_a_silence_is_rechecked_at_the_end_of_its_own_window(self):
+        """The schedule `ACTION_SILENCE`'s mandatory expiry buys.
+
+        A suppression that expires straight back into the same firing condition is the
+        strongest evidence available that nothing was fixed — so the recheck is anchored
+        to the window, not to a flat interval invented for it.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        inc = self._incident()
+        verdict, due = routes._schedule_verification(inc.incident_id, models.ACTION_SILENCE, 3600)
+        self.assertEqual(verdict, models.VERIFY_PENDING)
+        # 3600s out is well past the 5-minute default, which is how we know the window
+        # (not the default) chose the time.
+        flat = routes._schedule_verification(inc.incident_id, models.ACTION_RESOLVE, None)[1]
+        self.assertGreater(due, flat)
+
+    async def test_an_ack_is_recorded_as_not_checkable_rather_than_left_blank(self):
+        """An ack leaves an alert firing BY DESIGN, so firing state proves nothing.
+
+        `normalize_state` maps `acknowledged` onto `firing` on purpose. Deriving a verdict
+        from the alarm's state would turn an unverifiable write into a confident one — so
+        this says "cannot observe" instead, and schedules no recheck to mislead a later
+        cycle.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = self._incident()
+        verdict, due = routes._schedule_verification(inc.incident_id, models.ACTION_ACK, None)
+        self.assertEqual(verdict, models.VERIFY_NOT_CHECKABLE)
+        self.assertEqual(due, "")
+        stored = store.get_incident(inc.incident_id)
+        assert stored is not None
+        self.assertEqual(stored.last_action, models.ACTION_ACK)
+        self.assertNotIn(stored.verification, models.OPEN_VERIFICATIONS)
+
+    async def test_a_comment_is_not_verifiable_either(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        inc = self._incident()
+        verdict, _due = routes._schedule_verification(inc.incident_id, models.ACTION_COMMENT, None)
+        self.assertEqual(verdict, models.VERIFY_NOT_CHECKABLE)
+
+    async def test_a_vanished_incident_degrades_instead_of_failing_the_action(self):
+        """The provider write already happened and cannot be undone.
+
+        A bookkeeping failure must not turn a completed action into a 500 — it degrades to
+        "no verification scheduled", which the response then reports honestly as "".
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        self.assertEqual(
+            routes._schedule_verification("INV-nope", models.ACTION_SILENCE, 60), ("", "")
+        )
+
+    async def test_an_observe_only_action_schedules_no_recheck_at_all(self):
+        """`ok=True` from the noop sink means "we successfully did nothing".
+
+        The recheck cannot tell that from a real provider write: it read the still-firing
+        alarm as the ACTION having failed and charged a `miss_count` to every ledger entry
+        the investigation cited. On a default install that is the ONLY path — `cloudwatch`
+        and `webhook` register no ActionSink, so every action falls through to `noop` — so
+        watching the proposal flow, which is exactly what an operator is told to do before
+        granting real authority, demoted their own proven knowledge for a write nobody made.
+
+        Asserted through the real handler rather than `_schedule_verification`, because the
+        gate lives in `_handle_action` and the direct-call tests above cannot see it.
+        """
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, registry
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            LedgerEntry,
+            Signal,
+        )
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
+            read_config,
+            write_config,
+        )
+
+        # A properly scoped act-rule, so the autonomy gate genuinely allows the write.
+        cfg = read_config()
+        cfg["mode"] = "act"
+        cfg["autonomy_rules"] = [
+            {
+                "source": "cloudwatch",
+                "mode": "act",
+                "actions": ["resolve"],
+                "resource_glob": "*",
+            }
+        ]
+        write_config(cfg)
+
+        registry.reset_registry()
+        self.addCleanup(registry.reset_registry)
+        signal = Signal.create(
+            source="cloudwatch", native_id="alarm/dlq", title="DLQ deep", resource="arn:dlq"
+        )
+        entry = ledger.upsert(
+            LedgerEntry.create(
+                pattern="DLQ deep",
+                fix="drain it",
+                fingerprints=[signal.fingerprint],
+                confidence="high",
+                trust="verified",
+            )
+        )
+        ledger.record_use(entry.entry_id)
+        ledger.record_use(entry.entry_id)
+        self.assertTrue(ledger.entry_unlocks_fast_path(ledger.read_entries()[0]))
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import store
+
+        incident = store.claim(signal, operating_mode="act")
+        assert incident is not None
+        store.update_fields(incident.incident_id, ledger_matches=[entry.entry_id])
+
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post(
+                    "/api/apps/ops-mission-control/incident/action",
+                    json={"id": incident.incident_id, "action": "resolve"},
+                )
+                self.assertEqual(resp.status, 200)
+                body = await resp.json()
+
+        # The write was "accepted" by the observe-only sink...
+        self.assertTrue(body["ok"])
+        # ...and nothing was scheduled, so no later cycle can reach a verdict about it.
+        self.assertEqual(body["verification"], "")
+        self.assertEqual(body["verify_after"], "")
+        stored = store.get_incident(incident.incident_id)
+        assert stored is not None
+        self.assertEqual(stored.verification, "")
+        # The operator's proven entry is untouched and still on the fast path.
+        self.assertEqual(ledger.read_entries()[0].miss_count, 0)
+        self.assertTrue(ledger.entry_unlocks_fast_path(ledger.read_entries()[0]))
+
+
+class TestAuthorityIsPerProvider(unittest.IsolatedAsyncioTestCase):
+    """A grant on one provider must not execute against another.
+
+    ``authorize_action`` gates on ``incident.signal`` and ``AutonomyRule.matches`` keys on
+    ``signal.source``, so a rule only ever grants authority over the provider that RAISED
+    the signal. ``sink`` was taken from the request body verbatim, so the two could
+    disagree: a webhook signal carrying a Datadog monitor id, a webhook-scoped act-rule,
+    and ``sink="datadog"`` passed the webhook check and then wrote to Datadog. The gate was
+    right; the code did not act on what the gate had approved.
+    """
+
+    def setUp(self):
+        import os
+
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = self.tmp
+
+    def tearDown(self):
+        import os
+
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _webhook_incident(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(
+            models.Signal.create(
+                source="webhook",
+                native_id="probe-1",
+                title="checkout latency",
+                labels={"dd_monitor_id": "12345"},
+            ),
+            operating_mode=models.MODE_ACT,
+        )
+        assert inc is not None
+        return inc
+
+    async def test_a_cross_provider_sink_is_refused(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        incident = self._webhook_incident()
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            with mock.patch.object(
+                routes.rotation, "authorize_action", return_value=(True, "granted by rule")
+            ):
+                async with TestClient(TestServer(app)) as client:
+                    resp = await client.post(
+                        "/api/apps/ops-mission-control/incident/action",
+                        json={
+                            "id": incident.incident_id,
+                            "action": "silence",
+                            "sink": "datadog",
+                        },
+                    )
+                    self.assertEqual(resp.status, 403, "a cross-provider sink must be refused")
+                    body = await resp.json()
+
+        self.assertFalse(body["authorized"])
+        self.assertIn("datadog", body["error"])
+        self.assertIn("webhook", body["error"])
+
+    async def test_naming_the_owning_sink_is_still_accepted(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        """The guard must not break the honest case it exists to narrow."""
+        incident = self._webhook_incident()
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            with mock.patch.object(
+                routes.rotation, "authorize_action", return_value=(True, "granted by rule")
+            ):
+                async with TestClient(TestServer(app)) as client:
+                    resp = await client.post(
+                        "/api/apps/ops-mission-control/incident/action",
+                        json={
+                            "id": incident.incident_id,
+                            "action": "comment",
+                            "sink": "webhook",
+                        },
+                    )
+                    self.assertEqual(resp.status, 200)
+
+
+class TestTheAuthorizationGateDoesNotBlockTheLoop(unittest.IsolatedAsyncioTestCase):
+    """``authorize_action`` must never run inline on the asyncio loop.
+
+    It is synchronous by design, and its off-shift check reads the committed schedule and
+    -- with no ``schedule-file.github_login`` configured, which is the documented default
+    -- resolves this instance's identity by spawning ``gh api user``: a blocking HTTPS
+    round trip with a 10s timeout, on the FIRST call of a fresh gateway process.
+
+    ``/incident/action`` and ``/incident/proposal/decide`` are the two handlers that reach
+    the gate without awaiting ``registry.resolve_shift()`` first, so nothing has warmed the
+    login cache off-loop by the time they get there. Run inline, the spawn freezes every
+    other task on the loop -- the user's chat turn and the liveness heartbeat -- for the
+    whole window.
+
+    Asserted behaviourally rather than by grepping for ``to_thread``: a heartbeat coroutine
+    ticks while the request is in flight, so the test fails if the loop ever stalls,
+    whatever mechanism a future refactor uses to stay off it.
+    """
+
+    def setUp(self):
+        import os
+
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = self.tmp
+
+    def tearDown(self):
+        import os
+
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _incident(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(
+            models.Signal.create(source="webhook", native_id="probe-1", title="latency"),
+            operating_mode=models.MODE_ACT,
+        )
+        assert inc is not None
+        return inc
+
+    async def test_a_slow_identity_lookup_does_not_stall_other_tasks(self):
+        import asyncio
+        import time
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        incident = self._incident()
+        app = web.Application()
+        routes.register_routes(app)
+
+        blocking_secs = 0.3
+
+        def _slow_gate(_signal, _action):
+            # Stands in for the `gh api user` spawn: synchronous, and long enough that a
+            # stalled loop is unambiguous rather than a timing coincidence.
+            time.sleep(blocking_secs)
+            return (True, "granted by rule")
+
+        ticks = 0
+
+        async def _heartbeat():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(blocking_secs / 10)
+                ticks += 1
+
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            with mock.patch.object(routes.rotation, "authorize_action", _slow_gate):
+                async with TestClient(TestServer(app)) as client:
+                    beat = asyncio.create_task(_heartbeat())
+                    try:
+                        resp = await client.post(
+                            "/api/apps/ops-mission-control/incident/action",
+                            json={
+                                "id": incident.incident_id,
+                                "action": "comment",
+                                "sink": "webhook",
+                            },
+                        )
+                        self.assertEqual(resp.status, 200)
+                    finally:
+                        beat.cancel()
+
+        # Inline, the loop gets zero slices during the sleep. Off-loop it gets ~10; assert
+        # a floor well under that so the test is not itself timing-flaky.
+        self.assertGreaterEqual(
+            ticks,
+            3,
+            "the event loop stalled during authorize_action — it must run off-loop "
+            f"(only {ticks} heartbeat tick(s) in {blocking_secs}s)",
+        )
+
+
+class TestLedgerWritesAreRedacted(unittest.IsolatedAsyncioTestCase):
+    """``ledger.jsonl`` is the one artifact that leaves the machine.
+
+    ``ledger_sync`` commits and pushes it verbatim, and a ``fix`` field is the likeliest
+    place for a pasted credential because that is what a fix looks like. Evidence->prompt
+    and incident->Slack both pass a redaction chokepoint; this path did not.
+    """
+
+    def setUp(self):
+        import os
+
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = self.tmp
+
+    def tearDown(self):
+        import os
+
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def test_a_credential_in_a_fix_never_reaches_the_ledger_file(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        secret = "AKIAIOSFODNN7EXAMPLE"
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post(
+                    "/api/apps/ops-mission-control/ledger",
+                    json={
+                        "pattern": "cross-account assume-role denied",
+                        "fix": f"aws sts assume-role --access-key {secret}",
+                    },
+                )
+                self.assertEqual(resp.status, 200)
+
+        # Not in the returned entry...
+        entries = ledger.read_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertNotIn(secret, entries[0].fix)
+        # ...and not in the file that git actually pushes.
+        self.assertNotIn(secret, ledger.ledger_path().read_text(encoding="utf-8"))
+
+    async def test_redaction_happens_before_the_id_is_computed(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        """Two entries differing only in a redacted secret SHOULD dedupe to one.
+
+        The id is ``sha256(lower(pattern)|lower(fix))``, so redacting after hashing would
+        keep one row per distinct secret -- the corpus would grow a row for every leaked
+        credential while still storing none of them usefully.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            async with TestClient(TestServer(app)) as client:
+                for secret in ("AKIAIOSFODNN7EXAMPLE", "AKIAI44QH8DHBEXAMPLE"):
+                    resp = await client.post(
+                        "/api/apps/ops-mission-control/ledger",
+                        json={"pattern": "assume-role denied", "fix": f"key {secret}"},
+                    )
+                    self.assertEqual(resp.status, 200)
+
+        self.assertEqual(len(ledger.read_entries()), 1, "both must collapse onto one id")
+
+    async def test_ordinary_prose_is_not_mangled(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        """Redaction on a human-authored field must not corrupt a real fix."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        fix = "drain the SQS queue, then scale the checkout ASG to 6"
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            async with TestClient(TestServer(app)) as client:
+                await client.post(
+                    "/api/apps/ops-mission-control/ledger",
+                    json={"pattern": "checkout p99 breach", "fix": fix},
+                )
+        self.assertEqual(ledger.read_entries()[0].fix, fix)
+
+
+class TestHygieneIsPrimaryOnly(unittest.IsolatedAsyncioTestCase):
+    """Exactly one instance may prune a shared ledger.
+
+    `is_primary()` was written for this and then wired to no enforcement point, while
+    `sops/rotation-check.md` told operators this route "self-gates on `is_primary()` at
+    runtime" — true of no code. A SOP asserting a gate that does not exist is worse than
+    no gate: it stops the next person looking for one.
+
+    The cost asymmetry is the whole argument, and it is recorded in the app's own
+    features log: a duplicate CLAIM wastes an agent turn, a duplicate PRUNE deletes
+    knowledge. Concurrency on the maintenance path is the more expensive of the two.
+    """
+
+    def setUp(self):
+        import os
+
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = self.tmp
+
+    def tearDown(self):
+        import os
+
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def test_a_non_primary_instance_is_refused(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            with mock.patch.object(routes.rotation, "is_primary", return_value=False):
+                with mock.patch.object(routes.rotation, "primary_owner", return_value="alice"):
+                    async with TestClient(TestServer(app)) as client:
+                        resp = await client.post(
+                            "/api/apps/ops-mission-control/ledger/hygiene", json={}
+                        )
+                        # 409, not 403: the caller is authenticated and permitted, it is
+                        # simply not this instance's job.
+                        self.assertEqual(resp.status, 409)
+                        body = await resp.json()
+
+        self.assertEqual(body["code"], "not_primary")
+        self.assertFalse(body["changed"])
+        # Naming the leader is the difference between a refusal an operator can act on
+        # and one that only tells them to look elsewhere.
+        self.assertIn("alice", body["error"])
+
+    async def test_the_refusal_runs_no_maintenance_at_all(self):
+        """A refusal that had already pruned would defeat the point of refusing."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            with mock.patch.object(routes.rotation, "is_primary", return_value=False):
+                with mock.patch.object(ledger, "hygiene") as hygiene:
+                    with mock.patch.object(routes.store, "prune_closed") as prune:
+                        async with TestClient(TestServer(app)) as client:
+                            await client.post(
+                                "/api/apps/ops-mission-control/ledger/hygiene", json={}
+                            )
+        hygiene.assert_not_called()
+        prune.assert_not_called()
+
+    async def test_the_primary_still_runs_it(self):
+        """The gate must not become a blanket block on maintenance ever happening."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            with mock.patch.object(routes.rotation, "is_primary", return_value=True):
+                async with TestClient(TestServer(app)) as client:
+                    resp = await client.post(
+                        "/api/apps/ops-mission-control/ledger/hygiene", json={}
+                    )
+                    self.assertEqual(resp.status, 200)
+
+    async def test_an_unnamed_leader_still_refuses_cleanly(self):
+        """`primary_owner` is "" when the schedule names nobody — the refusal must still work."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            with mock.patch.object(routes.rotation, "is_primary", return_value=False):
+                with mock.patch.object(routes.rotation, "primary_owner", return_value=""):
+                    async with TestClient(TestServer(app)) as client:
+                        resp = await client.post(
+                            "/api/apps/ops-mission-control/ledger/hygiene", json={}
+                        )
+                        self.assertEqual(resp.status, 409)
+                        self.assertEqual((await resp.json())["code"], "not_primary")
+
+
+class TestProposeLoop(unittest.IsolatedAsyncioTestCase):
+    """`propose` mode used to be behaviourally identical to `observe`.
+
+    `authorize_action` refuses anything below `act`, `proposed_action` was declared and
+    never assigned, and there was no store, no approve endpoint and no timeout. So the
+    mode most operators will live in — "tell me what you would do" — was prose in a chat
+    transcript with nothing to approve.
+
+    The load-bearing property is that **the drafted text is the contract**: an approval
+    binds to the exact terms shown, and executes those, not whatever the request supplies.
+    """
+
+    def setUp(self):
+        import os
+
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = self.tmp
+
+    def tearDown(self):
+        import os
+
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _incident(self, mode=None):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(
+            models.Signal.create(
+                source="webhook", native_id="p-1", title="checkout 5xx", state="firing"
+            ),
+            operating_mode=mode or models.MODE_PROPOSE,
+        )
+        assert inc is not None
+        return inc
+
+    async def _post(self, client, path, body):
+        return await client.post(f"/api/apps/ops-mission-control{path}", json=body)
+
+    async def test_a_proposal_is_queued_and_visible(self):
+        """The queue is the thing an operator could not see at all before."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        inc = self._incident()
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            async with TestClient(TestServer(app)) as client:
+                resp = await self._post(
+                    client,
+                    "/incident/propose",
+                    {
+                        "id": inc.incident_id,
+                        "action": "comment",
+                        "sink": "webhook",
+                        "note": "Draining the stuck consumer.",
+                    },
+                )
+                self.assertEqual(resp.status, 200)
+                listed = await (await client.get("/api/apps/ops-mission-control/proposals")).json()
+
+        self.assertEqual(listed["total"], 1)
+        self.assertEqual(listed["proposals"][0]["state"], "pending")
+        self.assertEqual(listed["proposals"][0]["note"], "Draining the stuck consumer.")
+
+    async def test_approving_a_changed_draft_is_refused(self):
+        """THE property. Approve the bytes you read, or re-read and decide again."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        inc = self._incident()
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            async with TestClient(TestServer(app)) as client:
+                await self._post(
+                    client,
+                    "/incident/propose",
+                    {"id": inc.incident_id, "action": "comment", "sink": "webhook", "note": "v1"},
+                )
+                resp = await self._post(
+                    client,
+                    "/incident/proposal/decide",
+                    {"id": inc.incident_id, "approve": True, "digest": "0000000000000000"},
+                )
+                self.assertEqual(resp.status, 409)
+                body = await resp.json()
+
+        self.assertEqual(body["code"], "proposal_conflict")
+        self.assertIn("contract", body["error"])
+
+    async def test_approval_cannot_launder_a_write_past_the_autonomy_gate(self):
+        """Approving on an `observe`/`propose` instance records the decision and refuses.
+
+        Otherwise the propose loop would be an autonomy bypass: draft anything, approve
+        it, and the mode ceiling never applies.
+        """
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import store
+
+        inc = self._incident()
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            async with TestClient(TestServer(app)) as client:
+                await self._post(
+                    client,
+                    "/incident/propose",
+                    {"id": inc.incident_id, "action": "comment", "sink": "webhook", "note": "n"},
+                )
+                # A real approver reads the draft and echoes its digest — an approval
+                # without one is refused now, which is the point of the mechanism.
+                # Asserted rather than indexed straight through: `get_incident` returns
+                # `Incident | None` and `proposed_action` is optional, so a missing draft
+                # names itself here instead of surfacing as a TypeError two lines down.
+                stored = store.get_incident(inc.incident_id)
+                assert stored is not None and stored.proposed_action is not None
+                digest = stored.proposed_action["digest"]
+                resp = await self._post(
+                    client,
+                    "/incident/proposal/decide",
+                    {"id": inc.incident_id, "approve": True, "digest": digest},
+                )
+                self.assertEqual(resp.status, 403)
+                body = await resp.json()
+
+        self.assertFalse(body["executed"])
+        self.assertEqual(body["code"], "not_authorized")
+
+    async def test_rejecting_records_the_decision_and_executes_nothing(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        inc = self._incident()
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            async with TestClient(TestServer(app)) as client:
+                await self._post(
+                    client,
+                    "/incident/propose",
+                    {"id": inc.incident_id, "action": "comment", "sink": "webhook", "note": "n"},
+                )
+                resp = await self._post(
+                    client, "/incident/proposal/decide", {"id": inc.incident_id, "approve": False}
+                )
+                self.assertEqual(resp.status, 200)
+                body = await resp.json()
+
+        self.assertFalse(body["executed"])
+        self.assertEqual(body["proposal"]["state"], "rejected")
+
+    async def test_proposing_is_allowed_below_act_because_it_changes_nothing(self):
+        """The safe half of the loop must work in the mode people actually run."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        inc = self._incident(mode=models.MODE_OBSERVE)
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            async with TestClient(TestServer(app)) as client:
+                resp = await self._post(
+                    client,
+                    "/incident/propose",
+                    {"id": inc.incident_id, "action": "ack", "sink": "webhook", "note": "n"},
+                )
+        self.assertEqual(resp.status, 200)
+
+    async def test_an_unknown_action_cannot_be_proposed(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        inc = self._incident()
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            async with TestClient(TestServer(app)) as client:
+                resp = await self._post(
+                    client,
+                    "/incident/propose",
+                    {"id": inc.incident_id, "action": "rm -rf", "sink": "webhook"},
+                )
+        self.assertEqual(resp.status, 400)
+
+    async def test_an_approved_proposal_executes_the_stored_note_not_the_request(self):
+        """The whole mechanism in one assertion.
+
+        A decide request that could supply its own note would let the text change between
+        the operator reading the draft and the action firing — so the executor must read
+        from the store. Asserted by handing the sink a recorder and comparing what it
+        received against what was drafted, while the approving request tries to smuggle
+        different text.
+        """
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = self._incident(mode=models.MODE_ACT)
+        seen: list[dict] = []
+
+        class _Recorder:
+            id = "webhook"
+            display_name = "Recorder"
+
+            def configured(self):
+                return True
+
+            def supported_actions(self):
+                return ("comment",)
+
+            async def execute(self, signal, action, payload):
+                seen.append({"action": action, "payload": dict(payload)})
+                from kiro_crew.apps.builtins.ops_mission_control.backend.providers.base import (
+                    ActionResult,
+                )
+
+                return ActionResult(ok=True, action=action, detail="recorded")
+
+        app = web.Application()
+        routes.register_routes(app)
+        registry = routes.get_registry()
+        registry.register_action_sink(_Recorder())
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            with mock.patch.object(
+                routes.rotation, "authorize_action", return_value=(True, "granted")
+            ):
+                async with TestClient(TestServer(app)) as client:
+                    await self._post(
+                        client,
+                        "/incident/propose",
+                        {
+                            "id": inc.incident_id,
+                            "action": "comment",
+                            "sink": "webhook",
+                            "note": "THE DRAFTED WORDS",
+                        },
+                    )
+                    stored = store.get_incident(inc.incident_id)
+                    assert stored is not None and stored.proposed_action is not None
+                    digest = stored.proposed_action["digest"]
+                    resp = await self._post(
+                        client,
+                        "/incident/proposal/decide",
+                        # A hostile approver: correct digest (it DID read the draft), but
+                        # trying to substitute its own text in the same request.
+                        {
+                            "id": inc.incident_id,
+                            "approve": True,
+                            "digest": digest,
+                            "note": "SMUGGLED WORDS",
+                        },
+                    )
+                    self.assertEqual(resp.status, 200)
+
+        self.assertEqual(len(seen), 1, "the approved action must actually run")
+        self.assertEqual(seen[0]["payload"]["note"], "THE DRAFTED WORDS")
+
+
+class TestTheAutonomyGateIsAChokepoint(unittest.IsolatedAsyncioTestCase):
+    """The provider write must be unreachable without passing the autonomy gate.
+
+    Review named the shape precisely: "autonomy enforcement is a convention, not a
+    chokepoint -- a third caller can silently skip the gate." It was true.
+    ``authorize_action`` ran at two independent call sites, ``ActionSink.execute`` policed
+    nothing by design (spec 5.3), and the only thing joining them was a docstring saying
+    callers MUST resolve the gate first.
+
+    It is now structural: ``_authorize`` is the sole minter of an ``_Authorized`` permit,
+    and ``_execute_authorized`` -- the only function that touches ``sink.execute`` -- takes
+    one. These tests pin the two properties that make that hold, because both are the kind
+    of thing a later refactor removes without noticing.
+    """
+
+    def setUp(self):
+        import os
+
+        # Own data home, like every other store-touching class here. Without it
+        # `store.claim` writes against whatever home the previous test left behind and can
+        # return None — which is how the behavioural case below first failed.
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("KIROCREW_HOME")
+        os.environ["KIROCREW_HOME"] = self.tmp
+
+    def tearDown(self):
+        import os
+
+        if self._prev is None:
+            os.environ.pop("KIROCREW_HOME", None)
+        else:
+            os.environ["KIROCREW_HOME"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_only_one_function_calls_sink_execute(self):
+        """A second call site would be a write that skipped the permit."""
+        import pathlib
+        import re
+
+        backend = pathlib.Path(routes.__file__).parent
+        offenders = []
+        for path in sorted(backend.glob("*.py")):
+            for lineno, line in enumerate(path.read_text().splitlines(), 1):
+                if re.search(r"\bsink\.execute\(|\.execute\(.*signal", line):
+                    offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+        self.assertEqual(
+            len(offenders),
+            1,
+            "ActionSink.execute must have exactly ONE caller (_execute_authorized), so a "
+            "provider write cannot be reached without a gate-minted permit. Found:\n  "
+            + "\n  ".join(offenders),
+        )
+        self.assertIn("permit.signal, permit.action", offenders[0])
+
+    def test_a_permit_can_only_be_minted_by_the_gate(self):
+        """``_Authorized`` must not be constructed anywhere but ``_authorize``.
+
+        A permit built beside the write would be a rubber stamp: the type would still be
+        satisfied while no gate had run.
+        """
+        import inspect
+        import re
+
+        source = inspect.getsource(routes)
+        # Constructor calls, not the class definition or type annotations.
+        constructions = [
+            line.strip()
+            for line in source.splitlines()
+            if re.search(r"(?<!class )\b_Authorized\(", line)
+        ]
+        self.assertEqual(
+            constructions,
+            ["return _Authorized(signal, action, reason), reason"],
+            "_Authorized must be minted ONLY by _authorize, which is what makes holding "
+            f"one proof the gate allowed the action. Found: {constructions}",
+        )
+
+    async def test_a_denied_action_never_reaches_the_sink(self):
+        """The behavioural half: a deny must produce no provider write at all."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(
+            models.Signal.create(source="webhook", native_id="probe-1", title="latency"),
+            operating_mode=models.MODE_ACT,
+        )
+        assert inc is not None
+
+        executed = []
+
+        class _Recorder:
+            id = "webhook"
+            display_name = "Webhook"
+
+            def configured(self):
+                return True
+
+            def supported_actions(self):
+                return frozenset(models.VALID_ACTIONS)
+
+            async def execute(self, signal, action, payload):
+                executed.append(action)
+                raise AssertionError("a denied action reached the sink")
+
+        app = web.Application()
+        routes.register_routes(app)
+        with mock.patch.object(routes, "is_app_enabled", return_value=True):
+            with mock.patch.object(
+                routes.rotation, "authorize_action", return_value=(False, "no rule grants ack")
+            ):
+                with mock.patch.object(
+                    routes.get_registry(), "action_sink", return_value=_Recorder()
+                ):
+                    async with TestClient(TestServer(app)) as client:
+                        resp = await client.post(
+                            "/api/apps/ops-mission-control/incident/action",
+                            json={"id": inc.incident_id, "action": "ack", "sink": "webhook"},
+                        )
+                        self.assertEqual(resp.status, 403)
+
+        self.assertEqual(executed, [], "a denied action must produce no provider write")
+
+
+class TestBlockedStateReadsThePublicSlotContract(unittest.IsolatedAsyncioTestCase):
+    """"Waiting on you" must not depend on a private attribute of another module.
+
+    ``_slot_state`` derived ``pending_approval`` by reading ``slot._approval_futures``
+    directly. Review flagged it and was right: a private attribute is not a contract, so a
+    core refactor that renamed it would silently turn "waiting on you" into "progressing" on
+    this board -- the operator stops being told an incident needs them -- with nothing
+    failing anywhere to say so.
+
+    ``_ChatSlot.to_dict()`` is the owner's public serializer and already derives the same
+    fact. These tests pin BOTH that we ask it, and that our answer agrees with the core's
+    across the states that matter -- against the real class, not a stand-in, because a mock
+    would happily agree with a contract that no longer exists.
+    """
+
+    def test_no_private_slot_attribute_is_read(self):
+        import inspect
+        import re
+
+        source = inspect.getsource(routes._slot_state)
+        # CODE only. The comment above the fix names `_approval_futures` to record what was
+        # wrong and why, so a bare substring check would forbid explaining the very thing it
+        # enforces -- the same reason this file has a `rendered()` helper on the frontend
+        # side. Strip comments, then look for actual access (attribute or getattr).
+        code = "\n".join(
+            line for line in source.splitlines() if not line.lstrip().startswith("#")
+        )
+        access = re.findall(r"\.\s*_approval_futures|getattr\([^)]*_approval_futures", code)
+        self.assertEqual(
+            access,
+            [],
+            "_slot_state must not reach into DashboardState privates -- ask to_dict(), "
+            f"which the core keeps correct. Found: {access}",
+        )
+        self.assertIn("to_dict", code)
+
+    async def test_it_agrees_with_the_core_across_the_approval_lifecycle(self):
+        import asyncio
+
+        from kiro_crew.dashboard import state as state_mod
+
+        slot = state_mod._ChatSlot("probe")
+
+        class _State:
+            @staticmethod
+            def get_slot(key):
+                return slot
+
+        class _Req:
+            app = {"state": _State()}
+
+        request = _Req()
+
+        def ours():
+            return routes._slot_state(request, "probe")["pending_approval"]
+
+        def theirs():
+            return bool(slot.to_dict().get("pending_approval"))
+
+        self.assertEqual(ours(), theirs(), "baseline")
+        self.assertFalse(ours())
+
+        # A real pending approval, registered the way the core registers one.
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        slot._approval_futures["req-1"] = future
+        self.assertEqual(ours(), theirs(), "while an approval is pending")
+        self.assertTrue(ours(), "a pending approval must read as blocked")
+
+        future.set_result("allow")
+        self.assertEqual(ours(), theirs(), "after the approval resolves")
+        self.assertFalse(ours(), "a resolved approval must stop reading as blocked")
+
+    async def test_a_faulty_serializer_degrades_instead_of_blanking_the_board(self):
+        """This read paints the whole board, so a slot fault must not 500 it."""
+
+        class _Exploding:
+            running = True
+            pending_approval = True
+            waiting_for_input = False
+            messages: list = []
+
+            def to_dict(self, **_kw):
+                raise RuntimeError("slot serializer blew up")
+
+        class _State:
+            @staticmethod
+            def get_slot(key):
+                return _Exploding()
+
+        class _Req:
+            app = {"state": _State()}
+
+        result = routes._slot_state(_Req(), "probe")
+        self.assertIsNotNone(result)
+        # Falls back to the PUBLIC attribute, not to the old private reach-in.
+        self.assertTrue(result["pending_approval"])
