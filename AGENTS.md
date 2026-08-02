@@ -58,7 +58,7 @@ changing code, **never reintroduce** any of the following:
 **Keep** the generic security controls (not internal-specific): AKIA/ASIA
 credential redaction, destructive-command deny patterns, `~/.aws` / `~/.ssh`
 sensitive-path blocking, SEL audit log. The deny patterns are first-class
-`DeniedCommandRule` records (`BUILTIN_DENIED_RULES`, **137 rules**) enforced only
+`DeniedCommandRule` records (`BUILTIN_DENIED_RULES`, **139 rules**) enforced only
 at the `hooks.py` PreToolUse gate; default-ON but user-configurable from Settings
 → Security, with the governance `commands` scope as the un-opt-out-able enterprise
 force-pin. See `docs/system-specs/modules/security.md`.
@@ -460,7 +460,7 @@ change, never an evaluator edit.
 This single mechanism is what makes the ceiling un-disableable — do not weaken it.
 
 **Denied commands** are first-class `DeniedCommandRule` records
-(`BUILTIN_DENIED_RULES`, 137 rules) enforced **only** at the `hooks.py` PreToolUse
+(`BUILTIN_DENIED_RULES`, 139 rules) enforced **only** at the `hooks.py` PreToolUse
 gate — not injected into `~/.kiro/agents/*.json` (the `agent._enforce_denied_commands`
 path + `autoAllowReadonly` are retired; read-only auto-approve moved into
 `hooks.py` after the deny/governance checks). They are default-ON but
@@ -826,7 +826,7 @@ Apps can register gateway-level hooks via the App SDK:
 - Backend: security-critical modules require 80%+ coverage
 
 **Determinism and speed: read `docs/system-specs/common/testing-conventions.md`
-before "fixing" a flaky test or optimizing the suite.** It carries the four flake
+before "fixing" a flaky test or optimizing the suite.** It carries the five flake
 classes with their one correct fix each, and the profiling method. The short version:
 
 - **Never** fix a flake with a rerun, a longer `sleep`, or a weakened assertion. Seed
@@ -834,6 +834,10 @@ classes with their one correct fix each, and the profiling method. The short ver
   (Windows' ~15.6ms timer granularity is what turns a 50ms wait into a CI failure); use
   `MagicMock` for synchronous methods (an `AsyncMock` `write()` leaks a coroutine that
   is reported against a *later* test); `await` a task after `cancel()`.
+- A timing test that asserts algorithmic **complexity** must bound the doubling RATIO, not an
+  absolute duration: CI runs coverage on 3.12 only, and the instrumentation multiplier made one
+  shard fail on 3.12 and pass on 3.10 at the same commit. `time.process_time` removes scheduler
+  noise but not the multiplier. Verify the threshold against a mutated implementation.
 - The suite is ~26.5k tests, so **per-test setup cost dominates, not slow tests**. An
   autouse fixture chain cost 9.2ms per test before these fixes. Build expensive
   immutable fixtures (real `git` repos above all) **once** at `scope="session"` and
