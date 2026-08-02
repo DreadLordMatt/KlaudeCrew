@@ -105,7 +105,7 @@ test). The sweep's own behavior belongs in its own module's tests.
 - Tests SHOULD be fast (< 1s each)
 - Async tests MUST use `@pytest.mark.asyncio`
 
-## Determinism: the four flake classes
+## Determinism: the five flake classes
 
 A test that fails on CI but not locally is almost always one of these. Each has one
 correct fix; reruns and `sleep` increases are not among them.
@@ -172,6 +172,36 @@ mark is the tool for a test that genuinely cannot share a worker.
 
 Mutate process globals through `monkeypatch`, which reverts on teardown even when the
 test fails. Raw assignment does not.
+
+### 5. Absolute time budgets on instrumented runs
+
+Asserting a *duration* when the property under test is algorithmic **complexity**. CI enables
+coverage on one Python version only (`--cov` on 3.12, `--no-cov` on 3.10), and instrumentation
+multiplies the cost of every executed line — so the same un-regressed code measured ~1.7s of CPU
+bare and >5s under coverage, and shard 2 failed on 3.12 while passing on 3.10 **at the identical
+commit**. The tell is a timing test that splits by Python version rather than by machine load.
+
+Note that `time.process_time` fixes only the *other* half of this. Switching off wall-clock is
+right — it removes co-tenant scheduling noise, and a backtracking blow-up burns CPU rather than
+waiting — but CPU time still includes the instrumentation, so an absolute ceiling remains
+version-dependent.
+
+Fix: assert the **shape**, not the magnitude. Measure at `n` and `2n` and bound the ratio; a
+roughly constant multiplier cancels, so the same threshold holds instrumented or not. Raising the
+budget instead banks the overhead as headroom and hides the next real regression.
+
+```python
+# WRONG: passes bare, fails under --cov, and the margin shrinks as the catalog grows
+assert self._elapsed(build(8000)) < 5.0
+# RIGHT: linear is ~2x when the input doubles; the mutated (catastrophic) matcher measured 11.5x
+ratio = self._doubling_ratio(build, 2000)
+assert ratio < 3.0, f"cost grew {ratio:.1f}x when the input doubled"
+```
+
+Keep a *small*-`n` absolute assertion alongside it, where there is real margin either way, so a
+uniform slowdown is still caught. And verify the threshold against a mutated implementation
+rather than reasoning about it: the gap between 2x and 11.5x is what tells you the bound is wide
+enough to be stable and tight enough to be worth having.
 
 ## Keeping the suite fast
 
