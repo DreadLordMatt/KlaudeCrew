@@ -330,6 +330,7 @@ class TelegramDispatcher:
                 channel_id=channel_id,
                 agent=agent,
                 resumed=resumed,
+                runtime_source="telegram",
             )
 
             # PreToolUse security gate (channel-neutral, off ctx_builder.hooks):
@@ -377,6 +378,20 @@ class TelegramDispatcher:
                 logger.warning(
                     "Telegram: persist_turn failed session=%s", session_key, exc_info=True
                 )
+            if is_new:
+                try:
+                    # Circular import: dashboard boot imports channel packages.
+                    from kiro_crew.dashboard.channel_slots import (
+                        surface_dispatcher_session,
+                    )
+
+                    await surface_dispatcher_session(self)
+                except Exception:
+                    logger.warning(
+                        "Telegram: immediate dashboard session surface failed session=%s",
+                        session_key,
+                        exc_info=True,
+                    )
             try:
                 await self._maybe_notice(chat_id, route, session_key, provider)
             except Exception:
@@ -1006,10 +1021,9 @@ class TelegramDispatcher:
                 await asyncio.wait_for(provider.compact(), timeout=120)
                 cr = await provider.wait_for_compaction(timeout=120.0)
                 if cr["type"] == "completed":
-                    summary = cr.get("summary", "")
-                    result_text = (
-                        f"✅ Compacted: {summary}" if summary else "✅ Context compacted."
-                    )
+                    # ``summary`` is model-facing compacted context, not a
+                    # user-facing receipt. Never publish its orchestration text.
+                    result_text = "✅ Context compacted."
                 elif cr["type"] == "failed":
                     err = cr.get("summary", "")
                     result_text = (

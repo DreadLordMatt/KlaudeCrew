@@ -101,9 +101,11 @@ from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.dashboard.token_auth import MAX_SESSION_TTL_SECS, generate_token
 from kiro_crew.discord.gateway import maybe_start_discord
 from kiro_crew.embeddings import (
+    embedding_model_is_custom,
     get_shared_embedder,
     make_sync_embed_fn,
     model_file_present,
+    reconcile_store_embedding_space,
     start_background_model_download,
 )
 from kiro_crew.executors import (
@@ -864,6 +866,10 @@ class GatewayOrchestrator:
         self._wecom_client: "WeComClient | None" = None  # set by maybe_start_wecom
         self._model_download_task: "asyncio.Task[bool] | None" = None
         self._auto_migrate_task: "asyncio.Task[None] | None" = None
+        # Boot-time update check, started fire-and-forget after the signal
+        # handlers are installed (see start()). Cancelled on shutdown so a
+        # stalled git fetch cannot hold the process open.
+        self._update_check_task: "asyncio.Task[None] | None" = None
         self._mcp_gateway_manager: GatewayManager | None = None
 
     def _count_in_flight_work(self) -> int:
@@ -1998,6 +2004,11 @@ class GatewayOrchestrator:
                             interactive=False,
                             agent=agent,
                         )
+                        # Wall clock for the cron agent turn: acp never assigns
+                        # TurnUsage.duration_ms, so the row falls back to this.
+                        # Brackets only the model turn — session acquisition and
+                        # the episodic-query embed above are setup, not the turn.
+                        _turn_t0 = time.monotonic()
                         result_text = await stream_and_collect(
                             client,
                             full_message,
@@ -2035,6 +2046,7 @@ class GatewayOrchestrator:
                                 agent=read_effective_agent(client) or agent or "",
                                 context_used=_used,
                                 context_window=_window,
+                                elapsed_ms=int((time.monotonic() - _turn_t0) * 1000),
                                 model_source=client,
                             )
                         except Exception:
@@ -2084,6 +2096,9 @@ class GatewayOrchestrator:
                     minimal_context=job.minimal_context,
                 )
 
+                # Wall clock for the cron agent turn — see the sequential site
+                # above. acp reports no duration, so this is the row's fallback.
+                _turn_t0 = time.monotonic()
                 result_text = await stream_and_collect(
                     client,
                     full_message,
@@ -2121,6 +2136,7 @@ class GatewayOrchestrator:
                         agent=read_effective_agent(client) or job.agent_id or "",
                         context_used=_used,
                         context_window=_window,
+                        elapsed_ms=int((time.monotonic() - _turn_t0) * 1000),
                         model_source=client,
                     )
                 except Exception:
@@ -2506,6 +2522,20 @@ class GatewayOrchestrator:
         if self._no_crons:
             logger.info("Cron scheduler disabled (--no-crons)")
         else:
+            # CronService.create has loaded durable jobs but has not armed a
+            # timer yet. Remove jobs owned by disabled or execution-denied apps
+            # at this boundary; if cleanup cannot complete, leave the entire
+            # scheduler stopped rather than risk firing a denied command.
+            from kiro_crew.apps.bridges import reconcile_app_crons_for_execution
+
+            try:
+                await reconcile_app_crons_for_execution(self.cron_svc)
+            except Exception:
+                logger.exception(
+                    "App cron execution reconciliation failed; refusing to arm "
+                    "the cron scheduler"
+                )
+                return
             await self.cron_svc.start()
             if self.sessions:
                 self.cron_svc.start_reaper(self.sessions)
@@ -2568,6 +2598,10 @@ class GatewayOrchestrator:
                 # the user's ``auto_approve_tools`` MUST NOT widen the heartbeat
                 # allowlist — ``llm_helpers._resolve_permission`` consults
                 # ``hooks.on_tool_call()`` BEFORE ``on_tool_approval``.
+                #
+                # Clock started outside wait_for so BOTH the success path and the
+                # TimeoutError branch below can report the real elapsed time.
+                _turn_t0 = time.monotonic()
                 result_text = await asyncio.wait_for(
                     stream_and_collect(
                         client,
@@ -2595,6 +2629,7 @@ class GatewayOrchestrator:
                         agent=read_effective_agent(client) or "kirocrew-heartbeat",
                         context_used=_used,
                         context_window=_window,
+                        elapsed_ms=int((time.monotonic() - _turn_t0) * 1000),
                         model_source=client,
                     )
                 except Exception:
@@ -2612,6 +2647,35 @@ class GatewayOrchestrator:
                     HEARTBEAT_TASK_TIMEOUT_SECS,
                     task_text[:80],
                 )
+                # ── Timeout spend is REAL spend (issue #874 follow-up). ──
+                # Before this, a timed-out heartbeat wrote no row at all, so
+                # every cancelled turn silently dropped whatever it had already
+                # cost. Record it here, BEFORE the session reset below tears the
+                # client down and takes its last-turn usage with it.
+                #
+                # No new schema field: the record has never carried a
+                # success/failure outcome for ANY surface, so a timeout row is
+                # no less honest than any other row. The duration recorded is
+                # the real elapsed time, which for a timeout is ~the ceiling.
+                try:
+
+                    _used, _window = read_context_tokens(client)
+                    await persist_token_record_async(
+                        session_key,
+                        "",
+                        provider_last_turn_usage(client),
+                        provider=(self._cfg.agent.provider if hasattr(self, "_cfg") else "acp"),
+                        surface="heartbeat",
+                        agent=read_effective_agent(client) or "kirocrew-heartbeat",
+                        context_used=_used,
+                        context_window=_window,
+                        elapsed_ms=int((time.monotonic() - _turn_t0) * 1000),
+                        model_source=client,
+                    )
+                except Exception:
+                    logger.debug(
+                        "usage row (heartbeat timeout) persist failed", exc_info=True
+                    )
                 try:
                     await self.sessions.reset(session_key)
                 except Exception:
@@ -2725,6 +2789,10 @@ class GatewayOrchestrator:
             full_msg, _ = await run_in_embed_pool(
                 self.ctx_builder.build_message, tagged, is_new, key, provider_type=_provider
             )
+            # Clock started outside wait_for so BOTH the success path and the
+            # TimeoutError branch below can report the real elapsed time. acp
+            # never assigns TurnUsage.duration_ms, so the row needs this.
+            _turn_t0 = time.monotonic()
             response = await asyncio.wait_for(
                 stream_and_collect(
                     client,
@@ -2754,10 +2822,47 @@ class GatewayOrchestrator:
                     agent=read_effective_agent(client) or _get_agent_for_session(key),
                     context_used=_used,
                     context_window=_window,
+                    elapsed_ms=int((time.monotonic() - _turn_t0) * 1000),
                     model_source=client,
                 )
             except Exception:
                 logger.debug("usage row (monitor) persist failed", exc_info=True)
+        except asyncio.TimeoutError:
+            # ── Timeout spend is REAL spend (issue #874 follow-up). ──
+            # A timed-out nudge turn previously fell through to the generic
+            # handler below and wrote no row at all, silently dropping whatever
+            # the cancelled turn had already cost. Record it, then bail as
+            # before. Runs before the `finally` cancels/releases the session.
+            #
+            # No new schema field: the record has never carried a
+            # success/failure outcome for ANY surface, so a timeout row is no
+            # less honest than any other row.
+            logger.warning(
+                "AutoNudge: slack nudge turn timed out after %ss for %s (loop %s)",
+                _NUDGE_TURN_TIMEOUT,
+                key,
+                loop.id,
+            )
+            try:
+
+                _used, _window = read_context_tokens(client)
+                await persist_token_record_async(
+                    key,
+                    "",
+                    provider_last_turn_usage(client),
+                    provider=(self._cfg.agent.provider if hasattr(self, "_cfg") else "acp"),
+                    surface="monitor",
+                    agent=read_effective_agent(client) or _get_agent_for_session(key),
+                    context_used=_used,
+                    context_window=_window,
+                    elapsed_ms=int((time.monotonic() - _turn_t0) * 1000),
+                    model_source=client,
+                )
+            except Exception:
+                logger.debug(
+                    "usage row (monitor timeout) persist failed", exc_info=True
+                )
+            return False
         except Exception:
             logger.exception("AutoNudge: slack nudge turn failed for %s (loop %s)", key, loop.id)
             return False
@@ -4607,6 +4712,13 @@ class GatewayOrchestrator:
         if model_file_present():
             self.vector_memory.embed_fn = make_sync_embed_fn()
             logger.info("In-process embeddings ready (model already present)")
+        elif embedding_model_is_custom():
+            # No download will fix this — the operator has to correct the path.
+            # resolve_custom_model() already logged the specific reason.
+            logger.warning(
+                "Custom embedding model is not usable — memory falls back to keyword "
+                "search. Run 'kirocrew doctor' for the reason."
+            )
         else:
             logger.info(
                 "Embedding model not yet present — downloading in background; "
@@ -4646,6 +4758,19 @@ class GatewayOrchestrator:
             if store is None:
                 logger.debug("auto-migrate skipped: vector memory not initialised")
                 return
+            # Reconcile BEFORE phase 1 when the backend is ALREADY usable. A ready
+            # backend makes migration write real vectors, and write_episodic's
+            # FAISS dedup search would then query an index built at the previous
+            # model's dimensionality — faiss raises on the mismatch, which aborts
+            # migration AND phase 2, so the store would never reconcile, on every
+            # boot. No waiting here on purpose: when the backend is NOT ready,
+            # migration writes NULL vectors and skips the FAISS search entirely,
+            # so there is nothing to reconcile ahead of, and waiting would delay
+            # first-boot migration behind the model download.
+            if get_shared_embedder().is_ready():
+                await loop.run_in_executor(
+                    maintenance_executor(), reconcile_store_embedding_space, store
+                )
             # ── Phase 1: migrate ──
             if not self._cfg.memory.migrated:
                 # Bind embed_fn so migration writes real vectors when the model
@@ -4688,32 +4813,37 @@ class GatewayOrchestrator:
                     raise
                 except Exception:
                     logger.debug("model download task errored", exc_info=True)
-            if model_file_present():
+            # Gate on EMBEDDER READINESS, not on the bundled GGUF being on disk.
+            # model_file_present() is a proxy that only means anything for the
+            # file-backed llama.cpp backend: a backend installed via
+            # register_embedding_backend() (remote endpoint, ONNX, ...) can be
+            # ready with no local file at all, and gating on the file left it
+            # outside this block entirely — so its foreign vectors were never
+            # reconciled. Readiness is the property actually required here.
+
+            def _wait_then_backfill() -> int:
+                embedder = get_shared_embedder()
+                # wait_ready() is on the llama.cpp backend but not the
+                # EmbeddingBackend ABC (a swapped-in backend may not support
+                # blocking-wait); fall back to is_ready() when absent.
+                wait_ready = getattr(embedder, "wait_ready", None)
+                ready = wait_ready(timeout=120) if callable(wait_ready) else embedder.is_ready()
+                if not ready:
+                    logger.info(
+                        "Embedding model not ready within timeout; deferring "
+                        "re-embed sweep to a later boot"
+                    )
+                    return 0
                 if store.embed_fn is None:
                     store.embed_fn = make_sync_embed_fn()
+                # Reconcile BEFORE the sweep: a model change clears stale vectors
+                # to NULL and the same sweep re-embeds them in one pass. Routed
+                # through the shared chokepoint so every process that opens a
+                # store reconciles identically (see reconcile_store_embedding_space).
+                reconcile_store_embedding_space(store)
+                return store.backfill_missing_embeddings()
 
-                # model_file_present() only means the GGUF is on disk — the
-                # in-memory load is async and the first embed returns None while
-                # it warms up. Block (in the worker thread) until the model is
-                # actually loaded, else backfill_missing_embeddings would embed
-                # zero rows and no later sweep is scheduled. On timeout, skip and
-                # let a later boot's sweep backfill.
-                def _wait_then_backfill() -> int:
-                    embedder = get_shared_embedder()
-                    # wait_ready() is on the llama.cpp backend but not the
-                    # EmbeddingBackend ABC (a swapped-in backend may not support
-                    # blocking-wait); fall back to is_ready() when absent.
-                    wait_ready = getattr(embedder, "wait_ready", None)
-                    ready = wait_ready(timeout=120) if callable(wait_ready) else embedder.is_ready()
-                    if not ready:
-                        logger.info(
-                            "Embedding model not ready within timeout; deferring "
-                            "re-embed sweep to a later boot"
-                        )
-                        return 0
-                    return store.backfill_missing_embeddings()
-
-                await loop.run_in_executor(maintenance_executor(), _wait_then_backfill)
+            await loop.run_in_executor(maintenance_executor(), _wait_then_backfill)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -4739,10 +4869,9 @@ class GatewayOrchestrator:
         cfg_gw = self._cfg.mcp_gateway
         if not cfg_gw.enabled:
             return
-        # Runs on any platform with an AF_UNIX broker socket (Linux + macOS);
-        # stub delivery is ACP session/new injection, not a bind-mount, so no
-        # mount namespace is needed. Windows lacks AF_UNIX in the proactor loop
-        # and is excluded until a loopback/named-pipe transport exists.
+        # Runs on every platform the transport layer covers -- an AF_UNIX socket
+        # on POSIX, a named pipe on Windows. Stub delivery is ACP session/new
+        # injection, not a bind-mount, so no mount namespace is needed anywhere.
         if not is_gateway_supported():
             return
 
@@ -4948,6 +5077,10 @@ class GatewayOrchestrator:
         # Cancel background auto-migration if still in flight
         if self._auto_migrate_task is not None and not self._auto_migrate_task.done():
             self._auto_migrate_task.cancel()
+        # Cancel the boot update check if still in flight — its git subprocesses
+        # can take ~70s to time out and nothing downstream needs the result.
+        if self._update_check_task is not None and not self._update_check_task.done():
+            self._update_check_task.cancel()
 
         if cleanup_tasks:
             await asyncio.gather(*cleanup_tasks, return_exceptions=True)
@@ -5421,11 +5554,13 @@ class GatewayOrchestrator:
 
         await self._start_channel_transports()
 
-        # Check for updates before printing URLs
-        print("👻 Checking for updates…")
-        await self._check_for_updates()
-
         # ── Signal handlers ──
+        # Installed BEFORE the update check (below) is started. The check runs
+        # five sequential git subprocesses whose timeouts sum to ~70s, so while
+        # it was inline-awaited here a stalled network left the gateway with no
+        # SIGINT/SIGTERM handler for over a minute: Ctrl-C did nothing and the
+        # process looked wedged. Handlers first means the boot is interruptible
+        # from this point on regardless of what the check does.
         loop = asyncio.get_running_loop()
         _shutting_down = False
 
@@ -5460,6 +5595,20 @@ class GatewayOrchestrator:
                         signal.signal(sig, _sigint_fallback)
                     except (ValueError, OSError):
                         pass  # not in main thread
+
+        # Update check — fire-and-forget, NOT awaited. It runs five sequential
+        # git subprocesses (fetch/rev-parse/...) whose timeouts sum to ~70s, and
+        # nothing later in boot depends on its result: it only flips
+        # _update_info / pushes a dashboard refresh, or applies an auto-update
+        # that restarts the process. Awaiting it delayed the dashboard URL by up
+        # to ~70s on a stalled network. handlers_system.api_status treats the
+        # same check as fire-and-forget for the same reason. Registered in
+        # _background_tasks so the task is not GC'd mid-flight and is reaped on
+        # shutdown with the rest.
+        print("👻 Checking for updates…")
+        self._update_check_task = asyncio.create_task(self._check_for_updates())
+        self._background_tasks.add(self._update_check_task)
+        self._update_check_task.add_done_callback(self._background_tasks.discard)
 
         # Wait for MCP probe to finish before warming sessions —
         # kiro-cli reads MCP config at spawn time, so sessions must

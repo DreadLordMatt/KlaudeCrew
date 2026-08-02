@@ -16,7 +16,6 @@ Permission flow:
 from __future__ import annotations
 
 import asyncio
-import base64
 import difflib
 import glob
 import json
@@ -41,6 +40,7 @@ from kiro_crew.acp._dispatch import (
     parse_usage_update,
 )
 from kiro_crew.acp.liveness import VERDICT_UNKNOWN, VERDICT_WORKING, LivenessOracle
+from kiro_crew.acp.prompt_blocks import build_prompt_blocks
 from kiro_crew.acp.types import (
     ACP_BACKEND_CLAUDE,
     ACP_CLIENT_CAPABILITIES,
@@ -1432,7 +1432,9 @@ class AcpClient:
         servers — nothing is written to the user's project or to
         ``~/.kiro/agents/``. Empty when the shared gateway is disabled.
         """
-        return pooled_session_servers(self._mcp_gateway_overlay, self._agent)
+        return pooled_session_servers(
+            self._mcp_gateway_overlay, self._agent, self._channel_id
+        )
 
     def _claude_session_mcp_servers(self) -> list:
         """MCP server array passed to a claude ``session/new`` / ``session/load``.
@@ -1515,6 +1517,16 @@ class AcpClient:
             )
         self._model = model_id
         self._resolved_model_id = model_id
+        # The previous model's window (and its authoritative usage_update, if
+        # any) no longer describe this session — rebase the meter stats to the
+        # new model so the context meter updates without waiting for the next
+        # turn's telemetry (and so _backfill_context_window is un-gated).
+        win = (
+            model_registry.model_window(model_id)
+            if model_registry.has_known_window(model_id)
+            else None
+        )
+        self.last_prompt_stats.rebase_to_window(win or 0)
 
     def _capture_available_models(self, session_resp: dict) -> None:
         """Record the model list the backend advertised in a session response.
@@ -3621,39 +3633,18 @@ class AcpClient:
 
     # ── Private Helpers ──
 
-    _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
-    _IMAGE_MEDIA_TYPES = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-        ".bmp": "image/bmp",
-        ".svg": "image/svg+xml",
-    }
-
     async def _send_prompt(self, message: str) -> int:
-        content: list[dict] = []
-        # Extract image paths from message and inline them as image blocks
-        path_re = re.compile(r"(/[\w./@~\s()\-]+\.(?:png|jpg|jpeg|gif|webp|bmp))", re.IGNORECASE)
-        remaining = message
-        for match in path_re.finditer(message):
-            p = Path(match.group(1).strip())
-            if p.is_file() and p.suffix.lower() in self._IMAGE_EXTENSIONS:
-                try:
-                    data = base64.b64encode(p.read_bytes()).decode()
-                    media = self._IMAGE_MEDIA_TYPES.get(p.suffix.lower(), "image/png")
-                    content.append({"type": "image", "data": data, "mimeType": media})
-                    remaining = remaining.replace(match.group(1), f"[image: {p.name}]")
-                except Exception:
-                    pass  # skip unreadable files
-        content.insert(0, {"type": "text", "text": remaining})
-
+        # Shared with AcpSessionHandle.prompt via prompt_blocks so the two paths
+        # cannot drift. This path historically owned the ONLY image encoder,
+        # which is why images silently stopped working once AcpProvider began
+        # replacing AcpClient with AcpSessionProvider.
         return await self._send_request(
             METHOD_PROMPT,
             {
                 "sessionId": self._session_id,
-                "prompt": content,
+                # Offloaded: see the note in session_handle.prompt -- image
+                # reads and base64 encoding must not block the event loop.
+                "prompt": await asyncio.to_thread(build_prompt_blocks, message),
             },
         )
 

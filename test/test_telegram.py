@@ -699,8 +699,7 @@ class TestRenderer:
         async def _go() -> None:
             await r.on_turn_start()
             await r.dispatch(OutputEvent(kind=TEXT_CHUNK, text="Root at 86% used. "))
-            await r.dispatch(OutputEvent(kind=TEXT_CHUNK, text="[STEERING steer-abc: stop]"))
-            await r.dispatch(OutputEvent(kind=STEER_CONSUMED))  # event: render no-op
+            await r.dispatch(OutputEvent(kind=STEER_CONSUMED, text="stop"))
             await r.dispatch(OutputEvent(kind=TEXT_CHUNK, text="BANANA"))
             await r.dispatch(OutputEvent(kind=DONE, stop_reason=""))
 
@@ -759,6 +758,29 @@ class TestRenderer:
         # The options directive never leaks into any posted text.
         all_text = " ".join(t for t, _ in cli.sent) + " ".join(t for _, t, _ in cli.edits)
         assert "[OPTIONS" not in all_text
+
+    def test_long_options_before_streamed_steer_ack_become_keyboard(self) -> None:
+        cli = self._drive(
+            [
+                OutputEvent(
+                    kind=TEXT_CHUNK,
+                    text=("x" * 7680)
+                    + "\n\n[OPTIONS: Alpha | Bravo | Charlie]"
+                    + "\n\n[STEERING steer-7e6a4a0d",
+                ),
+                OutputEvent(kind=TEXT_CHUNK, text="94314d2db: acknowledged]"),
+                OutputEvent(kind=DONE, stop_reason=""),
+            ]
+        )
+
+        markups = [m for _, m in cli.sent if m] + [m for _, _, m in cli.edits if m]
+        labels = [b["text"] for row in markups[0]["inline_keyboard"] for b in row]
+        assert labels == ["Alpha", "Bravo", "Charlie"]
+        visible = "\n".join([t for t, _ in cli.sent] + [t for _, t, _ in cli.edits])
+        assert "[OPTIONS" not in visible
+        assert "[STEERING" not in visible
+        assert "steer-7e6a4a0d" not in visible
+        assert "94314d2db" not in visible
 
     def test_tool_only_message_not_orphaned_at_steer_boundary(self) -> None:
         # Codex finding: a tool call BEFORE any assistant text creates a live
@@ -1251,6 +1273,26 @@ class TestDispatcher:
         assert sess.acquired == ["telegram:kirocrew:direct:7"]  # acquired the turn semaphore
         assert sess.released == ["telegram:kirocrew:direct:7"]  # and released it in finally
         assert any("Compact" in s[0] for s in cli.sent) or any("Compact" in e[1] for e in cli.edits)
+
+    def test_compact_summary_body_is_not_sent(self) -> None:
+        d, cli, sess = _dispatcher({7})
+
+        async def _completed(timeout: float = 0.0) -> dict:
+            return {"type": "completed", "summary": "## OBJECTIVE\ninternal guidance"}
+
+        sess._gp.wait_for_compaction = _completed
+
+        async def _go() -> None:
+            await d.handle_message(
+                InboundMessage(
+                    channel_type="telegram", user_id="7", conversation_id="7", text="/compact"
+                )
+            )
+
+        asyncio.run(_go())
+        visible = " ".join([text for text, _ in cli.sent] + [text for _, text, _ in cli.edits])
+        assert "Context compacted" in visible
+        assert "OBJECTIVE" not in visible and "internal guidance" not in visible
 
     def test_compact_timeout_reports_gracefully(self) -> None:
         # Regression: nested 120s timeouts made the graceful-timeout branch

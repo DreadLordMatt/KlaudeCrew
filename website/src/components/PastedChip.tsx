@@ -23,14 +23,14 @@ function PastedChip({ block }: { block: PasteBlock }) {
         className="inline-flex items-center gap-0.5 align-baseline p-0 bg-transparent border-none text-accent text-[12px] cursor-pointer hover:text-accent-hover transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-accent rounded-sm"
         aria-expanded={expanded}
         aria-label={`${expanded ? 'Collapse' : 'Expand'} pasted ${block.lines} ${block.lines === 1 ? 'line' : 'lines'}`}
-        title={expanded ? 'Collapse paste' : 'Expand paste'}
+        title={expanded ? i18nT('components.pastedChip.collapse_paste') : i18nT('components.pastedChip.expand_paste')}
       >
         <ChevronRight
           size={12}
           aria-hidden
           className={`shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`}
         />
-        {i18nT('components.pastedChip.paste')}{block.seq} · {block.lines} {block.lines === 1 ? 'line' : 'lines'} ]
+        {i18nT('components.pastedChip.paste_lines', { seq: block.seq, count: block.lines })}
       </button>
       <AnimatePresence initial={false}>
         {expanded && (

@@ -107,6 +107,13 @@ class PostureControl:
 # Where a sink runs only ONE of the two scanners, its detail text says so.
 _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
     (
+        "Side-chat parent snapshot",
+        "dashboard/side_context.py",
+        "Parent user/assistant turns embedded in the side-chat prompt. The prompt "
+        "leaves the dashboard's own storage and is persisted by kiro-cli into its "
+        "session file, so this is an egress boundary rather than an internal read.",
+    ),
+    (
         "Dashboard live stream",
         "dashboard/chat_runner.py",
         "Per-chunk StreamRedactor on the chat_chunk WebSocket stream — withholds a "
@@ -264,6 +271,12 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
         "boundary cannot split and hide a credential).",
     ),
     (
+        "Configured-channel session mirror",
+        "dashboard/chat_mirror.py",
+        "Recent dashboard context posted while linking a configured non-Slack "
+        "destination, via redact_and_truncate before transport dispatch.",
+    ),
+    (
         "Slack Block Kit views",
         "slack/blocks.py",
         "Message text rendered into Block Kit payloads (Home Tab, session views).",
@@ -404,8 +417,9 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         "transcribe.py",
         "metrics/schema.py",
         # Egresses, but carries NO redactable content: the payload is a fixed
-        # seven-key allowlist built by beacon.payload() (random install id,
-        # version, OS, arch, Python minor, distribution channel, first-run bit).
+        # nine-key allowlist built by beacon.payload() (random install id,
+        # release, release channel, OS, arch, Python minor, distribution
+        # channel, governance posture, first-run bit).
         # There is no free-form field and no caller-supplied pass-through, so
         # there is nothing for a redactor to scrub — the allowlist IS the
         # control. It matches the drift scanner only because its module
@@ -422,7 +436,10 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         "cli_commands.py",
         # Slack sub-surfaces whose posted output is covered by the two Slack rows.
         "slack/events.py",
-        "slack/files.py",
+        # Inbound attachment ingestion: redacts text extracted FROM a user's
+        # own uploaded file before it enters the prompt. Inbound sanitisation,
+        # not agent output on its way to a user.
+        "messaging/attachments.py",
         "slack/interactions.py",
         "slack/renderer.py",
         "slack/sessions_view.py",

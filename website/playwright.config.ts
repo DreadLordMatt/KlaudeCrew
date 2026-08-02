@@ -18,13 +18,24 @@ export default defineConfig({
   // turn the credential-less CI gateway lacks). The default run is therefore
   // the credential-less green set. PLAYWRIGHT_RUN_AGENT_SPECS=1 (set
   // by a harness that wires a fake ACP backend) re-includes the @needs-agent
-  // specs. @needs-live-agent (soft-stop interruption) needs true live-agent
-  // semantics a fake can't model yet, so it stays excluded either way.
+  // specs. @needs-live-agent currently tags nothing: the last holder was the
+  // budget-expiry soft-stop, which the fake does model ([[SLOW_NOACK]] withholds
+  // the cancel ack), so it moved to @needs-agent. The tag stays wired as the
+  // seam for a spec that genuinely needs real model semantics.
   grepInvert: process.env.PLAYWRIGHT_RUN_AGENT_SPECS
     ? /@needs-live-agent/
     : /@needs-agent|@needs-live-agent/,
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:5476',
+    // Pin the browser locale. Most specs assert English prose, and the app
+    // resolves its language from `navigator.languages` when no explicit choice
+    // is stored (src/i18n/detect.ts precedence: config `dashboard.language`
+    // mirrored to localStorage `mc-lang`, then the browser tags, then `en`).
+    // The harness storage state carries no `mc-lang`, so the browser tags
+    // decide, and a zh-* runner would render the zh-CN catalog and fail those
+    // assertions. Declaring en-US here makes that an explicit dependency
+    // instead of an accident of the runner's environment.
+    locale: 'en-US',
     trace: 'on-first-retry',
     video: process.env.PLAYWRIGHT_VIDEO === '1' ? 'on' : 'off',
     navigationTimeout: 10000, // 10 second navigation timeout

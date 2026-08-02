@@ -12,7 +12,13 @@ from typing import Any
 
 from aiohttp import web
 
-from kiro_crew.config.loader import KiroCrewConfig, config_path
+from kiro_crew.config.loader import (
+    ConfigReadError,
+    KiroCrewConfig,
+    config_path,
+    read_config_for_update,
+    write_config_atomically,
+)
 from kiro_crew.dashboard.handlers.agents import _get_config_lock
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.embeddings import (
@@ -21,11 +27,11 @@ from kiro_crew.embeddings import (
     make_sync_embed_fn,
     model_download_manager,
     model_file_present,
+    resolve_custom_model,
 )
 from kiro_crew.executors import run_in_embed_pool
 from kiro_crew.sandbox import cgroup_scope_argv, create_subprocess_limited, wrap_argv
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
-from kiro_crew.vector_memory import SemanticRejectCode
 
 from ._shared import _get_memory, _is_restricted_session
 
@@ -98,9 +104,14 @@ async def api_memory_settings(request: web.Request) -> web.Response:
         async with _get_config_lock():
             path = config_path()
             try:
-                data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-            except Exception:
-                data = {}
+                data = read_config_for_update(path)
+            except ConfigReadError:
+                # Fail closed: writing back a {} baseline would drop every other setting.
+                logger.exception("Refusing to save memory settings: config unreadable")
+                return web.json_response(
+                    {"error": "failed to read config file", "code": "config_unreadable"},
+                    status=500,
+                )
             mem = data.setdefault("memory", {})
             if "history_idle_hours" in body:
                 try:
@@ -114,8 +125,7 @@ async def api_memory_settings(request: web.Request) -> web.Response:
                     return web.json_response({"error": "history_max_days must be an integer"}, status=400)
             if "migrated" in body:
                 mem["migrated"] = bool(body["migrated"])
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            write_config_atomically(path, data)
         # Apply to running consolidator
         state: DashboardState = request.app["state"]
         if state.consolidator:
@@ -212,6 +222,16 @@ async def api_memory_semantic_write(request: web.Request) -> web.Response:
     err = await asyncio.to_thread(store.set_semantic, key, value, confidence, source)
     if err is not None:
         code, message = err
+        # Imported here, not at module scope: ``vector_memory`` pulls
+        # snowballstemmer plus the optional numpy/faiss imports (measured 175ms
+        # and ~200 modules) and this enum is the module's ONLY use of it, on one
+        # error branch. The enum itself belongs in ``vector_memory_constants``
+        # (the dependency-free split-out this module's other constants already
+        # live in), but relocating it edits ``vector_memory.py``, which is owned
+        # by another change in flight — deferring the import keeps the cost off
+        # the import path without touching that file.
+        from kiro_crew.vector_memory import SemanticRejectCode
+
         sk = request.headers.get("X-Session-Key", "")
         _sel().log_api_access(
             caller=sk, operation="semantic.write", outcome="rejected",
@@ -286,8 +306,7 @@ async def _set_migrated(value: bool) -> None:
         else:
             data = {}
         data.setdefault("memory", {})["migrated"] = value
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        write_config_atomically(path, data)
 
 
 # ModelDownloadManager.status steps → the setup_step vocabulary the shipped
@@ -309,6 +328,25 @@ async def api_memory_embedding_status(request: web.Request) -> web.Response:
     mgr = model_download_manager()
     step = str(mgr.status["step"])
     model_present = model_file_present()
+    custom = resolve_custom_model()
+
+    setup_step = _SETUP_STEP_LEGACY.get(step, step)
+    setup_error = str(mgr.status["error"])
+    can_retry = step == "failed" and bool(setup_error)
+    if custom is not None:
+        # No download is pending or possible in custom mode, so the download
+        # manager's step ("idle" — it never ran) would leave the frontend
+        # polling forever. Report a TERMINAL state derived from whether the
+        # configured file is actually usable, and never offer Retry: retrying
+        # would download the bundled model, which is not the one in use.
+        can_retry = False
+        if custom.error or not model_present:
+            setup_step = "error"
+            setup_error = custom.error or f"custom embedding model not readable: {custom.path}"
+        else:
+            setup_step = "done"
+            setup_error = ""
+
     return web.json_response(
         {
             # Embeddings are always-on since the in-process runtime landed.
@@ -325,19 +363,25 @@ async def api_memory_embedding_status(request: web.Request) -> web.Response:
             # Memory tab can show users exactly which model runs locally.
             "model_id": embedder.model_id,
             "model_dim": embedder.dim,
+            # Provenance: "custom" means a user-supplied GGUF from
+            # memory.embed_model_path is in use and the bundled model is never
+            # downloaded. The path is shown so a misconfiguration is diagnosable
+            # from the UI rather than only from the logs.
+            "model_source": "custom" if custom is not None else "default",
+            "model_path": str(custom.path) if custom is not None else "",
             # "healthy" = embeddings usable now or ready to lazily activate:
             # the model file being present is what matters — the in-memory
             # load happens automatically on first embed.
             "server_healthy": model_present or embedder.is_ready(),
             "needs_docker": False,
             "docker_available": True,
-            "setup_step": _SETUP_STEP_LEGACY.get(step, step),
+            "setup_step": setup_step,
             "download_step": step,
             "download_attempt": mgr.status["attempt"],
             "bytes_downloaded": mgr.status.get("bytes_downloaded", 0),
             "bytes_total": mgr.status.get("bytes_total", 0),
-            "setup_error": mgr.status["error"],
-            "can_retry": step == "failed" and bool(mgr.status["error"]),
+            "setup_error": setup_error,
+            "can_retry": can_retry,
         }
     )
 
@@ -545,14 +589,18 @@ async def api_memory_enable_embeddings(request: web.Request) -> web.Response:
     path = config_path()
     async with _get_config_lock():
         try:
-            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except Exception:
-            data = {}
+            data = read_config_for_update(path)
+        except ConfigReadError:
+            # Fail closed: writing back a {} baseline would drop every other setting.
+            logger.exception("Refusing to persist embedding config: config unreadable")
+            _embedding_setup_status = {"step": "error", "error": "config unreadable"}
+            return web.json_response(
+                {"error": "failed to read config file", "code": "config_unreadable"}, status=500
+            )
         data.setdefault("memory", {})["embedding_provider"] = "llama_cpp"
         data["memory"]["embedding_dim"] = 1024
         data["memory"]["migrated"] = True
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        write_config_atomically(path, data)
 
     # Apply migrated to running consolidator
     state = request.app["state"]

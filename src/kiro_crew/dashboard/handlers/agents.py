@@ -18,9 +18,12 @@ from aiohttp import web
 from kiro_crew import agent_state, model_registry
 from kiro_crew.agent_discovery import clear_list_agents_cache, list_agents
 from kiro_crew.config.loader import (
+    ConfigReadError,
     KiroCrewAgentConfig,
     KiroCrewConfig,
+    read_config_for_update,
     resolve_agent_config_path,
+    write_config_atomically,
 )
 from kiro_crew.config.schema import SCHEMA_REGISTRY, config_entry_to_dict
 from kiro_crew.dashboard.chat_persistence import get_reasoning_effort_ordered
@@ -92,9 +95,9 @@ def _installed_agent_config() -> Path:
     This is the live config that kiro-cli reads.  Dashboard MCP toggle
     and sync operations write here — NOT to agents/defaults.json.
     """
-    from kiro_crew.agent import AGENT_FILENAME, KIRO_AGENTS_DIR  # noqa: F811
+    from kiro_crew.agent import AGENT_FILENAME, kiro_agents_dir_path  # noqa: F811
 
-    return KIRO_AGENTS_DIR / AGENT_FILENAME
+    return kiro_agents_dir_path() / AGENT_FILENAME
 
 
 async def api_agent_config(request: web.Request) -> web.Response:
@@ -133,19 +136,21 @@ async def api_agent_config(request: web.Request) -> web.Response:
                 if diff:
                     removed_per_key[key] = diff
             mc_cfg_path = _h.config_path()  # type: ignore[operator]
+            # Fail closed: writing back a {} baseline would drop every other
+            # setting just to record removedTools. See read_config_for_update.
             try:
-                mc_cfg = (
-                    json.loads(mc_cfg_path.read_text(encoding="utf-8"))
-                    if mc_cfg_path.exists()
-                    else {}
+                mc_cfg = read_config_for_update(mc_cfg_path)
+            except ConfigReadError:
+                logger.exception("Refusing to record removedTools: config unreadable")
+                return web.json_response(
+                    {"error": "failed to read config file", "code": "config_unreadable"},
+                    status=500,
                 )
-            except Exception:
-                mc_cfg = {}
             if removed_per_key:
                 mc_cfg["removedTools"] = removed_per_key
             else:
                 mc_cfg.pop("removedTools", None)
-            mc_cfg_path.write_text(json.dumps(mc_cfg, indent=2) + "\n", encoding="utf-8")
+            write_config_atomically(mc_cfg_path, mc_cfg)
             installed_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
             # Restart kiro-cli sessions so new config takes effect
             await _h._reset_all_sessions(request)
@@ -172,12 +177,15 @@ async def api_default_agent(request: web.Request) -> web.Response:
         name = body.get("agent", "")
         path = _h.config_path()
         try:
-            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except Exception:
-            data = {}
+            data = read_config_for_update(path)
+        except ConfigReadError:
+            # Fail closed: writing back a {} baseline would drop every other setting.
+            logger.exception("Refusing to set default agent: config unreadable")
+            return web.json_response(
+                {"error": "failed to read config file", "code": "config_unreadable"}, status=500
+            )
         data.setdefault("agent", {})["default_agent"] = name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        write_config_atomically(path, data)
         return web.json_response({"ok": True, "default_agent": name})
     cfg = KiroCrewConfig.load()
     return web.json_response({"default_agent": cfg.agent.default_agent})
@@ -863,7 +871,7 @@ async def api_slash_commands(request: web.Request) -> web.Response:
 async def api_agent_detail(request: web.Request) -> web.Response:
     """GET/DELETE/PATCH /api/agents/detail/{name} — view, delete, or update agent config."""
     name = request.match_info["name"]
-    from kiro_crew.agent import KIRO_AGENTS_DIR  # noqa: F811
+    from kiro_crew.agent import kiro_agents_dir_path  # noqa: F811
 
     # Parse body early so JSONDecodeError returns 400, not 404 from the file loop.
     patch_body = None
@@ -880,7 +888,7 @@ async def api_agent_detail(request: web.Request) -> web.Response:
             return web.json_response({"error": "body must be a JSON object"}, status=400)
 
     state: DashboardState = request.app["state"]
-    for f in KIRO_AGENTS_DIR.glob("*.json"):
+    for f in kiro_agents_dir_path().glob("*.json"):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
             if data.get("name") == name or f.stem == name:
@@ -1091,7 +1099,7 @@ async def _do_agents_sync(request: web.Request) -> web.Response:
         discovered_names = {a.name for a in discovered_agents}
 
         # Add new agents
-        from kiro_crew.agent import KIRO_AGENTS_DIR  # noqa: F811
+        from kiro_crew.agent import kiro_agents_dir_path  # noqa: F811
 
         mc_kiro_agents = {a.kiro_agent for a in cfg.agents.values()}
         for disc in discovered_agents:
@@ -1110,7 +1118,7 @@ async def _do_agents_sync(request: web.Request) -> web.Response:
                 # would itself be a correctness bug. The warning turns an
                 # otherwise silent spawn-time (ACP session/set_mode) failure into
                 # an actionable log line pointing at the offending seam row.
-                if not (KIRO_AGENTS_DIR / f"{disc.name}.json").exists():
+                if not (kiro_agents_dir_path() / f"{disc.name}.json").exists():
                     logger.warning(
                         "syncing agent %r (source=%s) with no on-disk config at "
                         "%s — if it is not ACP-resolvable it will persist into "
@@ -1118,7 +1126,7 @@ async def _do_agents_sync(request: web.Request) -> web.Response:
                         "INVARIANT)",
                         disc.name,
                         disc.source,
-                        KIRO_AGENTS_DIR / f"{disc.name}.json",
+                        kiro_agents_dir_path() / f"{disc.name}.json",
                     )
                 cfg.agents[disc.name] = KiroCrewAgentConfig(
                     kiro_agent=disc.name,

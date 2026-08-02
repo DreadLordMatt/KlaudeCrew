@@ -1,6 +1,6 @@
 # Config Module
 
-Last Updated: 2026-07-25 (Data-home resolution hardened against split-brain: (1) the completion marker `~/.kiro/crew/.data-home-ready` is now AUTHORITATIVE — marker present ⇒ trust the new home and NEVER re-migrate, even when a `~/.kirocrew` reappears alongside it (that dir is resurrection debris under the no-downgrade design, never promoted over the authoritative home; the old "marker + legacy ⇒ legacy always wins" re-migration is removed, closing a data-loss window where debris reverted `sel_hmac.key`/logs/`workspace/` and the recreate/TOCTOU race); (2) when a migration is skipped because a gateway is live, the resolving process JOINS whichever home the live gateway holds (legacy or new) so its `.local_secret` matches for internal IPC — a process pinned to the other home would 403 every internal API call and, writing into legacy, resurrect it. Prior — Data-home migration now overwrites READ-ONLY destination files: the re-migration copy passes a custom `copy_function` (`_copy_overwrite`) that clears a same-path destination's read-only state — adds the owner-write bit — before `copy2`, so a `0o444` git packfile under an app-source checkout no longer makes `shutil.copytree` raise `PermissionError` and abort the whole migration — the bug that trapped an already-populated new home in a permanent split-brain. Prior — Data-home migration simplified to copy-then-verify-then-delete: legacy `~/.kirocrew` is copied DIRECTLY into `~/.kiro/crew` — no staging dir, no quiesce snapshot — legacy files OVERWRITE anything already there (no more no-overwrite merge / byte-identical divergence guard / reconcile-with-backup) — and `~/.kirocrew` is deleted outright once verified, with no `~/.kirocrew.archived` rollback copy, no `~/.kiro/crew.pre-migration` divergent-home backup, no archive secret-expiry sweep. Symlinks are skipped entirely (not preserved, not dereferenced) rather than retargeted, which also removes the regenerable-bulk-dir relocation step (`models`/`cache` are simply never copied, matching a fresh install). `security._CREW_HOME_PREFIXES` dropped `.kirocrew.archived`; the `.kiro/crew.pre-migration` keystone entry is removed. Since an earlier (already-shipped) release could have left one of those now-ungated directories on disk, `config_dir()` added `_sweep_ungated_archive_leftovers` to delete either outright on every default-path resolution — see "Leftover-archive cleanup" below. There is now no downgrade/rollback path — see "No rollback" below; the release gate below is unchanged but now applies unconditionally (no install has an archive fallback). Prior — SessionConfig.empty_response_auto_continue added — default-ON gate for the dashboard chat runner's bounded empty-response auto-continue rung; see session.md "Empty-response recovery ladder". Prior — Divergent-new-home auto-reconcile: a pre-existing/stale `~/.kiro/crew` that diverges from legacy during the no-overwrite merge no longer strands the user on `~/.kirocrew` — reconciliation now completes the switch with legacy authoritative by renaming the divergent home aside to a keystone-gated (`~/.kiro/crew.pre-migration` is on `security._SENSITIVE_HOME_DIRS`), owner-locked `~/.kiro/crew.pre-migration/<ts>` backup, promoting the quiesced legacy snapshot into `~/.kiro/crew` (absolute intra-home symlinks retargeted), and marking complete; live data is unchanged (legacy, as the prior retain behavior), the sidelined home is a recoverable rollback, and a gateway live on the new home is never yanked aside. Prior — Data-home migration hardening: quiesce-before-compare closes the compare→archive TOCTOU (legacy tree atomically renamed to a per-PID `~/.kirocrew.quiescing.<pid>` snapshot before the divergence compare, then that frozen snapshot is compared + archived, so a concurrent legacy-era writer can't make stale state authoritative); regenerable bulk trees (`models`, `cache`) are RELOCATED (moved, not copied) from the snapshot into the new home so the GGUF model survives the upgrade for offline users (archive still carries no duplicate; falls back to strip-and-redownload on EXDEV); pre-copy stderr visibility notice; documented downgrade/rollback procedure; `kirocrew doctor` **Data Home** section surfaces the leftover `~/.kirocrew.archived` size + cleanup command. Prior — 2026-07-23 Data home moved from top-level `~/.kirocrew` to `~/.kiro/crew` — `config_dir()` now resolves to `~/.kiro/crew` by default (still overridable via `KIROCREW_HOME`), and triggers a one-time migration of a pre-move `~/.kirocrew` into the new home on first launch. See "Data Home Location & Migration" below. Prior — 2026-07-15 Removed the SecretaryConfig / TaskKeeperConfig / KeywordHook DTOs and the `secretary`/`taskkeeper` KiroCrewConfig fields — the Secretary/TaskKeeper features were dropped from the public fork (P472753900); config-baseline regenerated. Prior — 2026-07-13 Schema refresh: documented security-bounded load-time clamp — SUBAGENT_AUTO_MAX_CEILING=64 / SUBAGENT_MAX_TURNS_CEILING=200 / POOL_SIZE_MAX=10, `_clamp_security_bounds` + `config_bounds_clamped` SEL event; added clamped AgentConfig fields, SessionConfig.pool_size, MessagingConfig/SkillsConfig/TelemetryConfig/DashboardConfig (theme_mode/theme_color/onboarded) DTOs, `_resolve_named_agent_model`/`kiro_agents_dir`; corrected `_resolve_agent_model` fallback to `config_package_dir()/defaults.json`. 2026-06-22: AgentConfig: added sandbox_allow_no_isolation (SEC-009) field; agent_model_state.json sidecar: model_managed/cc_model moved out of kiro agent specs so kiro-cli deny_unknown_fields no longer drops KiroCrew agents)
+Last Updated: 2026-08-01 (Partial config updates no longer reset the user's settings: every read-modify-write of `config.json` used to fall back to `data = {}` on a failed read and write that back, so one unreadable or mid-write file turned "flip one toggle" into "erase every setting" — and the truncate-then-write writers, including `save()`, were themselves creating the torn-read window that triggered it. Added the two required primitives `read_config_for_update()` (fails CLOSED with the new `ConfigReadError`; only an ABSENT file yields `{}`) and `write_config_atomically()` (tmp+rename AND mode-preserving, so an operator's `0600` on a credential-bearing config is not widened to the umask default; it deliberately does NOT call the fail-loud `restrict_to_owner`, which shells out to `icacls` on Windows and would put a blocking subprocess on the gateway event loop), and routed `save()` plus every partial-update call site in `updates.py`, `memory.py`, `agents.py` (including the agent-config PUT path's `removedTools` write), `slack/handler.py`, `slack/interactions.py`, `slack/allowlist.py`, `cli_chat.py`, `cli_config.py` and `cli_setup.py` through them. Handlers that also mutate live in-process state now read AND write BEFORE mutating, so neither a refused read nor a failed write can leave the rejected value driving runtime until the next restart. The writer also RESOLVES a symlinked config first, because `os.replace` would otherwise rename over the link and orphan its target (the `write_text` it replaced followed the link). TWO AST guards in `test_config_rmw_preserves_settings.py` fail the build on a NEW fail-open reader or a NEW mode-widening writer — the hand sweeps kept missing siblings (a `mc_cfg` variable, three `cli_setup.py` writes, `allowlist.py`'s `_read_config`), so the invariant is enforced mechanically rather than by inspection. Interactive `config set --local` keeps its documented overwrite-a-corrupt-overlay behavior. Prior — Data-home resolution hardened against split-brain: (1) the completion marker `~/.kiro/crew/.data-home-ready` is now AUTHORITATIVE — marker present ⇒ trust the new home and NEVER re-migrate, even when a `~/.kirocrew` reappears alongside it (that dir is resurrection debris under the no-downgrade design, never promoted over the authoritative home; the old "marker + legacy ⇒ legacy always wins" re-migration is removed, closing a data-loss window where debris reverted `sel_hmac.key`/logs/`workspace/` and the recreate/TOCTOU race); (2) when a migration is skipped because a gateway is live, the resolving process JOINS whichever home the live gateway holds (legacy or new) so its `.local_secret` matches for internal IPC — a process pinned to the other home would 403 every internal API call and, writing into legacy, resurrect it. Prior — Data-home migration now overwrites READ-ONLY destination files: the re-migration copy passes a custom `copy_function` (`_copy_overwrite`) that clears a same-path destination's read-only state — adds the owner-write bit — before `copy2`, so a `0o444` git packfile under an app-source checkout no longer makes `shutil.copytree` raise `PermissionError` and abort the whole migration — the bug that trapped an already-populated new home in a permanent split-brain. Prior — Data-home migration simplified to copy-then-verify-then-delete: legacy `~/.kirocrew` is copied DIRECTLY into `~/.kiro/crew` — no staging dir, no quiesce snapshot — legacy files OVERWRITE anything already there (no more no-overwrite merge / byte-identical divergence guard / reconcile-with-backup) — and `~/.kirocrew` is deleted outright once verified, with no `~/.kirocrew.archived` rollback copy, no `~/.kiro/crew.pre-migration` divergent-home backup, no archive secret-expiry sweep. Symlinks are skipped entirely (not preserved, not dereferenced) rather than retargeted, which also removes the regenerable-bulk-dir relocation step (`models`/`cache` are simply never copied, matching a fresh install). `security._CREW_HOME_PREFIXES` dropped `.kirocrew.archived`; the `.kiro/crew.pre-migration` keystone entry is removed. Since an earlier (already-shipped) release could have left one of those now-ungated directories on disk, `config_dir()` added `_sweep_ungated_archive_leftovers` to delete either outright on every default-path resolution — see "Leftover-archive cleanup" below. There is now no downgrade/rollback path — see "No rollback" below; the release gate below is unchanged but now applies unconditionally (no install has an archive fallback). Prior — SessionConfig.empty_response_auto_continue added — default-ON gate for the dashboard chat runner's bounded empty-response auto-continue rung; see session.md "Empty-response recovery ladder". Prior — Divergent-new-home auto-reconcile: a pre-existing/stale `~/.kiro/crew` that diverges from legacy during the no-overwrite merge no longer strands the user on `~/.kirocrew` — reconciliation now completes the switch with legacy authoritative by renaming the divergent home aside to a keystone-gated (`~/.kiro/crew.pre-migration` is on `security._SENSITIVE_HOME_DIRS`), owner-locked `~/.kiro/crew.pre-migration/<ts>` backup, promoting the quiesced legacy snapshot into `~/.kiro/crew` (absolute intra-home symlinks retargeted), and marking complete; live data is unchanged (legacy, as the prior retain behavior), the sidelined home is a recoverable rollback, and a gateway live on the new home is never yanked aside. Prior — Data-home migration hardening: quiesce-before-compare closes the compare→archive TOCTOU (legacy tree atomically renamed to a per-PID `~/.kirocrew.quiescing.<pid>` snapshot before the divergence compare, then that frozen snapshot is compared + archived, so a concurrent legacy-era writer can't make stale state authoritative); regenerable bulk trees (`models`, `cache`) are RELOCATED (moved, not copied) from the snapshot into the new home so the GGUF model survives the upgrade for offline users (archive still carries no duplicate; falls back to strip-and-redownload on EXDEV); pre-copy stderr visibility notice; documented downgrade/rollback procedure; `kirocrew doctor` **Data Home** section surfaces the leftover `~/.kirocrew.archived` size + cleanup command. Prior — 2026-07-23 Data home moved from top-level `~/.kirocrew` to `~/.kiro/crew` — `config_dir()` now resolves to `~/.kiro/crew` by default (still overridable via `KIROCREW_HOME`), and triggers a one-time migration of a pre-move `~/.kirocrew` into the new home on first launch. See "Data Home Location & Migration" below. Prior — 2026-07-15 Removed the SecretaryConfig / TaskKeeperConfig / KeywordHook DTOs and the `secretary`/`taskkeeper` KiroCrewConfig fields — the Secretary/TaskKeeper features were dropped from the public fork (P472753900); config-baseline regenerated. Prior — 2026-07-13 Schema refresh: documented security-bounded load-time clamp — SUBAGENT_AUTO_MAX_CEILING=64 / SUBAGENT_MAX_TURNS_CEILING=200 / POOL_SIZE_MAX=10, `_clamp_security_bounds` + `config_bounds_clamped` SEL event; added clamped AgentConfig fields, SessionConfig.pool_size, MessagingConfig/SkillsConfig/TelemetryConfig/DashboardConfig (theme_mode/theme_color/onboarded) DTOs, `_resolve_named_agent_model`/`kiro_agents_dir`; corrected `_resolve_agent_model` fallback to `config_package_dir()/defaults.json`. 2026-06-22: AgentConfig: added sandbox_allow_no_isolation (SEC-009) field; agent_model_state.json sidecar: model_managed/cc_model moved out of kiro agent specs so kiro-cli deny_unknown_fields no longer drops KiroCrew agents)
 
 Update 2026-07-26: Foreign-agent onboarding adds the independent
 `dashboard.import_onboarded` gate, migration from `dashboard.onboarded`, a
@@ -134,7 +134,18 @@ leaves) on every default-path resolution. It never follows a symlink at either
 root, is best-effort (a removal failure is logged and retried on the next
 start, never blocks startup), and is a quiet no-op once both are gone.
 
-**Uninstaller consideration (Zezhen's open question).** Because the data home now
+**Repository-controlled uninstall contract.** Every uninstall path owned by this
+repository preserves the KiroCrew data home by default. `kirocrew service
+uninstall` removes only its service definition; the Python/npm packages define
+no uninstall lifecycle hook; and the desktop shell's
+`--squirrel-uninstall` handler removes only its application shortcut, without
+resolving or removing the KiroCrew home. App Kit uninstall also preserves the
+app's `data/` subtree unless the dedicated `purge_data=true` API action (CLI
+`--purge-data`, or an explicit dashboard choice) is supplied. The API checks
+for the literal boolean `true`; absent, legacy, or malformed values fail closed
+to preservation. A whole-home purge is never coupled to uninstall.
+
+**Uninstaller consideration (external dependency).** Because the data home now
 lives under `~/.kiro/`, a hypothetical Kiro-family uninstaller that removes
 `~/.kiro/` would also remove `~/.kiro/crew` and take KiroCrew's data — config,
 credentials, memory DB, session history, and the SEL audit chain — with it. This
@@ -170,6 +181,81 @@ eliminate, the one-way-door risk above; the release gate still stands.
 > [issue #355](https://github.com/kirodotdev/KiroCrew/issues/355)** (label
 > `release-blocker`); the sign-off must be recorded there and the issue closed
 > before tagging the first release containing this change.
+
+**Paths are resolved per call, never captured at import.** Because
+`config_dir()` re-reads `$KIROCREW_HOME` on every call and the migration above
+is deliberately lazy, the resolved value is only correct at the moment it is
+needed. Modules therefore MUST NOT bind a path factory result to a module-level
+constant:
+
+```python
+_SOME_DIR = config_dir() / "some"        # WRONG -- frozen at import
+```
+
+An import-time binding captures whatever home was active when the module was
+first imported, which breaks three things at once: pod isolation (a pod exports
+its own `KIROCREW_HOME`), the one-time legacy-home migration (resolved after
+import), and test isolation — `conftest.py`'s autouse `_isolate_kirocrew_home`
+fixture runs *after* collection has already imported the module under test, so
+it cannot reach a frozen constant. That last hole let a local test run write
+2128 fixture rows into an operator's real usage store.
+
+The required shape keeps the module-level name as an explicit opt-in override
+(`None` = resolve live), so existing `monkeypatch.setattr(mod, "_SOME_DIR", tmp)`
+call sites keep working:
+
+```python
+_SOME_DIR: Path | None = None
+
+def _some_dir() -> Path:
+    return _SOME_DIR if _SOME_DIR is not None else config_dir() / "some"
+```
+
+Annotating the override as `Path | None` is load-bearing: any consumer that
+still reads the constant directly becomes a **mypy error** rather than a silent
+`None` at runtime. This is enforced repo-wide by
+`test/test_lazy_data_home_paths.py`, which walks the AST of `src/kiro_crew` for
+module-level assignments calling any factory declared in `config/paths.py` and
+fails on every hit. The factory list is derived from `paths.py` itself, so a
+newly added factory is covered without editing the test. Issue #874.
+
+**`config_dir()` maintains; `data_home()` only resolves.** `config_dir()` is
+*resolve + maintain*: besides resolving the home it `mkdir`s it, refreshes the
+`~/.kiro-crew-location` recovery breadcrumb (a stat + a read) and re-runs
+`_sweep_ungated_archive_leftovers()`, which can `shutil.rmtree` a leftover
+archive from an earlier release. That work belongs to process start —
+`ensure_data_home()` is the startup hook — and the distinction did not matter
+while callers froze the result in a module constant, because the maintenance
+then ran exactly once, at import.
+
+Resolving per call makes it load-bearing: a request handler would otherwise
+perform a destructive sweep **on the event loop** as a side effect of asking
+where a directory is. So the accessors above call **`data_home()`**:
+
+| branch | behaviour |
+| --- | --- |
+| a **valid** `KIROCREW_HOME` override | delegates to `config_dir()` every call, so an override set *after* import is honoured. That branch performs neither the breadcrumb refresh nor the sweep — only a cheap `mkdir`. |
+| default home already resolved | returns the cached `_resolved_home` directly — no `mkdir`, no breadcrumb, no sweep. |
+| not yet resolved | delegates to `config_dir()`, so the **first** resolution in a process still migrates, creates the home and sweeps once. |
+
+The first row tests `_valid_override_home()` — the **same predicate `config_dir()`
+gates on**, not merely "is the env var set". An override naming a system
+directory (`/`, `/usr`, …) is rejected there and resolution falls through to the
+default home, so gating on the raw env var would send every call down the
+maintenance path and put the destructive sweep back on the request path for
+anyone with a bad override. The two predicates must not drift apart; a regression
+test pins both directions.
+
+That last row is what keeps the sweep's documented contract intact: it specifies
+"a leftover created between two starts … is still caught on the **next start**".
+The sweep is specified per *start*; running it per *call* was the mechanism, not
+the requirement. `data_home()` keeps no cache of its own — the override branch
+must stay live, and the cached branch reads the same `_resolved_home` that
+`config_dir()` populates, so there is one source of truth for the location.
+
+Existing direct `config_dir()` callers are unchanged and keep the maintenance
+behaviour, including 25 pre-existing calls that already sit inside async
+handlers.
 
 ## Workspace Root
 
@@ -279,8 +365,74 @@ Serializes config to the JSON structure used by `config.json`. Uses `_configured
 env var) to avoid clobbering the saved port on write-back.
 
 ### `KiroCrewConfig.save() -> None`
-Writes current config to `~/.kiro/crew/config.json` via `to_dict()`. Invalidates
-the `load()` validated-data cache so the next load reflects the write immediately.
+Writes current config to `~/.kiro/crew/config.json` via `to_dict()`, through
+`write_config_atomically()` (see below). Invalidates the `load()` validated-data
+cache so the next load reflects the write immediately.
+
+### Partial config updates: `read_config_for_update()` / `write_config_atomically()`
+
+Many callers do not hold a whole `KiroCrewConfig` — they flip one toggle
+(`auto_update`), persist one channel, or seed one default. That shape is a
+**read the whole file → mutate one key → write it all back** cycle, and both
+halves of it are data-loss-prone. These two helpers are the required primitives
+for it; do not hand-roll the cycle.
+
+**`read_config_for_update(path=None) -> dict` fails CLOSED.** The natural
+`try: json.loads(...) except Exception: data = {}` is a bug in this shape,
+because the `{}` fallback is indistinguishable from "the user has no settings" —
+so the write-back replaces a fully populated config with a single-key one, every
+setting the user ever chose is gone, and the endpoint still reports success. So:
+an **absent** file returns `{}` (a genuine empty starting point), while an
+unreadable or non-JSON-object file raises **`ConfigReadError`**. Callers must let
+that abort the update; leaving the existing file untouched always beats
+overwriting it with defaults. `ConfigReadError` deliberately does **not** inherit
+from `OSError`/`ValueError`, so a pre-existing broad `except OSError` around the
+write cannot swallow it and resume the clobbering path.
+
+The read fails for mundane reasons, most commonly a **torn read**: a
+truncate-then-write config writer leaves a window in which a concurrent reader
+observes a half-written file. The window is small, which is exactly what made the
+resulting loss so hard to reproduce — it presented as "all my settings reset
+themselves".
+
+**`write_config_atomically(path, data, *, fsync=False)` is atomic AND
+mode-preserving.** Atomic (tmp+rename) so no reader ever sees a partial file —
+this is what closes the torn-read window for everyone else. Mode-preserving
+because tmp+rename creates a NEW inode, so the umask default (typically `0644`)
+would silently replace an operator's tightened `0600`; `config.json` can hold
+inline credentials, so a settings write must never widen who can read it. An
+existing file's mode carries over and a newly created one is owner-only. It
+deliberately does NOT call `platform_compat.restrict_to_owner`: that helper shells
+out to `icacls` on Windows, and this function runs inside async request handlers
+and `save()`, so calling it would put a blocking subprocess on the gateway event
+loop (`no-blocking-call-on-event-loop`). Omitting it is no worse than the
+truncate-then-write it replaced, which applied no DACL either.
+
+**Mode preservation is POSIX-only.** `atomic_write`'s `mode` routes through
+`fchmod_safe`, a documented no-op on Windows, where access is carried by the DACL
+instead. Applying one would mean an `icacls` subprocess, which this function must
+not run (above) — so on Windows the replacement file inherits the directory's ACL,
+exactly as the `write_text` it replaced did. The three mode/symlink tests in
+`test_config_rmw_preserves_settings.py` are `skipif(not IS_POSIX)` for this reason;
+the data-loss and AST-guard tests are platform-independent and run everywhere.
+
+**Symlinks are followed, not replaced.** `os.replace` renames over the link
+itself, so a symlinked `config.json` would become a regular file and its target
+would go stale — the `write_text` this replaced followed the link. The target is
+resolved before the stat and the write, so symlinking the config into a dotfiles
+repo keeps working.
+
+**Atomicity is not serialization.** `write_config_atomically()` guarantees a
+reader never sees a partial file; it does NOT serialize a read-modify-write
+against another process. Two writers that interleave (the CLI and the gateway,
+say) are still last-writer-wins per key, since each read its own snapshot before
+mutating. In-process dashboard handlers additionally take `_get_config_lock()`,
+which serializes them against each other but not against a separate process.
+
+One deliberate exception: the interactive `kirocrew config set --local` path
+overwrites a corrupt `config.local.json` rather than failing closed — the user
+typed an explicit command and sees the result on stdout. Pinned by
+`test_config_overlay.py::TestCliConfigSetLocal`.
 
 ### `config_dir() -> Path`
 Returns `~/.kiro/crew/` (nested under kiro-cli's `~/.kiro/` base). Overridden by
@@ -655,6 +807,45 @@ Three properties are load-bearing:
 
 It is best-effort steering with no enforcement path: nothing validates the
 language a model actually emits.
+
+#### The tag also names the session
+
+Auto-titling (`dashboard/chat_title.py`) asks a background model for the session
+name that renders in the chat sidebar, and that name is chrome by the same
+argument as the tool-call purpose above: the date group headers, filter labels and
+rename menu around it are all in the UI language, and the name is *persisted*, so
+one written in the conversation's language leaves two languages on the row for
+good. With no directive the model simply mirrors the language of the prompt it was
+given — measured on `claude-haiku-4.5`, a fully Chinese conversation is named
+"Chat Title Language Mismatch".
+
+The tag reaches the titler through the **prompt**, not the `[UI LANGUAGE]` block:
+titling runs on the shared `_bg` session, and that block scopes itself explicitly
+to tool-call purpose text. `chat_title._ui_language()` resolves the same tag
+through the shared `context.ui_language_tag()`, and `_build_title_prompt()`
+interpolates a directive into the prompt's `{language}` slot — outside the
+delimited transcript, so a message that quotes the directive cannot restate it.
+`""` omits the slot entirely and the prompt stays byte-identical to the one
+auto-language workspaces have always sent.
+
+Two consequences fall out of naming in a non-latin script:
+
+- **The prose guard needs a second ceiling.** `_looks_like_prose` rejects a reply
+  that is a sentence rather than a name, and its word ceiling counts
+  `str.split()` tokens — which is 1 for any length of Chinese, Japanese or Thai.
+  `_TITLE_MAX_UNSPACED_CHARS` bounds those scripts by character instead, counting
+  only unspaced-script characters so latin identifiers in a mixed title stay
+  free, and the full-width terminators `。！？` are matched without the ASCII
+  rule's trailing-whitespace requirement (those scripts do not space after
+  punctuation). A short refusal with no terminator remains a documented false
+  negative.
+- **The reveal animation needs characters.** The sidebar types a new title in one
+  word at a time; a single-token title skipped the animation entirely, so
+  `_title_reveal_prefixes` steps unspaced scripts two characters at a time
+  instead, landing in the same step count as an equivalent latin title.
+
+`_clean_title` strips the full-width and CJK quote/period forms (`「」`, `“”`,
+`。`) alongside the ASCII ones, since that is what a zh/ja reply wraps a name in.
 
 ### Foreign-agent import onboarding state
 

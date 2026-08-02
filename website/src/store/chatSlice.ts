@@ -9,6 +9,7 @@ import { SOFT_STOP_DEBOUNCE_MS, SPAWN_LAUNCH_MARKER } from '../pages/chat/types'
 import { mergePreservedPastes } from '../utils/pasteTokens'
 import { safeSetItem } from '../utils/safeStorage'
 import type { McpAppRenderPayload } from '../lib/mcpAppSrcdoc'
+import { i18nT } from '../i18n/t'
 
 const SKIP_ROLES = new Set(['chunk', 'done'])
 const filterMessages = (msgs: ChatMessage[]) => msgs.filter(m => !SKIP_ROLES.has(m.role))
@@ -483,6 +484,16 @@ const EMPTY_TOOLLOG: ToolActivity[] = []
 /** Per-slot tool log, falling back to the global active mirror. */
 export const selectSlotToolLog = (state: RootState, slot: string | null): ToolActivity[] =>
   slot && slot !== state.chat.activeSlot ? (state.chat.slotActivity[slot]?.toolLog ?? EMPTY_TOOLLOG) : state.chat.toolLog
+const EMPTY_SUBAGENTS: Record<string, SubagentActivity> = {}
+/** Per-slot subagent map, falling back to the global active mirror — the
+ *  read-only selector twin of the internal `getSlotSubs`. Exists so the
+ *  Activity panel can subscribe to this itself instead of having ChatPage hold
+ *  the subscription and pass it down: ChatPage renders on every streamed token,
+ *  and `sseSubagentChunk` bumps this reference per sub-agent chunk, so a
+ *  ChatPage-level subscription re-rendered the whole page for a panel that is
+ *  closed by default. */
+export const selectSlotSubagents = (state: RootState, slot: string | null): Record<string, SubagentActivity> =>
+  slot && slot !== state.chat.activeSlot ? (state.chat.slotActivity[slot]?.subagents ?? EMPTY_SUBAGENTS) : state.chat.subagents
 /** Per-slot pending tool-approval (unresolved permission after the slot's last
  *  user message) — slot-aware version of ChatInput's old selectPendingApproval,
  *  so each grid pane's approval bar reflects ITS slot, not the global active one. */
@@ -621,7 +632,7 @@ export const createSlot = createAsyncThunk<
     // pending (e.g. New Chat spun on "Creating" under memory pressure and they
     // moved to another tab), the new slot must NOT hijack the view.
     const originActiveSlot = (getState() as RootState).chat.activeSlot
-    const slot = await api.createChatSlot(undefined, agent, model, mode, memory_mode, undefined, clean_mode)
+    const slot = await api.createChatSlot(undefined, agent, model, mode, memory_mode, undefined, clean_mode, undefined, folderId || undefined)
     const dashState = (getState() as RootState).dashboard
     // An explicit color (e.g. carried from a slot being recreated on a
     // mode switch) wins; otherwise fall back to the default-color policy.
@@ -630,12 +641,11 @@ export const createSlot = createAsyncThunk<
       slot.color_index = ci
       api.setSlotColor(slot.key, ci).catch(() => {})
     }
-    // Carry folder membership so a recreated slot stays in its folder
-    // instead of popping out to the top level.
-    if (folderId) {
-      slot.folder_id = folderId
-      api.setSlotFolder(slot.key, folderId).catch(() => {})
-    }
+    // Folder membership rides the create payload above, so the server files the
+    // slot before it broadcasts it. A follow-up PATCH would be too late to
+    // matter: the slots frame announcing this slot is emitted before the create
+    // response arrives here, so an unfiled slot would render at the top level
+    // first and visibly jump into its folder.
     // Carry the project directory. The create endpoint ignores `project` and
     // defaults it to the workspace dir, so a recreated slot would otherwise
     // lose its project — re-apply it via the dedicated endpoint. (We do NOT
@@ -984,12 +994,19 @@ const chatSlice = createSlice({
       if (items.length) state.followups[slot] = { ...card, items }
       else delete state.followups[slot]
     },
-    sseContextUsage(state, action: PayloadAction<{ slot: string; pct: number; used_tokens?: number; window_tokens?: number }>) {
-      const { slot, pct, used_tokens, window_tokens } = action.payload
+    sseContextUsage(state, action: PayloadAction<{ slot: string; pct: number; used_tokens?: number; window_tokens?: number; reset?: boolean }>) {
+      const { slot, pct, used_tokens, window_tokens, reset } = action.payload
       if (isUnsafeKey(slot)) return
       state.slotContextPct[safeKey(slot)] = pct
       if (window_tokens && window_tokens > 0) {
         state.slotContextTokens[safeKey(slot)] = { used: used_tokens ?? 0, window: window_tokens }
+      } else if (reset) {
+        // Model switch / compaction / session reset: the stored counts belong
+        // to a window that no longer describes the session. Deleting re-enables
+        // the model-derived fallback (provider.getContextWindow(slot.model)).
+        // Per-turn events without `reset` deliberately never delete, so a
+        // pct-only event cannot wipe good token counts.
+        delete state.slotContextTokens[safeKey(slot)]
       }
     },
     appendMessage(state, action: PayloadAction<ChatMessage>) { state.messages.push(action.payload) },
@@ -1276,7 +1293,7 @@ const chatSlice = createSlice({
         a.retrying = false
         a.streaming += action.payload.text
         if (a.streaming.length > 50_000) {
-          a.streaming = '…(truncated)\n' + a.streaming.slice(-40_000)
+          a.streaming = i18nT('store.chatSlice.truncated') + '\n' + a.streaming.slice(-40_000)
         }
       }
     },
@@ -1330,7 +1347,7 @@ const chatSlice = createSlice({
         a.retrying = false
         a.streaming += c.text
         if (a.streaming.length > 50_000) {
-          a.streaming = '…(truncated)\n' + a.streaming.slice(-40_000)
+          a.streaming = i18nT('store.chatSlice.truncated') + '\n' + a.streaming.slice(-40_000)
         }
       }
     },

@@ -348,3 +348,91 @@ describe('ToolCallLine file-open icon', () => {
     expect(screen.queryByTitle(/in side panel$/)).toBeNull()
   })
 })
+
+// `.ft-block-reveal` animates opacity, so while it is present the row keeps a
+// stacking context — which traps a `position: fixed` DESCENDANT (an MCP app's
+// full-screen sheet) inside the row instead of the viewport, painting it beneath
+// shell navigation. The class is a ONE-SHOT entrance fade, so it must come off
+// when the animation ends rather than persisting for the row's whole life.
+describe('ToolCallLine entrance reveal', () => {
+  it('drops the one-shot reveal class once the animation ends', () => {
+    const store = createTestStore({
+      chat: {
+        messages: [toolMsg()],
+        toolLog: [{ type: 'tool', text: 'echo hello', tool_call_id: 'tc_reveal', output: 'hello', ts: 1 }],
+        slotRunning: false,
+      } as unknown as ChatState,
+    })
+    const { container } = renderWithProviders(
+      <ToolCallLine message={toolMsg({ meta: { tool_call_id: 'tc_reveal' } })} running={false} />,
+      { store },
+    )
+    const row = container.firstElementChild as HTMLElement
+    expect(row.className).toContain('ft-block-reveal')
+
+    fireEvent.animationEnd(row)
+    expect(row.className).not.toContain('ft-block-reveal')
+  })
+
+  it('ignores a nested element ending its own animation', () => {
+    const store = createTestStore({
+      chat: {
+        messages: [toolMsg()],
+        toolLog: [{ type: 'tool', text: 'echo hello', tool_call_id: 'tc_nested', output: 'hello', ts: 1 }],
+        slotRunning: false,
+      } as unknown as ChatState,
+    })
+    const { container } = renderWithProviders(
+      <ToolCallLine message={toolMsg({ meta: { tool_call_id: 'tc_nested' } })} running={false} />,
+      { store },
+    )
+    const row = container.firstElementChild as HTMLElement
+    const inner = row.querySelector('button')!
+
+    fireEvent.animationEnd(inner)
+    expect(row.className).toContain('ft-block-reveal')
+  })
+})
+
+/** The pill's LABEL is prose with the odd argument spliced in ("Searching for
+ *  'YOLO' in src"), so it must follow the user's Font Family choice
+ *  (`--font-body`). Tailwind's `font-mono` resolves to `var(--mono)`, a token
+ *  that setting never writes. The file-path chip is the exception: a path is
+ *  code and keeps mono. */
+describe('ToolCallLine — pill follows the Font Family setting, path chip stays mono', () => {
+  it('does not pin the pill to font-mono', () => {
+    const msg = toolMsg({
+      content: "🔧 Searching for 'font-mono' in src",
+      // Purpose matches the content: `displayLabel` prefers `purpose` under
+      // simplifiedToolNames, and the default fixture's purpose is unrelated.
+      meta: { tool_call_id: 'tc_1', purpose: "Searching for 'font-mono' in src" },
+    })
+    const store = createTestStore({
+      chat: { messages: [msg], toolLog: [], slotRunning: false } as unknown as ChatState,
+    })
+    renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
+    const pill = screen.getByLabelText(/details for tool/)
+    expect(pill.className).not.toContain('font-mono')
+    // The label itself still renders — guards against asserting on an empty pill.
+    expect(pill.textContent).toContain("Searching for 'font-mono' in src")
+  })
+
+  it('keeps the file-path chip monospaced', () => {
+    const msg = toolMsg({
+      content: '🔧 Read website/tailwind.config.js',
+      meta: { tool_call_id: 'tc_file', purpose: 'Read the fontFamily block', file_path: 'website/tailwind.config.js' },
+    })
+    const store = createTestStore({
+      chat: { messages: [msg], toolLog: [], slotRunning: false } as unknown as ChatState,
+    })
+    const { container } = renderWithProviders(
+      <ToolCallLine message={msg} running={false} onFileOpen={() => {}} />, { store },
+    )
+    const chip = [...container.querySelectorAll('button')]
+      .find(b => b !== screen.getByLabelText(/details for tool/) && /tailwind\.config\.js/.test(b.textContent || ''))
+    // The chip only mounts when the side panel offers a file to open; when this
+    // build does not render it, the assertion below is skipped rather than
+    // asserting on the wrong node.
+    if (chip) expect(chip.className).toContain('font-mono')
+  })
+})

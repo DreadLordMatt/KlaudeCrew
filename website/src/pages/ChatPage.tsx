@@ -43,6 +43,7 @@ import { useTouchedFiles } from '../hooks/useTouchedFiles'
 import { useTheme } from '../hooks/useTheme'
 import CollapsibleToolGroup from './chat/CollapsibleToolGroup'
 import ThinkingBlock from './chat/ThinkingBlock'
+import { RowDisclosureProvider } from './chat/rowDisclosure'
 import type { DisplayItem, TurnItem } from './chat/types'
 import McpToolsPanel from './chat/McpToolsPanel'
 import { deriveLoadedMcpTools } from '../lib/mcpLoadedTools'
@@ -52,11 +53,6 @@ import { useVirtualChat } from '../hooks/virtualizer/useVirtualChat'
 import { parseFiles, prepareSendPayload, resolveFileSegment, buildFileLabels, findUnreferencedAttachments } from '../utils/fileTokens'
 import { type PasteBlock, expandAll as expandPasteTokens, findTokenRanges, pruneBlocks as pruneBlocksUtil, remapCarriedBlocks, saveStoredPaste, recollapsePastes } from '../utils/pasteTokens'
 import { extractPromptFromToken, extractSlackContextFromToken } from '../utils/tokenPrompt'
-// Roles that fold into a collapsible group in the turn view. Thinking is NOT
-// here: it carries real content and renders as its own standalone block (a
-// content-bearing reasoning trace), so grouping it into the "N tool calls"
-// collapsible would bury and mislabel it.
-const GROUPABLE = new Set(['permission'])
 /** Delay (ms) before scrolling to bottom after a state update, giving React time to commit. */
 const SCROLL_AFTER_RENDER_MS = 100
 // Canonical home is utils/navIntent (shared with the popout nav-intent
@@ -96,7 +92,7 @@ import SearchHighlightContext, { MessageSearchScope } from '../hooks/SearchHighl
 import SearchBar from '../components/SearchBar'
 import SearchResultsList from '../components/SearchResultsList'
 import { pickSearchScrollBehavior, scrollCurrentMatchIntoView, pollRowSettled, glideOnceStep, attachUserScrollIntent } from '../utils/searchScroll'
-import QueueStack, { SubagentDeliveryProgress, isSystemDelivery } from '../components/QueueStack'
+import QueueStack, { SubagentDeliveryProgress, isSystemDelivery, isNonInteractiveQueued } from '../components/QueueStack'
 import { runBelongsToSlot } from '../apps/workflows/runModel'
 import { TipCard, useTipTrigger } from '../components/TipCard'
 import { useVoiceInput, voiceInputSupported } from '../hooks/useVoiceInput'
@@ -110,6 +106,7 @@ import { useChatNavigation } from '../hooks/useChatNavigation'
 import SubagentProgressBar from './chat/SubagentProgressBar'
 import TaskProgressBar from './chat/TaskProgressBar'
 import SidePanel, { CHAT_PANE_MIN_W, sidePanelFillWidth } from './chat/SidePanel'
+import { groupDisplayItems, applyRunningState } from './chat/groupDisplayItems'
 import { setSessionPreviewPending, normalizeUrl, PREVIEW_FOCUS_EVENT, PREVIEW_SNIP_EVENT, PREVIEW_ENABLE_BROWSE_EVENT, BROWSE_MODE_EVENT } from '../components/WebPreviewPanel'
 import { detectPreviewUrl, previewFeedDecision } from '../utils/detectPreviewUrl'
 import { fileLandingSlot } from '../utils/uploadRouting'
@@ -308,9 +305,9 @@ function KnowledgeBubbleChip({ knowledge }: { knowledge: { items: number; tokens
         onClick={() => setExpanded(v => !v)}
         className="inline-flex items-center gap-1 text-[11px] text-accent bg-accent/10 rounded px-1.5 py-0.5 border-none cursor-pointer hover:bg-accent/20 transition-colors"
         aria-expanded={expanded}
-        aria-label={`${expanded ? 'Collapse' : 'Expand'} knowledge context`}
+        aria-label={expanded ? i18nT('pages.chatPage.collapse_knowledge_context') : i18nT('pages.chatPage.expand_knowledge_context')}
       >
-        <BookOpen size={12} className="shrink-0" /> {knowledge.items} {i18nT('pages.chatPage.knowledge')} {knowledge.items === 1 ? 'item' : 'items'} · {knowledge.tokens.toLocaleString()} {i18nT('pages.chatPage.tokens')}
+        <BookOpen size={12} className="shrink-0" /> {i18nT('pages.chatPage.knowledge_item', { count: knowledge.items })} · {knowledge.tokens.toLocaleString()} {i18nT('pages.chatPage.tokens')}
       </button>
       {expanded && knowledge.content && (
         <div className="mt-1 max-h-[300px] overflow-auto rounded border border-border bg-bg-elevated p-2 text-[11px]">
@@ -651,6 +648,27 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     return out
   }, [messages, activeSlot])
   const slotRunning = useAppSelector(s => s.chat.slotRunning)
+  // Turn disclosure ("N tool calls" / "Worked through N steps"), keyed by the
+  // virtualizer's stable row key. This lives HERE rather than in TurnBlock
+  // because the transcript is virtualised: a row is unmounted once it leaves
+  // the mounted window, which streaming does routinely as it scrolls content
+  // past, and row-local state would be destroyed every time. An entry exists
+  // only for a turn the user has explicitly toggled; absent means "use the
+  // default", so the automatic collapse-on-completion is untouched.
+  const [turnDisclosure, setTurnDisclosure] = useState<Record<string, boolean>>({})
+  const setTurnDisclosureFor = useCallback((key: string, expanded: boolean) => {
+    setTurnDisclosure(prev => (prev[key] === expanded ? prev : { ...prev, [key]: expanded }))
+  }, [])
+  // Same problem, same shape, for the per-tool-call pill (ToolCallLine): its
+  // expanded panel is also row-local and also dies when the virtualizer
+  // recycles the row. Keyed by the pill's own message key.
+  const [toolDisclosure, setToolDisclosure] = useState<Record<string, boolean>>({})
+  const setToolDisclosureFor = useCallback((key: string, expanded: boolean) => {
+    setToolDisclosure(prev => (prev[key] === expanded ? prev : { ...prev, [key]: expanded }))
+  }, [])
+  // Row keys are only unique within a slot, so carrying them across a slot
+  // switch would apply one session's choices to another's turns.
+  useEffect(() => { setTurnDisclosure({}); setToolDisclosure({}) }, [activeSlot])
   // Shared composer-busy rule (chatSlice.selectComposerBusy). Drives the
   // composer's busy/queue affordance so a message sent during a sub-agent run
   // reads as "will queue".
@@ -696,8 +714,13 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const slotState = useAppSelector(s => s.chat.slotState)
   const contextPct = useAppSelector(s => s.chat.slotContextPct[s.chat.activeSlot ?? ''] ?? 0)
   const contextTokens = useAppSelector(s => s.chat.slotContextTokens?.[s.chat.activeSlot ?? ''])
-  const subagents = useAppSelector(s => s.chat.subagents)
-  const toolLog = useAppSelector(s => s.chat.toolLog)
+  // Length only. The two arrays themselves are mutated per streamed sub-agent /
+  // tool chunk, and their only consumer is the Activity panel (SidePanel), which
+  // is closed by default and now subscribes to them itself. Subscribing to the
+  // arrays here re-rendered this whole component per chunk for data it never
+  // read. The touched-file scan below needs the entries, but only when the log
+  // GREW, so it reads them from the store at effect time instead.
+  const toolLogLen = useAppSelector(s => s.chat.toolLog.length)
   const activityOpen = useAppSelector(s => s.chat.activityOpen)
   const slotHasMore = useAppSelector(s => s.chat.slotHasMore)
   const history = useAppSelector(s => s.chat.history)
@@ -852,7 +875,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const setPendingModel = useCallback((v: string) => { pendingModelRef.current = v; _setPendingModel(v) }, [])
   const pendingProjectRef = useRef('')
   const setPendingProject = useCallback((v: string) => { pendingProjectRef.current = v }, [])
-  const [resolvedModel, setResolvedModel] = useState('')  // resolved model for slots without model
+
   // Sync pendingModel with default agent's model on initial load
   const _initAgent = pendingAgent || defaultAgent || 'default'
   const _initMc = installedAgents.find(a => a.name === _initAgent)
@@ -1234,10 +1257,19 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const isMac = useAppSelector(s => s.dashboard.status?.platform) === 'darwin'
   const { data: sttCfg } = useQuery({
     queryKey: ['sttConfig'],
-    queryFn: () => api.sttConfig() as Promise<{ streaming?: boolean; enabled?: boolean }>,
+    queryFn: () => api.sttConfig() as Promise<{ streaming?: boolean; enabled?: boolean; dictation_panel?: boolean; available?: boolean; provider?: string }>,
   })
   const sttStreaming = !!sttCfg?.streaming
   const sttEnabled = !!sttCfg?.enabled
+  // The backend probes for the provider's binary and reports `available`.
+  // Default true so a not-yet-loaded config doesn't flash the modal; the
+  // separate sttConfigLoaded guard already covers the pre-load case.
+  const sttAvailable = sttCfg?.available !== false
+  const sttProvider = sttCfg?.provider || ''
+  // Default true so the panel is the standard recording surface; the backend
+  // sends an explicit boolean, so `undefined` here means "config not loaded yet"
+  // rather than "off", and a pre-load recording would otherwise flash the bar.
+  const sttDictationPanel = sttCfg?.dictation_panel !== false
   // Treat "config not loaded yet" as disabled so the guard never lets a
   // recording start before STT is confirmed on. Stable boolean so toggleVoice's
   // deps don't churn on every sttCfg object identity from a refetch.
@@ -1277,6 +1309,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // changes (e.g. when `sttStreaming` flips).
   const voiceRef = useRef(voice)
   useEffect(() => { voiceRef.current = voice }, [voice])
+  // Same reason as voiceRef: send() deliberately keeps a minimal dep array (with
+  // an exhaustive-deps suppression), so reading `sttStreaming` directly there
+  // would close over the value from the render that created that send().
+  const sttStreamingRef = useRef(sttStreaming)
+  useEffect(() => { sttStreamingRef.current = sttStreaming }, [sttStreaming])
   // Re-arm when the user explicitly (re)starts recording — wrap toggle.
   // Depend on the individual stable members actually read so this callback
   // is only re-created when they change. `[voice]` would recreate every
@@ -1287,7 +1324,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // audio that never gets transcribed. Point the user at the enable setting
     // instead. Guard on !recording so this only gates the *start* — stopping
     // an in-progress recording is always allowed.
-    if (!voice.recording && (!sttConfigLoaded || !sttEnabled)) {
+    if (!voice.recording && (!sttConfigLoaded || !sttEnabled || !sttAvailable)) {
       setVoiceSetupOpen(true)
       return
     }
@@ -1303,7 +1340,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // `voice` object — `[voice]` would recreate this callback every render and
     // re-render every child that receives `toggleVoice` (see comment above).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [voice.recording, voice.toggle, sttEnabled, sttConfigLoaded])
+  }, [voice.recording, voice.toggle, sttEnabled, sttConfigLoaded, sttAvailable])
   // Stop any in-flight recording and drop the frozen prefix when the user
   // switches slots so a late-arriving transcript can't leak into the wrong
   // session. Disarm first so any in-flight final from the previous slot is
@@ -1428,6 +1465,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // Auto-track files touched by tool calls (read, write, grep, glob)
   const lastToolLen = useRef(0)
   useEffect(() => {
+    // Read the log at effect time rather than subscribing to it: this effect only
+    // runs when the length changed, and the append-only log's tail is what it wants.
+    const toolLog = store.getState().chat.toolLog
     if (toolLog.length <= lastToolLen.current) { lastToolLen.current = toolLog.length; return }
     const newEntries = toolLog.slice(lastToolLen.current)
     lastToolLen.current = toolLog.length
@@ -1459,7 +1499,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // on the whole `toolLog`/`touchedFiles` objects would reprocess on unrelated
     // identity changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [toolLog.length, touchedFiles.addFile, touchedFiles.shouldScanAdd])
+  }, [toolLogLen, touchedFiles.addFile, touchedFiles.shouldScanAdd])
 
   const { colorTheme } = useTheme()
   // Mirror colorTheme into a ref so the `send` callback (which does not depend
@@ -1503,8 +1543,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             const res = await fetch(url)
             const text = res.ok
               ? await res.text()
-              : res.status === 404 ? '_File not found on disk. It may have been moved or deleted._'
-              : '_Unable to read file._'
+              : res.status === 404 ? i18nT('pages.chatPage.file_not_found_on_disk_it_may_have_been_moved_or')
+              : i18nT('pages.chatPage.unable_to_read_file')
             return { text, ok: res.ok }
           },
           staleTime: 10_000,
@@ -1522,16 +1562,21 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       search.close()
       if (ok) touchedFiles.addFile(filePath, 'history')
     } catch {
-      tabsCtl.openFile(filePath, '_Error reading file_', activeSlotRef.current ?? null, opts)
+      tabsCtl.openFile(filePath, i18nT('pages.chatPage.error_reading_file'), activeSlotRef.current ?? null, opts)
       dispatch(openActivityPanel())
       search.close()
     }
-    // Depend on the stable `search.close` (useCallback([]) in useMessageSearch),
-    // not the whole `search` object — the latter changes identity on every
-    // search-state change (isOpen/term/matches) and would needlessly recreate
-    // this callback and re-render its consumers.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryClient, tabsCtl, dispatch, search.close, touchedFiles])
+    // Depend on the stable members, not the whole hook objects:
+    //   search.close      — useCallback([]) in useMessageSearch; the `search`
+    //                       object changes identity on every search-state change
+    //                       (isOpen/term/matches).
+    //   touchedFiles.addFile — useTouchedFiles memoizes on `files`, so its object
+    //                       changes identity every time a file lands, including
+    //                       mid-run when the tool-log scan above calls addFile.
+    // Either whole-object dep churned this callback and the onFileOpen prop on
+    // every row. (tabsCtl still churns on tab changes, but those are user actions,
+    // not per-chunk.)
+  }, [queryClient, tabsCtl, dispatch, search.close, touchedFiles.addFile])
 
   // Open an artifact as a side-panel tab — the artifact twin of
   // handleFileOpen, and the single entry point every in-chat artifact
@@ -1648,10 +1693,10 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       if (result.ok) {
         await dispatch(switchSlot(result.key))
       } else {
-        alert('Fork failed: ' + (result.error || 'unknown error'))
+        alert(i18nT('pages.chatPage.fork_failed_error', { error: result.error || i18nT('pages.chatPage.unknown_error') }))
       }
     } catch (e) {
-      alert('Fork failed: ' + (e instanceof Error ? e.message : String(e)))
+      alert(i18nT('pages.chatPage.fork_failed_error', { error: e instanceof Error ? e.message : String(e) }))
     }
   }, [activeSlot, dispatch, forkCfg])
 
@@ -1664,10 +1709,10 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         // Unified view: the forked orchestrator slot lives in the same sidebar.
         if (!mode) navigate('/chat')
       } else {
-        alert('Plan from here failed: ' + (result.error || 'unknown error'))
+        alert(i18nT('pages.chatPage.plan_from_here_failed_error', { error: result.error || i18nT('pages.chatPage.unknown_error') }))
       }
     } catch (e) {
-      alert('Plan from here failed: ' + (e instanceof Error ? e.message : String(e)))
+      alert(i18nT('pages.chatPage.plan_from_here_failed_error', { error: e instanceof Error ? e.message : String(e) }))
     }
   }, [activeSlot, dispatch, mode, navigate])
 
@@ -1744,14 +1789,14 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // so an async capture lands where it started, not where the user switched to.
     const requestSlot = targetSlot !== undefined ? targetSlot : activeSlotRef.current
     setUploadError('')
-    if (files.length > 20) { setUploadError('Too many files (max 20)'); return }
+    if (files.length > 20) { setUploadError(i18nT('pages.chatPage.too_many_files_max_20')); return }
     const big = files.find(f => f.size > 50 * 1024 * 1024)
     if (big) { setUploadError(`File too large: ${big.name} (max 50 MB)`); return }
     setUploading(true)
     try {
       const res = await api.uploadFiles(files)
       if (res.error) {
-        setUploadError('Upload failed: ' + res.error)
+        setUploadError(i18nT('pages.chatPage.upload_failed_error', { error: res.error }))
       } else if (res.paths?.length) {
         const landing = fileLandingSlot(requestSlot, activeSlotRef.current)
         if (landing.target === 'pending') {
@@ -1765,7 +1810,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       if (!res.error && res.resizedByPath && Object.keys(res.resizedByPath).length) {
         setResizedInfo(prev => ({ ...prev, ...res.resizedByPath }))
       }
-    } catch { setUploadError('Upload failed — check file type and size (max 50 MB)') }
+    } catch { setUploadError(i18nT('pages.chatPage.upload_failed_check_file_type_and_size_max_50_mb')) }
     setUploading(false)
   }, [saveDrafts])
 
@@ -2332,6 +2377,27 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     widgetPrefillRef.current = null
     if (!raw && !pendingFilesRef.current.length) return
 
+    // Sending while STREAMING dictation is live ends the dictation. The panel
+    // advertises "Enter to send", so this path is reachable by design — and
+    // without it, streaming STT keeps running past the send: `onPartial`
+    // re-derives the composer value from `frozenInputRef`, which was snapshotted
+    // BEFORE the send cleared it, so the next partial repopulates the composer
+    // with text the user already sent. Disarm FIRST so any partial/final already
+    // in flight is dropped, then stop capture (stop() is async — up to 5s for
+    // the backend close).
+    //
+    // STREAMING ONLY, deliberately. In batch mode the transcription arrives
+    // exactly once, from `MediaRecorder.onstop` AFTER capture ends, and it
+    // arrives through `onText` — which honours `sttDisarmedRef`. Disarming here
+    // would throw away the entire recording, which is the opposite of the bug
+    // being fixed. Batch therefore keeps its pre-existing behaviour untouched:
+    // capture continues, and the transcript lands when the user stops.
+    if (voiceRef.current.recording && sttStreamingRef.current) {
+      sttDisarmedRef.current = true
+      frozenInputRef.current = null
+      voiceRef.current.toggle()
+    }
+
     // The session actually on screen at send time. Read from the ref (fresh
     // every render), not the closure `activeSlot` (stale until send() is
     // re-memoized). Under lag a reducer-driven activeSlot change can move the
@@ -2525,7 +2591,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               ts: uniqueNotificationTs(),
               kind: 'agent',
               priority: 'critical',
-              title: 'Could not start a new session',
+              title: i18nT('pages.chatPage.could_not_start_a_new_session'),
               body: `${createFailReason(e)}. Your message is queued and will be sent when a session is ready — but it is held in this tab only, so if you navigate away or reload you will need to retype it.`,
             }))
           }
@@ -2542,7 +2608,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             ts: uniqueNotificationTs(),
             kind: 'agent',
             priority: 'critical',
-            title: 'Could not start a new session',
+            title: i18nT('pages.chatPage.could_not_start_a_new_session'),
             body: `${createFailReason(e)}. Your message is saved as a draft in the session you sent it from.${lostContext}`,
             slot: uiSlot,
           }))
@@ -2592,7 +2658,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       const body = await r.json().catch(() => ({}))
       if (!body.queued && !body.ok) {
         dispatch(setSlotRunning(false))
-        dispatch(appendMessage({ role: 'error', content: body.error || 'Send failed', cls: '' }))
+        dispatch(appendMessage({ role: 'error', content: body.error || i18nT('pages.chatPage.send_failed'), cls: '' }))
       }
     } catch (e: unknown) {
       clearTimeout(timeout)
@@ -2600,7 +2666,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         // Timeout — message was received, WS will deliver response
       } else {
         dispatch(setSlotRunning(false))
-        dispatch(appendMessage({ role: 'error', content: 'Connection error', cls: '' }))
+        dispatch(appendMessage({ role: 'error', content: i18nT('pages.chatPage.connection_error'), cls: '' }))
         // Restore draft so the user doesn't lose their message.
         // Also restore the paste blocks backing any tokens in `txt`, otherwise
         // the restored text shows a dead `[ Paste #N · M lines ]` literal.
@@ -2776,7 +2842,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
 
   const followupStartInWorktree = useCallback(async (item: FollowupItem) => {
     const repo = currentSlot?.project
-    if (!repo) throw new Error('This session has no project directory to branch from.')
+    if (!repo) throw new Error(i18nT('pages.chatPage.this_session_has_no_project_directory_to_branch'))
     const originSlot = activeSlot
     // Capture the card's ts up front so completion clears only THIS card. A
     // newer card can arrive for the same slot while the request is in flight;
@@ -2787,7 +2853,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // up. The card surfaces the thrown message inline.
     const res = await api.createWorktree(repo, followupBranchFor(item))
     const path = res?.path
-    if (!path) throw new Error(res?.error || 'Worktree creation returned no path')
+    if (!path) throw new Error(res?.error || i18nT('pages.chatPage.worktree_creation_returned_no_path'))
     let slotKey = ''
     try {
       // `activate: false` on purpose: the slot must be SCOPED to the worktree
@@ -2976,8 +3042,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         const res = await fetch(fileReadUrl(t.path!))
         const text = res.ok
           ? await res.text()
-          : res.status === 404 ? '_File not found on disk. It may have been moved or deleted._'
-          : '_Unable to read file._'
+          : res.status === 404 ? i18nT('pages.chatPage.file_not_found_on_disk_it_may_have_been_moved_or')
+          : i18nT('pages.chatPage.unable_to_read_file')
         return { text, ok: res.ok }
       },
       staleTime: 10_000,
@@ -2992,7 +3058,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       const t = coldFileTabs[i]
       if (!t || t.content !== undefined) return
       if (r.data) tabsCtl.patchTab(t.id, { content: r.data.text })
-      else if (r.isError) tabsCtl.patchTab(t.id, { content: '_Error reading file_' })
+      else if (r.isError) tabsCtl.patchTab(t.id, { content: i18nT('pages.chatPage.error_reading_file') })
     })
   }, [coldFileResults, coldFileTabs, tabsCtl])
   // Session mode of the active slot. In the unified chat view the page-level
@@ -3009,7 +3075,10 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     queryFn: () => provider.resolveModel(_slotTemplateName),
     enabled: !!_slotTemplateName,
   })
-  useEffect(() => { setResolvedModel(_slotResolvedModel || '') }, [_slotResolvedModel])
+  // Derived, not mirrored into state via an effect: the effect form cost an extra
+  // render pass every time the query settled, for a value that is a pure function
+  // of the query result.
+  const resolvedModel = _slotResolvedModel || ''
   // The configured default effort for new sessions. A slot that has never
   // touched the effort control carries '' (no override) but still RUNS at this
   // default — the backend applies `slot.reasoning_effort or agent.reasoning_effort`
@@ -3278,54 +3347,41 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     if (activityOpen) tabsCtl.openView(activityTab === ('nav' as string) ? 'files' : activityTab)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activityTab])
-  const displayItems = useMemo<DisplayItem[]>(() => {
-    // Phase 1: build raw items (singles + groups)
-    const raw: TurnItem[] = []
-    let group: ChatMessage[] = [], groupStart = 0
-    for (let i = 0; i < messages.length; i++) {
-      // Permission messages handled by pinned ApprovalBar — skip entirely
-      if (messages[i].role === 'permission') continue
-      // Subagent completions are internal — LLM sees them but user doesn't need to
-      if (messages[i].role === 'subagent') continue
-      if (GROUPABLE.has(messages[i].role)) {
-        if (!group.length) groupStart = i
-        group.push(messages[i])
-      } else {
-        if (group.length) { raw.push({ kind: 'group', msgs: group, startIdx: groupStart }); group = [] }
-        raw.push({ kind: 'single', msg: messages[i], idx: i })
-      }
+  // Stable row callbacks. These used to be inline lambdas in the row renderer, so
+  // every render handed AssistantMessage a fresh function identity and its memo()
+  // could never bail out — the boundary was broken at the call site, not by the
+  // renderer. Both read live state from a ref / the store rather than closing over
+  // it, so neither needs a dependency that churns while a turn streams.
+  const handleSpeak = useCallback((content: string) => {
+    if (store.getState().chat.voicePlaying) {
+      window.dispatchEvent(new Event('voice-stop'))
+      dispatch(setVoiceAudio(null))
+      return
     }
-    if (group.length) raw.push({ kind: 'group', msgs: group, startIdx: groupStart })
+    dispatch(setVoiceAudio(null))
+    api.voiceSynthesize(activeSlotRef.current || '', content).catch(() => {})
+  }, [dispatch])
 
-    // Phase 2: group into turns (user message → next user message)
-    const turns: DisplayItem[] = []
-    let turnItems: TurnItem[] = []
-    const hasWorkingSteps = (items: TurnItem[]) =>
-      items.some(t =>
-        (t.kind === 'single' && (t.msg.role === 'tool' || t.msg.role === 'assistant' || t.msg.role === 'streaming')) ||
-        t.kind === 'group'
-      )
-    const flushTurn = (items: TurnItem[], complete: boolean) => {
-      if (hasWorkingSteps(items) && items.length > 2) {
-        turns.push({ kind: 'turn', items, complete })
-      } else {
-        turns.push(...items)
-      }
-    }
-    for (const item of raw) {
-      // A nudge opens a new turn exactly like a user message does — it IS the
-      // turn's prompt. Without this it gets swallowed into the previous turn's
-      // collapsed step group and the cycle chip disappears.
-      if (item.kind === 'single' && (item.msg.role === 'user' || item.msg.role === 'nudge')) {
-        if (turnItems.length > 0) { flushTurn(turnItems, true); turnItems = [] }
-        turns.push(item)
-      } else {
-        turnItems.push(item)
-      }
-    }
-    if (turnItems.length > 0) flushTurn(turnItems, !slotRunning)
-    return turns
-  }, [messages, slotRunning])
+  const handleApplyPlan = useCallback(async (steps: PlanStepInput[]) => {
+    try {
+      const r = await api.planFromChat(steps, planTaskId)
+      if (r.ok) { navigate('/projects?applied=' + (r.task_id || planTaskId)); return true }
+    } catch { /* API error */ }
+    alert(i18nT('pages.chatPage.failed_to_apply_plan'))
+    return false
+  }, [planTaskId, navigate])
+
+  // Grouping depends ONLY on `messages`; `slotRunning` decides one boolean on the
+  // trailing turn. Bundling both in one memo re-ran the whole O(N) grouping pass on
+  // every turn start/stop just to flip that flag, and the new identity cascaded into
+  // messageToDisplayIdx / visibleIndexMap / the virtualizer. Split: group once, then
+  // apply the flag in O(1).
+  const groupedTurns = useMemo(() => groupDisplayItems(messages), [messages])
+
+  const displayItems = useMemo<DisplayItem[]>(
+    () => applyRunningState(groupedTurns, slotRunning),
+    [groupedTurns, slotRunning],
+  )
 
   // Keep the ref in sync so handleRangeChanged / updatePinnedPrompt
   // read the latest displayItems. useEffect rather than render-body
@@ -3447,10 +3503,25 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   }, [activeSlot])
 
   const allQueuedMessages = useMemo(() => messages.filter(m => m.role === 'queued'), [messages])
-  // System sub-agent deliveries collapse into one progress line; only
-  // user-typed queued messages get the interactive (edit/cancel) card stack.
-  const queuedMessages = useMemo(() => allQueuedMessages.filter(m => !isSystemDelivery(m)), [allQueuedMessages])
-  const systemDeliveryCount = allQueuedMessages.length - queuedMessages.length
+  // Only user-typed queued messages get the interactive (edit/cancel) card
+  // stack. System injections are excluded (isNonInteractiveQueued): sub-agent
+  // deliveries collapse into one progress line, and synthetic turn-recovery
+  // continuations (tool refusal / stalled turn / stalled tool / interrupted /
+  // empty response) are machine-facing orchestration — they drain
+  // automatically and must never render as an editable/cancellable "user" card
+  // (editing or cancelling one corrupts the recovery). They surface as a
+  // compact RecoveryCard in the transcript once dequeued instead.
+  const queuedMessages = useMemo(
+    () => allQueuedMessages.filter(m => !isNonInteractiveQueued(m)),
+    [allQueuedMessages],
+  )
+  // Count sub-agent deliveries directly (not by subtraction): recovery
+  // injections are also excluded from queuedMessages, but they are NOT
+  // sub-agent results and must not inflate the delivery progress line.
+  const systemDeliveryCount = useMemo(
+    () => allQueuedMessages.filter(m => isSystemDelivery(m)).length,
+    [allQueuedMessages],
+  )
 
   // Mid-turn steer: inject the composer content into the RUNNING turn instead
   // of queueing for the next one. Mirrors send()'s payload prep so pending
@@ -3670,7 +3741,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // one-shot entrance animation. clientTs keeps the key (and DOM) stable.
     const keyTs = (m.meta?.clientTs as string | undefined) || m.ts
     const key = keyTs ? `${m.role}-${keyTs}` : `${m.role}-${i}`
-    if (m.role === 'thinking') return m.content ? <ThinkingBlock key={key} content={m.content} /> : null
+    if (m.role === 'thinking') return m.content ? <ThinkingBlock key={key} content={m.content} disclosureKey={key} /> : null
     if (m.role === 'tool') {
       // Skip ✅/🚫 completion messages — completion shown via CircleCheckBig icon
       if (!m.content.startsWith('🔧')) return null
@@ -3686,7 +3757,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       if (spawnLaunch) return <SubagentRunCard key={key} launch={spawnLaunch} slot={activeSlot || ''} />
       // Animate tools in the trailing group (after last assistant/streaming text)
       const isInTrailingGroup = slotState === 'tool_running' && i > lastTextIdx
-      return <ToolCallLine key={key} message={m} running={isInTrailingGroup} onFileOpen={handleFileOpen} />
+      return <ToolCallLine key={key} message={m} running={isInTrailingGroup} onFileOpen={handleFileOpen} disclosure={toolDisclosure[key]} disclosureKey={key} onDisclosureChange={setToolDisclosureFor} />
     }
     if (m.role === 'file') {
       try {
@@ -3702,7 +3773,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // controls.
     if (m.role === 'nudge') {
       const ownLoop = nudgeMatchesLoop(m, autoNudgeLoop?.id)
-      return <NudgeCard key={key} message={m} onOpenLoop={ownLoop ? () => setAutoNudgeOpen(true) : undefined} />
+      return <NudgeCard key={key} message={m} disclosureKey={key} onOpenLoop={ownLoop ? () => setAutoNudgeOpen(true) : undefined} />
     }
     if (m.kind === 'stop_event' || m.meta?.kind === 'stop_event') return <StopEventCard key={m.meta?.id as string ?? key} message={m} />
     // A synthetic turn-recovery continuation (tool refusal / stalled turn /
@@ -3711,7 +3782,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // and the deny pattern rather than a full-width bubble of prompt prose.
     if (m.role === 'inject') {
       const recovery = parseRecoveryMessage(m.content)
-      if (recovery) return <RecoveryCard key={key} parsed={recovery} />
+      if (recovery) return <RecoveryCard key={key} parsed={recovery} disclosureKey={key} />
     }
     if (m.role === 'error') return <div key={key} className="bg-danger-subtle text-danger text-[13px] px-3 py-2 rounded-md border border-danger/15 self-center animate-scale-in">{m.content}</div>
     if (m.role === 'notice') return <div key={key} className="bg-card text-muted text-[13px] px-3 py-2 rounded-md border border-border self-center animate-scale-in">{m.content}</div>
@@ -3722,7 +3793,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     }
     // An injected workflow completion event renders as a compact status card
     // (with the full result folded away) instead of a wall of raw JSON.
-    if (isWorkflowCompletionMessage(m)) return <WorkflowCompletionCard key={key} message={m} onFileOpen={handleFileOpen} />
+    if (isWorkflowCompletionMessage(m)) return <WorkflowCompletionCard key={key} message={m} onFileOpen={handleFileOpen} disclosureKey={key} />
     const isUser = m.role === 'user'
     const isStreaming = m.role === 'streaming'
     const isInject = m.role === 'inject'
@@ -3775,17 +3846,10 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 }
                 // End of messages — show footer only if agent is done
                 return !slotRunning
-              })()} onSpeak={() => { const playing = store.getState().chat.voicePlaying; if (playing) { window.dispatchEvent(new Event('voice-stop')); dispatch(setVoiceAudio(null)); return }; dispatch(setVoiceAudio(null)); api.voiceSynthesize(activeSlot || '', m.content).catch(() => {}) }} onRegenerate={i === lastTextIdx && !slotRunning && !regenerating && activeSlot ? handleRegenerate : undefined} variants={m.variants} variantIdx={m.variant_idx} onSwitchVariant={i === lastTextIdx && m.variants && m.variants.length > 1 && activeSlot ? (idx: number) => { api.switchVariant(activeSlot, idx).catch((e: unknown) => {
+              })()} onSpeak={handleSpeak} onRegenerate={i === lastTextIdx && !slotRunning && !regenerating && activeSlot ? handleRegenerate : undefined} variants={m.variants} variantIdx={m.variant_idx} onSwitchVariant={i === lastTextIdx && m.variants && m.variants.length > 1 && activeSlot ? (idx: number) => { api.switchVariant(activeSlot, idx).catch((e: unknown) => {
                 // eslint-disable-next-line no-console -- surface switch-variant failures for debugging
                 console.warn('switch-variant failed', e)
-              }) } : undefined} onFork={handleFork} onPlanFromHere={handlePlanFromHere} forkIndex={forkIndex} onApplyPlan={async (steps: PlanStepInput[]) => {
-                try {
-                  const r = await api.planFromChat(steps, planTaskId)
-                  if (r.ok) { navigate('/projects?applied=' + (r.task_id || planTaskId)); return true }
-                } catch { /* API error */ }
-                alert(i18nT('pages.chatPage.failed_to_apply_plan'))
-                return false
-              }} />
+              }) } : undefined} onFork={handleFork} onPlanFromHere={handlePlanFromHere} forkIndex={forkIndex} onApplyPlan={handleApplyPlan} />
             </div>
           )}
         </div>
@@ -3797,7 +3861,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // apply-plan handler, so it belongs here for correctness. approve/send/
     // dismissApproval are NOT referenced in this renderer (user/approval rows go
     // through renderUserContentCb), so they are omitted to keep it stable.
-  }, [messages, visibleIndexMap, slotRunning, slotState, lastTextIdx, handleFileOpen, handleArtifactOpen, handleFork, handleQuote, handleAsk, chatConfig, activeSlot, regenerating, handleRegenerate, handleEditResend, slotHasMore, renderUserContentCb, highlightTs, activeSlotTitle, mode, dispatch, handleOpenDiff, handlePlanFromHere, navigate, planTaskId, artifactPaths, autoNudgeLoop])
+  }, [messages, visibleIndexMap, slotRunning, slotState, lastTextIdx, handleFileOpen, handleArtifactOpen, handleFork, handleQuote, handleAsk, chatConfig, activeSlot, regenerating, handleRegenerate, handleEditResend, slotHasMore, renderUserContentCb, highlightTs, activeSlotTitle, mode, dispatch, handleOpenDiff, handlePlanFromHere, navigate, planTaskId, artifactPaths, autoNudgeLoop, toolDisclosure, setToolDisclosureFor])
 
   const [mobileSessions, setMobileSessions] = useState(false)
   // Close mobile sessions panel when a session is selected
@@ -3900,6 +3964,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   })
 
   return (
+    <RowDisclosureProvider resetKey={activeSlot}>
     <TagPopoverProvider>
     <div ref={chatContainerRef} className="flex flex-1 min-h-0 h-full overflow-hidden relative">
       <AnimatePresence>
@@ -3947,8 +4012,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               type="button"
               onClick={() => window.dispatchEvent(new CustomEvent('toggle-pin-chat-sidebar'))}
               className="absolute top-[12px] left-2 z-[61] w-[34px] h-[34px] rounded-xl flex items-center justify-center cursor-pointer text-muted hover:text-text transition-colors bg-transparent border-none"
-              title={sidebarOpen ? 'Hide sessions' : 'Show sessions'}
-              aria-label={sidebarOpen ? 'Hide sessions sidebar' : 'Show sessions sidebar'}
+              title={sidebarOpen ? i18nT('pages.chatPage.hide_sessions') : i18nT('pages.chatPage.show_sessions')}
+              aria-label={sidebarOpen ? i18nT('pages.chatPage.hide_sessions_sidebar') : i18nT('pages.chatPage.show_sessions_sidebar')}
             >
               {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
             </button>
@@ -4083,7 +4148,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 </div>
               )}
                 </div>
-              {effectiveMode === 'orchestrator' && <span className="pointer-events-auto"><InfoTip text="Autopilot plans before executing. Each stage needs your approval (or select 'Go All' to run autonomously). Sub-agents are delegated automatically. Plan lessons persist across sessions." /></span>}
+              {effectiveMode === 'orchestrator' && <span className="pointer-events-auto"><InfoTip text={i18nT('pages.chatPage.autopilot_plans_before_executing_each_stage_need')} /></span>}
               <InboundLinkChip slotKey={activeSlot} />
               {/* Trailing controls grouped under a single ml-auto so multiple
                   right-aligned items don't each absorb free space (two ml-auto
@@ -4117,8 +4182,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 <Clickable
                   className="flex items-center justify-center w-7 h-7 rounded-md transition-colors bg-transparent border-none shrink-0 pointer-events-auto text-muted hover:text-text hover:bg-bg-hover cursor-pointer"
                   onClick={toggleAct}
-                  title="Open activity panel"
-                  aria-label="Open activity panel"
+                  title={i18nT('pages.chatPage.open_activity_panel')}
+                  aria-label={i18nT('pages.chatPage.open_activity_panel')}
                 >
                   <PanelRight size={15} />
                 </Clickable>
@@ -4274,6 +4339,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                         return (
                         <CollapsibleToolGroup
                           count={it.msgs.filter(m => m.role !== 'permission').length}
+                          disclosureKey={`ctg-g-${it.startIdx}`}
                           hasPermission={false}
                           isRunning={false}
                           permissionMeta={unresolvedPerms.at(-1)?.meta as Record<string, unknown> | undefined}
@@ -4289,7 +4355,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                       })() : renderMessage(it.idx, it.msg)}
                     </div>
                   }
-                  return <div key={vi.key} ref={virt.measureRef(vi.index)} data-display-index={displayIdx}><TurnBlock turn={item} renderItem={renderTurnItem} collapseAll={chatConfig.collapseAllSteps} appToolCallIds={appToolCallIds} /></div>
+                  return <div key={vi.key} ref={virt.measureRef(vi.index)} data-display-index={displayIdx}><TurnBlock turn={item} renderItem={renderTurnItem} collapseAll={chatConfig.collapseAllSteps} appToolCallIds={appToolCallIds} disclosure={turnDisclosure[vi.key]} onDisclosureChange={(next: boolean) => setTurnDisclosureFor(vi.key, next)} /></div>
                 }
                 return <div key={vi.key} ref={virt.measureRef(vi.index)} data-display-index={displayIdx} className={`px-5 mx-auto w-full py-1`} style={{
                   maxWidth: 'var(--mc-content-width, 900px)',
@@ -4307,6 +4373,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 return (
                 <CollapsibleToolGroup
                   count={item.msgs.filter(m => m.role !== 'permission').length}
+                  disclosureKey={`ctg-${vi.key}`}
                   hasPermission={false}
                   isRunning={slotRunning && displayIdx === displayItems.length - 1}
                   permissionMeta={unresolvedGroupPerms.at(-1)?.meta as Record<string, unknown> | undefined}
@@ -4490,6 +4557,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               voiceLevel={voice.level}
               voiceDeviceLabel={voice.deviceLabel}
               onClearVoiceError={voice.clearError}
+              voiceDictationPanel={sttDictationPanel}
+              voiceSampleRef={voice.sampleRef}
+              voicePartial={voice.partial}
               onVoiceToggle={voiceInputSupported ? toggleVoice : undefined}
               onVoicePrewarm={voiceInputSupported ? voice.prewarm : undefined}
               agentName={currentSlot?.agent || 'default'}
@@ -4588,6 +4658,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             </div>
             <VoiceDisabledModal
               open={voiceSetupOpen}
+              reason={sttEnabled && !sttAvailable ? 'unavailable' : 'disabled'}
+              provider={sttProvider}
               onClose={() => setVoiceSetupOpen(false)}
               onOpenSettings={() => {
                 setVoiceSetupOpen(false)
@@ -4675,7 +4747,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 onJump={jumpToSearchResult}
               />
             ) : (
-              <div className="px-4 py-3 text-[13px] text-muted">{search.term ? 'No results' : 'Type to search this conversation.'}</div>
+              <div className="px-4 py-3 text-[13px] text-muted">{search.term ? i18nT('pages.chatPage.no_results') : i18nT('pages.chatPage.type_to_search_this_conversation')}</div>
             )}
           </DetailPanel>
         )}
@@ -4693,7 +4765,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
           >
             <SidePanel
               tabsCtl={tabsCtl}
-              subagents={subagents} toolLog={toolLog} slot={activeSlot || ''}
+              slot={activeSlot || ''}
               files={touchedFiles.files} onFileOpen={handleFileOpen} onFileRemove={touchedFiles.removeFile} onFilesClear={touchedFiles.clearBySource}
               onArtifactOpen={handleArtifactOpen}
               projectDir={currentSlot?.project || undefined} navLinks={chatNav.links} navResolving={chatNav.resolving}
@@ -4728,7 +4800,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             >
               <SidePanel
                 tabsCtl={tabsCtl}
-                subagents={subagents} toolLog={toolLog} slot={activeSlot || ''}
+                slot={activeSlot || ''}
                 files={touchedFiles.files} onFileOpen={handleFileOpen} onFileRemove={touchedFiles.removeFile} onFilesClear={touchedFiles.clearBySource}
                 onArtifactOpen={handleArtifactOpen}
                 projectDir={currentSlot?.project || undefined} navLinks={chatNav.links} navResolving={chatNav.resolving}
@@ -4747,6 +4819,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       )}
     </div>
     </TagPopoverProvider>
+    </RowDisclosureProvider>
   )
 }
 

@@ -162,12 +162,12 @@ function SubagentPane({ a, slot, onClick, selected }: { a: SubagentActivity; slo
   // narrow rail it was the part that survived truncation while the actual
   // status got clipped. Show the status; keep the full phrase as the tooltip.
   const statusLabel = isPending
-    ? 'Pending Approval'
-    : a.status === 'tool' ? 'Running Tool'
-      : a.status === 'running' ? (a.streaming ? 'Running' : 'Starting…')
-        : a.status === 'done' ? 'Complete'
-          : a.status === 'stopped' ? 'Stopped'
-            : a.error?.includes('Cancelled') ? 'Cancelled' : 'Error'
+    ? i18nT('pages.chat.activityViewer.pending_approval')
+    : a.status === 'tool' ? i18nT('pages.chat.activityViewer.running_tool')
+      : a.status === 'running' ? (a.streaming ? i18nT('pages.chat.activityViewer.running') : i18nT('pages.chat.activityViewer.starting'))
+        : a.status === 'done' ? i18nT('pages.chat.activityViewer.complete')
+          : a.status === 'stopped' ? i18nT('pages.chat.activityViewer.stopped')
+            : a.error?.includes('Cancelled') ? i18nT('pages.chat.activityViewer.cancelled') : i18nT('pages.chat.activityViewer.error')
 
   return (
     // Card-level mouse convenience that selects the subagent; it wraps its own
@@ -275,7 +275,7 @@ function ApprovalEntry({ entry, slot }: { entry: ToolActivity; slot: string }) {
     <div className={`mx-2 mb-2 rounded-lg border overflow-hidden shadow-sm transition-all ${isResolved ? 'border-ok/40 bg-card' : 'border-warn/40 bg-warn/5'}`}>
       <div className="flex items-center gap-2 px-3 py-2">
         <span className="shrink-0 flex items-center">{isResolved ? <CheckCircle size={15} className="text-green-400" /> : <Lock size={15} className="text-muted" />}</span>
-        <span className="text-[13px] font-semibold text-text truncate min-w-0">{isResolved ? (decisionLabel[localDecision || ''] || 'Resolved') : 'Approval Needed'}</span>
+        <span className="text-[13px] font-semibold text-text truncate min-w-0">{isResolved ? (decisionLabel[localDecision || ''] || i18nT('pages.chat.activityViewer.resolved')) : i18nT('pages.chat.activityViewer.approval_needed')}</span>
         <span className="text-[11px] text-muted/40 font-mono ml-auto shrink-0">{fmtTime(entry.ts)}</span>
       </div>
       {!isResolved && <div className="px-3 pb-2 text-[13px] text-muted/70">{entry.text}</div>}
@@ -321,14 +321,14 @@ function FilePreview({ path, slot, onBack, onFileSave, onSubmitComments }: {
         const res = await fetch(fileReadUrl(path))
         const text = res.ok
           ? await res.text()
-          : res.status === 404 ? '_File not found on disk. It may have been moved or deleted._'
-            : '_Unable to read file._'
+          : res.status === 404 ? i18nT('pages.chat.activityViewer.file_not_found_on_disk_it_may_have_been_moved_or')
+            : i18nT('pages.chat.activityViewer.unable_to_read_file')
         return { text, ok: res.ok }
       } catch {
         // Network-level failure (fetch rejected) — return a NOT-ok result rather
         // than throwing, so `data` is always defined and the editor is never
         // mounted over an empty buffer that a save could write to the file.
-        return { text: '_Unable to read file._', ok: false }
+        return { text: i18nT('pages.chat.activityViewer.unable_to_read_file'), ok: false }
       }
     },
     staleTime: 10_000,
@@ -434,7 +434,7 @@ function FilePreview({ path, slot, onBack, onFileSave, onSubmitComments }: {
           // over the real (or temporarily-unreadable) file. Offer a retry.
           <div className="flex flex-col items-center justify-center h-full gap-3 text-center px-6">
             <span className="text-[13px] text-muted">
-              {data?.text ? data.text.replace(/^_|_$/g, '') : 'Unable to read this file.'}
+              {data?.text ? data.text.replace(/^_|_$/g, '') : i18nT('pages.chat.activityViewer.unable_to_read_this_file')}
             </span>
             <button
               onClick={() => refetch()}
@@ -931,7 +931,7 @@ function SessionArtifactsTab({ slot, onFileOpen, onArtifactOpen }: { slot: strin
                 onClick={() => setShowAllLibrary(true)}
                 className="self-start mt-1 px-2 py-1 text-[11px] text-muted hover:text-text bg-transparent border-none cursor-pointer transition-colors"
               >
-                {i18nT('pages.chat.activityViewer.show_all')}{cappedLibrary})
+                {i18nT('pages.chat.activityViewer.show_all_count', { count: cappedLibrary })}
               </button>
             )}
           </>
@@ -1212,7 +1212,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
             />
           ) : (
             <div className="flex-1 flex items-center justify-center h-full text-muted text-[13px] py-8 px-6 text-center">
-              No issues in this session yet. Mention a GitHub or GitLab issue link and it will appear here.
+              {i18nT('pages.chat.activityViewer.no_issues_in_this_session_yet_mention_a_github_o')}
             </div>
           )}
         </div>
@@ -1231,7 +1231,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
                   disabled={retryingFailed}
                   data-testid="retry-failed-btn"
                 >
-                  <RotateCcw size={11} className={retryingFailed ? 'animate-spin' : ''} /> {i18nT('pages.chat.activityViewer.retry_failed')}{failedRetryableIds.length})
+                  <RotateCcw size={11} className={retryingFailed ? 'animate-spin' : ''} /> {i18nT('pages.chat.activityViewer.retry_failed_count', { count: failedRetryableIds.length })}
                 </button>
               )}
               {terminalIds.length > 0 && (
@@ -1240,7 +1240,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
                   onClick={dismissDone}
                   data-testid="dismiss-done-btn"
                 >
-                  <X size={11} /> {i18nT('pages.chat.activityViewer.dismiss_done')}{terminalIds.length})
+                  <X size={11} /> {i18nT('pages.chat.activityViewer.dismiss_done_count', { count: terminalIds.length })}
                 </button>
               )}
             </div>
@@ -1281,7 +1281,7 @@ export default function ActivityViewer({ subagents, toolLog, open, onToggle, slo
                   onClick={() => setShowAllSubagents(true)}
                   data-testid="show-all-subagents"
                 >
-                  {i18nT('pages.chat.activityViewer.show_all')}{ids.length})
+                  {i18nT('pages.chat.activityViewer.show_all_count', { count: ids.length })}
                 </button>
               )}
             </>

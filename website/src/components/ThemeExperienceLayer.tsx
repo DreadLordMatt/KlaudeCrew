@@ -697,7 +697,7 @@ export default function ThemeExperienceLayer() {
       >
         <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 text-text shadow-2xl">
           <h2 id="theme-consent-title" className="text-base font-semibold text-text-strong">
-            {i18nT('components.themeExperienceLayer.enable')}{active?.name}{i18nT('components.themeExperienceLayer.experience')}
+            {i18nT('components.themeExperienceLayer.enable_named_experience', { name: active?.name })}
           </h2>
           <p className="mt-2 text-sm text-muted">
             {i18nT('components.themeExperienceLayer.this_is_an_experience_theme_enabling_it_will')}
@@ -818,8 +818,8 @@ export default function ThemeExperienceLayer() {
         <button
           type="button"
           onClick={toggleMute}
-          title={muted ? 'Unmute theme sounds' : 'Mute theme sounds'}
-          aria-label={muted ? 'Unmute theme sounds' : 'Mute theme sounds'}
+          title={muted ? i18nT('components.themeExperienceLayer.unmute_theme_sounds') : i18nT('components.themeExperienceLayer.mute_theme_sounds')}
+          aria-label={muted ? i18nT('components.themeExperienceLayer.unmute_theme_sounds') : i18nT('components.themeExperienceLayer.mute_theme_sounds')}
           className="fixed bottom-4 right-4 z-[50] flex h-9 w-9 items-center justify-center rounded-full border border-border bg-card text-text shadow-lg hover:bg-bg-hover"
         >
           {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}

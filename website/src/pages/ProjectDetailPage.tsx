@@ -182,7 +182,7 @@ export default function ProjectDetailPage({ run, onRetry, onRefresh }: Props) {
               title={i18nT('pages.projectDetailPage.export_this_plan_as_a_yaml_workflow_re_importabl')}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-[13px] rounded border border-border text-muted cursor-pointer transition-all hover:text-accent hover:border-accent ${exportMutation.isPending ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
-              <Download size={13} /> {exportMutation.isPending ? 'Exporting…' : 'Export YAML'}
+              <Download size={13} /> {exportMutation.isPending ? i18nT('pages.projectDetailPage.exporting') : i18nT('pages.projectDetailPage.export_yaml')}
             </button>
           )}
           {!isPlanning && <PixelCanvasWidget run={run} />}
@@ -197,7 +197,7 @@ export default function ProjectDetailPage({ run, onRetry, onRefresh }: Props) {
           return (
             <div className="mx-4 mt-2 px-4 py-2.5 bg-[#eab308]/10 border border-[#eab308]/40 rounded-md flex items-center gap-3 text-[13px] shrink-0">
               <span className="text-[#eab308]"><AlertTriangle size={16} /></span>
-              <span className="text-[#eab308]/90 flex-1"><strong>{i18nT('pages.projectDetailPage.approval_required')}</strong> {i18nT('pages.projectDetailPage.task')} {t.index} "{t.title}{i18nT('pages.projectDetailPage.is_waiting_for_your_decision')}</span>
+              <span className="text-[#eab308]/90 flex-1"><strong>{i18nT('pages.projectDetailPage.approval_required')}</strong> {i18nT('pages.projectDetailPage.task_is_waiting_for_your_decision', { index: t.index, title: t.title })}</span>
               <button onClick={() => setSelectedTask(t.index)} className="px-3 py-1 bg-[#eab308] hover:bg-[#ca8a04] text-black text-[13px] rounded font-medium cursor-pointer border-none transition-all">{i18nT('pages.projectDetailPage.go_to_task')}</button>
             </div>
           );

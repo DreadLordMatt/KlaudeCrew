@@ -64,6 +64,7 @@ from kiro_crew.dashboard.chat_utils import (
     _maybe_inject_persona,
     _normalize_model,
     _redact_for_display,
+    _redact_meta_for_role,
     _redact_tool_field,
     _remove_queued_by_id,
     _validate_tool_name,
@@ -156,7 +157,6 @@ from kiro_crew.security import (
 from kiro_crew.sel import sel
 from kiro_crew.session import SessionClosingError
 from kiro_crew.slack.handler import post_linked_approval, resolve_linked_approval
-from kiro_crew.stats import Stats
 from kiro_crew.validation import ValidationError, infer_use_case, validate_ask_user_question
 from kiro_crew.widget_artifacts import register_widgets_off_loop
 
@@ -767,7 +767,39 @@ def _mark_mcp_oauth_completed(
         break
     if target is None:
         return
-    new_meta = dict(target.get("meta") or {})
+    # Redact the RESTORED payload before it is re-emitted. This function copies the
+    # whole stored dict into both slot.messages and the `chat_message_update`
+    # broadcast below, and that broadcast bypasses _prepare_messages — a genuine
+    # egress point.
+    #
+    # Scope of the exposure, stated precisely: the SAVE path already redacts meta
+    # (`_build_message_entry`), and `ConversationLog.append` has no `meta` parameter
+    # at all, so meta this version wrote to disk comes back already clean. What this
+    # guards is history lines this version did not write — legacy lines, a tampered
+    # session file, or the verbatim-preserved foreign byte ranges. That is the same
+    # threat model the sibling gates are written against, so it is defence in depth
+    # rather than a live hole.
+    #
+    # The matching loop above reads only control fields (`server_name`,
+    # `completed`, `failed`), which is why this reader looked safe on a first pass.
+    # What decides safety is not which fields a reader INSPECTS but whether it
+    # re-emits the dict. This one does.
+    #
+    # CAREFUL — `_redact_meta_for_role` is STRICTER than the emit-path gate and does
+    # NOT preserve realistic `oauth_url`s: it calls `redact_exfiltration_urls`,
+    # whose query-length (>=200) and base64-blob heuristics blank a real Google OIDC
+    # or GitHub PKCE consent URL. (Measured: those two are blanked; only a short URL
+    # survives.) The emit-path gate `_oauth_url_contains_credential` deliberately
+    # exempts OAuth params from exactly those heuristics — its docstring notes they
+    # "would reject every real OAuth URL".
+    #
+    # That is harmless HERE only because `oauth_url` is dead data by this point:
+    # every path through this function sets `completed` or `failed`, and
+    # McpOAuthBanner.tsx returns on the `failed` (line 50) and `completed` (line 61)
+    # branches BEFORE the link-rendering branch (line 73). Do NOT reuse this gate on
+    # a path where the authorize link is still rendered — there it would break the
+    # user's ability to authorize an MCP server.
+    new_meta = _redact_meta_for_role("mcp_oauth", dict(target.get("meta") or {}))
     if success:
         new_meta["completed"] = True
         new_meta.pop("failed", None)
@@ -1263,19 +1295,26 @@ def _resolve_channel_target(state: Any, session_key: str, link: Any) -> Any:
         return None
     try:
         from kiro_crew.platform.context import PlatformCompositionError
-        from kiro_crew.platform.governance_profiles import governance_permits
+        from kiro_crew.platform.governance_profiles import vet_and_audit
 
-        decision = governance_permits(
+        # vet_and_audit == governance_permits + a SEL governance-decision record
+        # for BOTH grant and denial. Every call here is a real send/link
+        # decision (the read-only links[].live projection uses the in-memory
+        # state._channel_link_is_live instead), so a governance decision at this
+        # egress chokepoint MUST land in the SEL trail — the security contract
+        # requires every permission decision to be audited.
+        decision = vet_and_audit(
             "channels",
             link.channel_type,
             session_key=session_key,
+            tool_name="chat.channel_mirror",
             # fail_closed=True: this is an EGRESS chokepoint on a network
             # surface, so a degraded governance evaluation must DENY rather than
-            # degrade-to-permit. governance_permits swallows its own internal
-            # errors and returns a permissive Decision by default, which the
-            # outer except below can never observe. Matches the other
-            # "channels"-scope gates: messaging/identity.py, slack/gateway.py,
-            # dashboard/handlers_system.py.
+            # degrade-to-permit. vet_and_audit forwards this to
+            # governance_permits, which swallows its own internal errors and
+            # returns a non-permissive Decision under fail_closed. Matches the
+            # other "channels"-scope gates: messaging/identity.py,
+            # slack/gateway.py, dashboard/handlers_system.py.
             fail_closed=True,
         )
         # Default False, not True: a Decision without ``permitted`` is an
@@ -2790,6 +2829,7 @@ async def _run_chat(
                 mode=slot.mode,
                 blocks_reads=slot.blocks_reads,
                 provider_type=cfg.agent.provider,
+                runtime_source="dashboard",
                 exclude_last_n=1,
                 folder_path=folder_path,
                 model_window=model_window,
@@ -4306,19 +4346,6 @@ async def _run_chat(
                 except (TypeError, ValueError):
                     _turn_elapsed_ms = int((time.monotonic() - _turn_t0) * 1000)
                 if _u.input_tokens or _u.output_tokens or _u.credits:
-                    stats = Stats()
-                    stats.inc_input_tokens(_u.input_tokens)
-                    stats.inc_output_tokens(_u.output_tokens)
-                    if _u.cache_creation_tokens:
-                        stats.inc_cache_creation_tokens(_u.cache_creation_tokens)
-                    if _u.cache_read_tokens:
-                        stats.inc_cache_read_tokens(_u.cache_read_tokens)
-                    if _u.cost_usd:
-                        stats.inc_cost_usd(_u.cost_usd)
-                    if _u.num_turns:
-                        stats.inc_turns(_u.num_turns)
-                    if _u.duration_ms:
-                        stats.inc_duration_ms(_u.duration_ms)
                     try:
                         _provider_name = cfg.agent.provider  # type: ignore[possibly-undefined]
                     except (NameError, AttributeError):
@@ -4351,6 +4378,10 @@ async def _run_chat(
                         agent=read_effective_agent(client) or slot.agent or "",
                         context_used=_ctx_used,
                         context_window=_ctx_window,
+                        # Same wall clock the turn-duration histogram below is
+                        # given, so the row store and the histogram can never
+                        # disagree about one turn. acp reports 0 here.
+                        elapsed_ms=_turn_elapsed_ms,
                         model_source=client,
                     )
                 # ── Turn-completion histogram (OTel M2) ──
@@ -4766,7 +4797,11 @@ async def _run_chat(
         ):
             _recovery_body = build_refusal_recovery_prompt(_refusal_reasons)
             if _recovery_body:
-                slot.queue_insert(0, f"{REFUSAL_RECOVERY_PREFIX}\n{_recovery_body}")
+                slot.queue_insert(
+                    0,
+                    f"{REFUSAL_RECOVERY_PREFIX}\n{_recovery_body}",
+                    kind=SYNTHETIC_RECOVERY_KIND,
+                )
 
         # ── Bidirectional sync: mirror response to linked Slack thread ──
         if assistant_text and state.slack_client and _mirror_thread and _mirror_chan:

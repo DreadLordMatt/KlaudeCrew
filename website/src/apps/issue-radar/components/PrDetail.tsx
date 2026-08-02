@@ -188,7 +188,7 @@ function CommentCard({
         <span className="font-semibold text-text-strong">{author ?? 'ghost'}</span>
         <MemberBadge role={role} assoc={assoc} />
         <span className="text-muted">
-          {opening ? `opened this ${terms.changeRequestTitle}` : 'commented'}
+          {opening ? `opened this ${terms.changeRequestTitle}` : i18nT('apps.issueRadar.components.prDetail.commented')}
         </span>
         <span className="text-muted">· {when ? <RelTime iso={when} /> : ''}</span>
       </div>
@@ -326,7 +326,7 @@ function eventVisual(
         body: (
           <>
             {who} {i18nT('apps.issueRadar.components.prDetail.referenced_this_in')}{' '}
-            <a href={ev.source?.url} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+            <a href={safeHttpUrl(ev.source?.url ?? '') ?? undefined} target="_blank" rel="noreferrer" className="text-accent hover:underline">
               {ev.source?.is_pr ? providerTerms(repoRef).changeRequestShort : 'issue'}
               {providerTerms(repoRef).sigil}{ev.source?.number}
             </a>
@@ -426,7 +426,7 @@ function AutoReviewChecks(
           would hide failing CI behind a reassuring sentence. */}
       {!loading && checks.length === 0 && (
         <span className={failed ? 'text-warn' : 'text-muted'}>
-          {failed ? 'Check status unavailable' : 'No automated checks'}
+          {failed ? i18nT('apps.issueRadar.components.prDetail.check_status_unavailable') : i18nT('apps.issueRadar.components.prDetail.no_automated_checks')}
         </span>
       )}
 
@@ -674,13 +674,13 @@ export default function PrDetail({ pull }: { pull: PullRequest }) {
               <span className="inline-flex items-center gap-1">
                 <button
                   onClick={copyLink}
-                  title={copied ? 'Link copied' : `Copy link to this ${terms.changeRequestTitle}`}
+                  title={copied ? i18nT('apps.issueRadar.components.prDetail.link_copied') : `Copy link to this ${terms.changeRequestTitle}`}
                   aria-label={`Copy link to this ${terms.changeRequestTitle}`}
                   className="inline-flex items-center -ml-0.5 p-0.5 cursor-pointer bg-transparent text-muted hover:text-accent"
                 >
                   {copied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
                 </button>
-                <a href={detail?.url ?? pull.url} target="_blank" rel="noreferrer" title={`Open on ${terms.providerName}`} className="font-mono text-muted hover:text-accent hover:underline">
+                <a href={safeHttpUrl(detail?.url ?? pull.url ?? '') ?? undefined} target="_blank" rel="noreferrer" title={`Open on ${terms.providerName}`} className="font-mono text-muted hover:text-accent hover:underline">
                   #{pull.number}
                 </a>
               </span>

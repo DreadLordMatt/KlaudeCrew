@@ -57,7 +57,7 @@ function ttlToSeconds(ttl: string): number {
 
 /** Compact human duration: "4h 12m", "12m", or "<1m". */
 function fmtDuration(secs: number): string {
-  if (secs < 60) return '<1m'
+  if (secs < 60) return i18nT('components.instanceTabBar.1m')
   const h = Math.floor(secs / 3600)
   const m = Math.floor((secs % 3600) / 60)
   return h > 0 ? (m > 0 ? `${h}h ${m}m` : `${h}h`) : `${m}m`
@@ -252,19 +252,19 @@ export default function InstanceTabBar({
       const total = ttlToSeconds(activeInst.ttl)
       if (typeof rem === 'number' && total > 0) {
         const untilRefresh = rem - total * (1 - REFRESH_AT_ELAPSED_FRAC)
-        tunnelLabel = untilRefresh > 0 ? `connected · refresh ${fmtDuration(untilRefresh)}` : 'connected · refreshing…'
+        tunnelLabel = untilRefresh > 0 ? `connected · refresh ${fmtDuration(untilRefresh)}` : i18nT('components.instanceTabBar.connected_refreshing')
         tunnelTitle = `Tunnel connected. Token valid ${fmtDuration(rem)}; auto-refresh ${untilRefresh > 0 ? `in ${fmtDuration(untilRefresh)}` : 'imminent'}.`
       } else {
-        tunnelLabel = 'connected'
-        tunnelTitle = 'Tunnel connected.'
+        tunnelLabel = i18nT('components.instanceTabBar.connected')
+        tunnelTitle = i18nT('components.instanceTabBar.tunnel_connected')
       }
     } else if (st === 'connecting') {
       tunnelDotCls = 'bg-[var(--warn)]'
-      tunnelLabel = 'connecting…'
-      tunnelTitle = 'Tunnel connecting…'
+      tunnelLabel = i18nT('components.instanceTabBar.connecting')
+      tunnelTitle = i18nT('components.instanceTabBar.tunnel_connecting')
     } else {
       tunnelDotCls = 'bg-[var(--danger)]'
-      tunnelLabel = st === 'error' ? 'tunnel error' : (st || 'disconnected')
+      tunnelLabel = st === 'error' ? i18nT('components.instanceTabBar.tunnel_error') : (st || 'disconnected')
       tunnelTitle = activeInst.status?.error || `Tunnel ${st || 'disconnected'}.`
     }
   }

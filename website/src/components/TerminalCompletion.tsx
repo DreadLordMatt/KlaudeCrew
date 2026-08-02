@@ -517,9 +517,13 @@ export default function TerminalCompletion({ term, sessionId, active }: {
   /* ── Bottom bar: what the highlighted row means ── */
   const caption = useMemo(() => {
     if (!sug) return ''
-    return sug.entries[selected]?.here
-      ? 'use this folder'
-      : sug.dir + (sug.truncated ? ' (truncated)' : '')
+    if (sug.entries[selected]?.here) return i18nT('components.terminalCompletion.use_this_folder')
+    // One whole key per rendered caption: appending a translated " (truncated)"
+    // fragment to the path would leave translators a bare parenthetical with no
+    // sentence to place it in.
+    return sug.truncated
+      ? i18nT('components.terminalCompletion.dir_truncated', { dir: sug.dir })
+      : sug.dir
   }, [sug, selected])
 
   if (!sug) return null
@@ -546,7 +550,7 @@ export default function TerminalCompletion({ term, sessionId, active }: {
             key={e.here ? '\u0000here' : e.name}
             role="option"
             aria-selected={i === selected}
-            aria-label={e.here ? 'use this folder' : e.name}
+            aria-label={e.here ? i18nT('components.terminalCompletion.use_this_folder') : e.name}
             className={`flex items-center gap-1.5 px-2 font-mono text-[12px] whitespace-nowrap ${
               i === selected ? 'bg-accent-subtle text-text-strong' : 'text-text'
             }`}

@@ -36,7 +36,8 @@ import { parseUnifiedDiff } from '../utils/parseUnifiedDiff'
 import CopyBranchButton from './CopyBranchButton'
 import hljs from '../utils/hljs'
 import DOMPurify from 'dompurify'
-import { DIFF_BG, DIFF_FG } from '../utils/diffUtils'
+import { DIFF_BG, DIFF_NUM, DIFF_EDGE } from '../utils/diffUtils'
+import UnchangedSeparator from './UnchangedSeparator'
 import GithubLogo from './icons/GithubLogo'
 import GitlabLogo from './icons/GitlabLogo'
 import { timeAgo } from '../utils/timeAgo'
@@ -175,7 +176,7 @@ export function pullRequestMergeBlocker(source: PullRequestSource): PullRequestM
   if (source.mergeable === 'conflicting') {
     return {
       tone: 'danger',
-      title: 'Merge conflicts',
+      title: i18nT('components.pullRequestPanel.merge_conflicts'),
       detail: `This branch has conflicts with ${base} and cannot be merged until they are resolved.`,
       handoff: [
         ...handoffHeader('Merge conflict'),
@@ -188,7 +189,7 @@ export function pullRequestMergeBlocker(source: PullRequestSource): PullRequestM
     // merge method) -- a merge commit cannot unblock this MR.
     return {
       tone: 'warn',
-      title: 'Rebase required',
+      title: i18nT('components.pullRequestPanel.rebase_required'),
       detail: `This project requires the branch to be rebased onto ${base} before merging; a merge commit will not unblock it.`,
       handoff: [
         ...handoffHeader('Rebase required'),
@@ -199,7 +200,7 @@ export function pullRequestMergeBlocker(source: PullRequestSource): PullRequestM
   if (source.mergeStateStatus === 'behind') {
     return {
       tone: 'warn',
-      title: 'Branch is behind',
+      title: i18nT('components.pullRequestPanel.branch_is_behind'),
       detail: `This branch is out of date with ${base} and must be updated before merging.`,
       handoff: [
         ...handoffHeader('Out-of-date branch'),
@@ -210,8 +211,8 @@ export function pullRequestMergeBlocker(source: PullRequestSource): PullRequestM
   if (source.mergeStateStatus === 'blocked') {
     return {
       tone: 'warn',
-      title: 'Merge blocked',
-      detail: 'Branch protection requirements (approving reviews or required checks) are not yet satisfied.',
+      title: i18nT('components.pullRequestPanel.merge_blocked'),
+      detail: i18nT('components.pullRequestPanel.branch_protection_requirements_approving_reviews'),
     }
   }
   return null
@@ -229,9 +230,9 @@ export function stateLabel(source: PullRequestSource): string {
   // Terminal states win over draft, matching pullRequestLifecycleState below:
   // GitLab keeps `draft` set on a merge request that was closed while still a
   // draft, and the badge must not contradict the tab's lifecycle glyph.
-  if (source.mergedAt || state === 'merged') return 'Merged'
-  if (state === 'closed') return 'Closed'
-  if (source.draft) return 'Draft'
+  if (source.mergedAt || state === 'merged') return i18nT('components.pullRequestPanel.merged')
+  if (state === 'closed') return i18nT('components.pullRequestPanel.closed')
+  if (source.draft) return i18nT('components.pullRequestPanel.draft')
   const label = source.state || 'Open'
   return label.charAt(0).toUpperCase() + label.slice(1).toLowerCase()
 }
@@ -281,7 +282,9 @@ const CI_META: Record<NonNullable<PullRequestStatus['ci']>, { icon: typeof Check
 
 /** State markers for one pull-request tab in the source strip: lifecycle glyph
  * plus, while the pull request is still live, its CI rollup. CI is suppressed
- * once merged or closed — the lifecycle glyph is the terminal signal there. */
+ * once merged or closed — the lifecycle glyph is the terminal signal there.
+ * `ChatSidebar.tsx::showsChipCi` applies the same rule to the sidebar chip; the
+ * two render the same pull request and must not disagree about its lifecycle. */
 function SourceTabState({ status }: { status: PullRequestStatus | undefined }) {
   const lifecycle = status?.state
   const ci = lifecycle === 'merged' || lifecycle === 'closed' ? undefined : status?.ci
@@ -339,28 +342,25 @@ function DiffView({ patch, path }: { patch: string; path: string }) {
   }, [rows, language, ready])
   if (!ready) return <div className="px-3 py-3 text-[11px] text-muted">{i18nT('components.pullRequestPanel.loading_diff')}</div>
   return (
-    <div className="min-w-max text-[11px] leading-5 font-mono">
+    <div className="text-[11px] leading-5 font-mono">
       {rows.map((row, index) => {
         if (row.kind === 'hunk-gap') {
-          return (
-            <div key={index} className="flex items-center gap-2 px-3 py-1 bg-bg-elevated/60 text-muted select-none">
-              {row.hiddenCount > 0 ? `${row.hiddenCount} unmodified ${row.hiddenCount === 1 ? 'line' : 'lines'}` : <span className="w-full border-t border-border" />}
-            </div>
-          )
+          // Leading gap (diff starts mid-file): the gutter numbers already
+          // carry the position — render nothing.
+          if (index === 0) return null
+          if (row.hiddenCount <= 0) return <div key={index} className="border-t border-border/60" />
+          return <UnchangedSeparator key={index} count={row.hiddenCount} />
         }
         const tone = row.kind === 'add' ? DIFF_BG.add : row.kind === 'del' ? DIFF_BG.del : ''
-        const marker = row.kind === 'add' ? '+' : row.kind === 'del' ? '-' : ' '
-        const markerTone = row.kind === 'add' ? DIFF_FG.add : row.kind === 'del' ? DIFF_FG.del : 'text-muted/40'
+        const edge = row.kind === 'add' || row.kind === 'del' ? ` ${DIFF_EDGE[row.kind]}` : ''
         const html = highlighted?.[index]
         return (
-          <div key={index} className={`flex min-w-fit ${tone}`}>
-            <span className="w-10 shrink-0 px-1 text-right text-muted/50 select-none border-r border-border/30">{row.oldLine ?? ''}</span>
-            <span className="w-10 shrink-0 px-1 text-right text-muted/50 select-none border-r border-border/30">{row.newLine ?? ''}</span>
-            <span className={`w-4 shrink-0 text-center select-none ${markerTone}`}>{marker}</span>
+          <div key={index} className={`flex ${tone}${edge}`}>
+            <span className={`w-10 shrink-0 px-1 text-right select-none border-r border-border ${DIFF_NUM[row.kind]}`}>{(row.kind === 'del' ? row.oldLine : row.newLine) ?? ''}</span>
             {html !== undefined && html !== '' ? (
-              <span className="hljs flex-1 whitespace-pre px-2 !bg-transparent" dangerouslySetInnerHTML={{ __html: html }} />
+              <span className="hljs flex-1 min-w-0 whitespace-pre-wrap break-words px-2 !bg-transparent" dangerouslySetInnerHTML={{ __html: html }} />
             ) : (
-              <span className="flex-1 whitespace-pre px-2 text-text">{row.text}</span>
+              <span className="flex-1 min-w-0 whitespace-pre-wrap break-words px-2 text-text">{row.text}</span>
             )}
           </div>
         )
@@ -385,7 +385,7 @@ function ChangeRow({ file }: { file: PullRequestFile }) {
         <span className="text-[11px] shrink-0"><span className="text-ok">+{file.additions}</span> <span className="text-danger">-{file.deletions}</span></span>
       </Btn>
       {open && (
-        <div className="border-t border-border overflow-x-auto">
+        <div className="border-t border-border">
           {file.patch ? (
             <DiffView patch={file.patch} path={file.path} />
           ) : (
@@ -479,12 +479,12 @@ function CommentCard({ comment, url, onAddToChat }: { comment: PullRequestCommen
           onClick={() => setExpanded(value => !value)}
           className="shrink-0 p-0.5 rounded border-none bg-transparent text-muted hover:text-text hover:bg-bg-hover cursor-pointer"
           aria-expanded={expanded}
-          aria-label={expanded ? 'Collapse comment' : 'Expand comment'}
+          aria-label={expanded ? i18nT('components.pullRequestPanel.collapse_comment') : i18nT('components.pullRequestPanel.expand_comment')}
         >
           {expanded ? <ChevronDown className="lucide-inline" /> : <ChevronRight className="lucide-inline" />}
         </Btn>
         <MessageSquare className="lucide-inline text-muted shrink-0" />
-        <span className="text-[12px] font-medium text-text truncate">{comment.author || 'Unknown reviewer'}</span>
+        <span className="text-[12px] font-medium text-text truncate">{comment.author || i18nT('components.pullRequestPanel.unknown_reviewer')}</span>
         {comment.state && <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-hover text-muted capitalize shrink-0">{comment.state.toLowerCase()}</span>}
         <div className="ml-auto flex items-center gap-2 shrink-0">
           <span className="text-[11px] text-muted">{age(comment.createdAt)}</span>
@@ -560,7 +560,6 @@ export function PullRequestActions({ source }: { source: PullRequestSource }) {
   const [confirmAutoMerge, setConfirmAutoMerge] = useState(false)
   const [immediateMergeWarning, setImmediateMergeWarning] = useState('')
   const isGitHub = source.provider === 'github'
-  const label = isGitHub ? 'pull request' : 'merge request'
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ['pull-request-source'] })
@@ -610,7 +609,9 @@ export function PullRequestActions({ source }: { source: PullRequestSource }) {
           type="button"
           onClick={() => readyMutation.mutate()}
           disabled={busy}
-          title={`Take this ${label} out of draft`}
+          title={isGitHub
+            ? i18nT('components.pullRequestPanel.take_this_pull_request_out_of_draft')
+            : i18nT('components.pullRequestPanel.take_this_merge_request_out_of_draft')}
           className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border bg-transparent text-[11px] text-muted hover:text-text hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {readyMutation.isPending ? <Loader className="lucide-inline animate-spin" /> : <GitPullRequest className="lucide-inline" />}
@@ -618,7 +619,7 @@ export function PullRequestActions({ source }: { source: PullRequestSource }) {
         </Btn>
       )}
       {source.autoMerge && (
-        <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-aim/15 text-[11px] text-aim" title={isGitHub ? 'GitHub will merge this pull request once its requirements pass' : 'GitLab will merge this merge request when the pipeline succeeds'}>
+        <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-aim/15 text-[11px] text-aim" title={isGitHub ? i18nT('components.pullRequestPanel.github_will_merge_this_pull_request_once_its_req') : i18nT('components.pullRequestPanel.gitlab_will_merge_this_merge_request_when_the_pi')}>
           <GitMerge className="lucide-inline" /> {i18nT('components.pullRequestPanel.auto_merge_enabled')}{armedMethod ? ` (${armedMethod})` : ''}
         </span>
       )}
@@ -642,12 +643,12 @@ export function PullRequestActions({ source }: { source: PullRequestSource }) {
           }}
           disabled={busy}
           title={isGitHub
-            ? 'GitHub merges this pull request automatically once required checks and reviews pass'
-            : 'GitLab merges this merge request when the pipeline succeeds — it merges right away if no pipeline is pending'}
+            ? i18nT('components.pullRequestPanel.github_merges_this_pull_request_automatically_on')
+            : i18nT('components.pullRequestPanel.gitlab_merges_this_merge_request_when_the_pipeli')}
           className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${confirmAutoMerge || immediateMergeWarning ? 'border-warn text-warn hover:bg-warn/10' : 'border-border bg-transparent text-muted hover:text-text hover:bg-bg-hover'}`}
         >
           {autoMergeMutation.isPending ? <Loader className="lucide-inline animate-spin" /> : <GitMerge className="lucide-inline" />}
-          {immediateMergeWarning ? 'Merge now' : confirmAutoMerge ? 'Confirm auto-merge' : 'Enable auto-merge'}
+          {immediateMergeWarning ? i18nT('components.pullRequestPanel.merge_now') : confirmAutoMerge ? i18nT('components.pullRequestPanel.confirm_auto_merge') : i18nT('components.pullRequestPanel.enable_auto_merge')}
         </Btn>
       )}
       {immediateMergeWarning && !autoMergeMutation.isPending && (
@@ -655,7 +656,9 @@ export function PullRequestActions({ source }: { source: PullRequestSource }) {
       )}
       {confirmAutoMerge && !immediateMergeWarning && !autoMergeMutation.isPending && (
         <span className="text-[11px] text-warn">
-          {i18nT('components.pullRequestPanel.this_authorizes_the_merge')}{isGitHub ? ' as soon as requirements pass, squashing if this repository allows it (otherwise a merge commit, then rebase)' : ' when the pipeline succeeds'}.
+          {isGitHub
+            ? i18nT('components.pullRequestPanel.this_authorizes_the_merge_as_soon_as_requirement')
+            : i18nT('components.pullRequestPanel.this_authorizes_the_merge_when_the_pipeline_succ')}
         </span>
       )}
       {error && <span role="alert" className="text-[11px] text-danger">{error}</span>}
@@ -676,7 +679,7 @@ function PullRequestBody({ source, tab, onAddToChat }: { source: PullRequestSour
     return (
       <div>
         <div className="sticky top-0 z-[1] flex items-center gap-2 px-3 py-2 border-b border-border bg-bg text-[12px]">
-          <span className="font-medium text-text">{source.files.length} {source.files.length === 1 ? 'File' : 'Files'} {i18nT('components.pullRequestPanel.changed')}</span>
+          <span className="font-medium text-text">{i18nT('components.pullRequestPanel.files_changed', { count: source.files.length })}</span>
           <span className="text-ok">+{totalAdds}</span>
           <span className="text-danger">-{totalDels}</span>
         </div>
@@ -693,7 +696,7 @@ function PullRequestBody({ source, tab, onAddToChat }: { source: PullRequestSour
             <>
               <GitCommitHorizontal className="lucide-inline text-muted shrink-0 mt-0.5" />
               <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-medium text-text">{commit.title || 'Untitled commit'}</div>
+                <div className="text-[13px] font-medium text-text">{commit.title || i18nT('components.pullRequestPanel.untitled_commit')}</div>
                 <div className="flex items-center gap-2 mt-1 text-[11px] text-muted">
                   {commit.author && <span className="truncate">{commit.author}</span>}
                   {commit.date && <span className="shrink-0">{age(commit.date)}</span>}
@@ -935,18 +938,18 @@ export default function PullRequestPanel({
   }, [statusQuery.data, source])
 
   const tabs: Array<{ id: SourceTab; label: string; count?: number; tone?: string }> = source ? [
-    { id: 'changes', label: 'Changes', count: source.files.length },
-    { id: 'description', label: 'Description' },
-    { id: 'commits', label: 'Commits', count: source.commits.length },
+    { id: 'changes', label: i18nT('components.pullRequestPanel.changes'), count: source.files.length },
+    { id: 'description', label: i18nT('components.pullRequestPanel.description') },
+    { id: 'commits', label: i18nT('components.pullRequestPanel.commits'), count: source.commits.length },
     {
       id: 'checks',
       label: checksUnavailable
-        ? 'Checks unavailable'
+        ? i18nT('components.pullRequestPanel.checks_unavailable')
         : checksRunning
-          ? 'Checks running'
+          ? i18nT('components.pullRequestPanel.checks_running')
           : showAllChecksPassed
-            ? 'All checks passed'
-            : 'Checks',
+            ? i18nT('components.pullRequestPanel.all_checks_passed')
+            : i18nT('components.pullRequestPanel.checks'),
       count: checkCounts.total,
       tone: checkCounts.failed
         ? 'text-danger'
@@ -956,7 +959,7 @@ export default function PullRequestPanel({
             ? 'text-ok'
             : '',
     },
-    { id: 'reviews', label: 'Reviews', count: source.comments.length },
+    { id: 'reviews', label: i18nT('components.pullRequestPanel.reviews'), count: source.comments.length },
   ] : []
 
   return (
@@ -986,8 +989,10 @@ export default function PullRequestPanel({
             <AlertCircle className={`lucide-inline mb-2 ${queryError.loginCommand ? 'text-warn' : 'text-danger'}`} />
             <div className="text-[13px] font-medium text-text">
               {queryError.loginCommand
-                ? `${queryError.loginCommand === 'gh auth login' ? 'GitHub' : 'GitLab'} CLI login required`
-                : 'Could not load this pull request'}
+                ? queryError.loginCommand === 'gh auth login'
+                  ? i18nT('components.pullRequestPanel.github_cli_login_required')
+                  : i18nT('components.pullRequestPanel.gitlab_cli_login_required')
+                : i18nT('components.pullRequestPanel.could_not_load_this_pull_request')}
             </div>
             {queryError.loginCommand ? (
               <>
@@ -1016,8 +1021,8 @@ export default function PullRequestPanel({
                 onClick={handleRefresh}
                 disabled={query.isFetching}
                 className="ml-auto p-1 rounded border-none bg-transparent text-muted hover:text-text hover:bg-bg-hover cursor-pointer disabled:opacity-60 disabled:cursor-default"
-                aria-label={query.isFetching ? 'Refreshing pull request' : 'Refresh pull request'}
-                title={query.isFetching ? 'Refreshing pull request' : 'Refresh pull request'}
+                aria-label={query.isFetching ? i18nT('components.pullRequestPanel.refreshing_pull_request') : i18nT('components.pullRequestPanel.refresh_pull_request')}
+                title={query.isFetching ? i18nT('components.pullRequestPanel.refreshing_pull_request') : i18nT('components.pullRequestPanel.refresh_pull_request')}
               >
                 <RefreshCw className={`lucide-inline ${query.isFetching ? 'animate-spin' : ''}`} />
               </Btn>
@@ -1054,7 +1059,9 @@ export default function PullRequestPanel({
             <div role="status" className="shrink-0 flex items-start gap-2 px-4 py-2 border-b border-border bg-warn/10 text-[11px] text-muted">
               <AlertCircle className="lucide-inline shrink-0 mt-0.5 text-warn" />
               <span>
-                {i18nT('components.pullRequestPanel.provider_results_may_be_partial_for')} {source.partialSections.join(', ')}{i18nT('components.pullRequestPanel.open_the')} {source.provider === 'github' ? 'pull request' : 'merge request'} {i18nT('components.pullRequestPanel.for_the_complete_set')}
+                {source.provider === 'github'
+                  ? i18nT('components.pullRequestPanel.provider_results_may_be_partial_pull_request', { sections: source.partialSections.join(', ') })
+                  : i18nT('components.pullRequestPanel.provider_results_may_be_partial_merge_request', { sections: source.partialSections.join(', ') })}
               </span>
             </div>
           )}

@@ -51,7 +51,7 @@ export function EmbeddingStatus() {
           <>
             <Check size={12} className="text-ok" />
             <span className="text-text">{i18nT('pages.knowledge.embeddingStatus.smart_search_active')}</span>
-            <span className="text-muted">· {embedded}/{total} {i18nT('pages.knowledge.embeddingStatus.embedded')}{pct}%)</span>
+            <span className="text-muted">· {i18nT('pages.knowledge.embeddingStatus.embedded_pct', { embedded, total, pct })}</span>
           </>
         ) : (
           <>
@@ -62,7 +62,7 @@ export function EmbeddingStatus() {
               disabled={generateMutation.isPending}
               className="text-accent underline bg-transparent border-none cursor-pointer text-[12px] p-0"
             >
-              {generateMutation.isPending ? 'Generating…' : 'Generate now'}
+              {generateMutation.isPending ? i18nT('pages.knowledge.embeddingStatus.generating') : i18nT('pages.knowledge.embeddingStatus.generate_now')}
             </button>
           </>
         )

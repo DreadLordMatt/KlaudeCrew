@@ -83,9 +83,7 @@ def _is_genuine_slack_link(thread_ts: str | None, channel_id: str | None) -> boo
     """True only for a complete Slack link, never another channel's legacy id."""
     namespaced = _split_namespaced_channel_id(channel_id)
     return bool(
-        thread_ts
-        and channel_id
-        and (namespaced is None or namespaced[0] == SLACK_NAMESPACE)
+        thread_ts and channel_id and (namespaced is None or namespaced[0] == SLACK_NAMESPACE)
     )
 
 
@@ -443,10 +441,7 @@ def _budgeted_source_links(links: list[dict]) -> list[dict]:
     """
     changes = [link for link in links if link.get("kind", "change") == "change"]
     issues = [link for link in links if link.get("kind", "change") == "issue"]
-    return (
-        changes[:_SERIALIZED_SOURCE_LINKS_PER_SLOT]
-        + issues[:_SERIALIZED_SOURCE_LINKS_PER_SLOT]
-    )
+    return changes[:_SERIALIZED_SOURCE_LINKS_PER_SLOT] + issues[:_SERIALIZED_SOURCE_LINKS_PER_SLOT]
 
 
 _NON_DURABLE_SOURCE_LINK_ROLES = frozenset({"chunk", "done", "streaming", "queued", "permission"})
@@ -791,6 +786,7 @@ class _ChatSlot:
         "_has_reader",
         "_stop_state",
         "_stop_event_id",
+        "_stop_escalated_card_id",
         "_pending_reset_history_key",
         "_dirty",
         "_orch_tracker",
@@ -911,6 +907,16 @@ class _ChatSlot:
         self._has_reader: bool = False  # True when HTTP SSE stream is draining
         self._stop_state: str = "idle"  # 'idle' | 'soft_pending' | 'killing'
         self._stop_event_id: str | None = None  # transcript message id for in-flight stop
+        # Id of the stop card the user escalated to a hard kill, or None. Kept
+        # separate from `_stop_state` because turn teardown resets that back to
+        # "idle" (see the `_stopping` setter below), which would erase the
+        # escalation and let a late cooperative ack relabel the card as a clean
+        # stop. Holds an id rather than a bool so the marker cannot leak onto a
+        # later card: a boolean left set would make the NEXT card's cooperative
+        # ack defer to a hard callback that never fires, stranding it at
+        # "stopping". Every card has a fresh uuid, so a stale id simply stops
+        # matching and no card-open path has to remember to clear it.
+        self._stop_escalated_card_id: str | None = None
         # Set by api_chat_slot_project; consumed in _run_chat instead of
         # inline because the endpoint can be reached from inside the kiro-cli
         # process group via the set_project MCP tool.
@@ -1809,6 +1815,9 @@ class DashboardState:
         ct = getattr(transport, "channel_type", "")
         if transport is not None and ct:
             self.channel_transports[ct] = transport
+            dispatcher = getattr(transport, "dispatcher", None)
+            if dispatcher is not None:
+                dispatcher.dashboard_state = self
 
     def get_channel_transport(self, channel_type: str) -> "MessagingTransport | None":
         """Return the registered transport for *channel_type*, or None."""
@@ -1842,8 +1851,13 @@ class DashboardState:
                 )
             if success:
                 # Reset the context bar — successful compact dropped usage.
+                # reset lets the frontend drop its stored token counts too
+                # (the "X / Y tokens" tooltip), which no longer describe the
+                # compacted session.
                 try:
-                    self.broadcast_ws("context_usage", {"slot": slot_key, "pct": 0.0})
+                    self.broadcast_ws(
+                        "context_usage", {"slot": slot_key, "pct": 0.0, "reset": True}
+                    )
                 except Exception:
                     logging.getLogger(__name__).exception(
                         "Failed to broadcast context_usage for slot %s", slot_key
@@ -2237,11 +2251,7 @@ class DashboardState:
         Called when a slot's turn is stopped or reset so a blocked ask_question
         cannot outlive the turn that issued it and strand its MCP call.
         """
-        stale = [
-            aid
-            for aid, p in self._pending_questions.items()
-            if p.get("slot") == slot_key
-        ]
+        stale = [aid for aid, p in self._pending_questions.items() if p.get("slot") == slot_key]
         cancelled = 0
         for aid in stale:
             if self.resolve_question(aid, None):
@@ -2387,9 +2397,7 @@ class DashboardState:
         # delivery O(N²) over time. Same cap as the persisted file; oldest
         # rows drop first (the file trim keeps disk consistent).
         if len(self._notification_log) > _MAX_PERSISTED_NOTIFICATIONS:
-            del self._notification_log[
-                : len(self._notification_log) - _MAX_PERSISTED_NOTIFICATIONS
-            ]
+            del self._notification_log[: len(self._notification_log) - _MAX_PERSISTED_NOTIFICATIONS]
         # Badge counts attention-worthy rows only (RFC Phase 3: passive rows
         # -- including muted-channel notes -- are excluded).
         if note.get("priority") != "passive":
@@ -2777,7 +2785,27 @@ class DashboardState:
             meta = parse_cls_meta(cls_val)
             if meta is not None:
                 payload["meta"] = meta
-        # Also include direct meta (e.g. tool_call_id on tool messages)
+        # Also include direct meta (e.g. tool_call_id on tool messages).
+        #
+        # Deliberately NOT redacted here, unlike the `cls` branch above (which is
+        # sanitised by parse_cls_meta). Two reasons, both load-bearing:
+        #
+        # 1. This is the LIVE oauth banner's egress path. _emit_mcp_oauth_request
+        #    appends the banner with a real `oauth_url`, already gated by
+        #    _oauth_url_contains_credential — a gate that deliberately exempts OAuth
+        #    params from the query-length / base64 heuristics because those
+        #    "would reject every real OAuth URL". Running _redact_meta_for_role here
+        #    would blank a genuine Google/GitHub consent URL and break the user's
+        #    ability to authorize an MCP server.
+        # 2. chat_utils imports from this module, so importing the redactors the
+        #    other way would be a cycle.
+        #
+        # What makes that safe: live tool meta is redacted at source (_tool_meta),
+        # and no DISK-LOADED message is ever appended with broadcast=True — both
+        # restore loops pass broadcast=False. That invariant is what lets the load
+        # path skip meta redaction, and it is pinned by
+        # test_rehydrate_does_not_broadcast_replayed_messages and
+        # test_restore_recent_sessions_does_not_broadcast_either. Do not relax it.
         direct_meta = msg.get("meta")
         if direct_meta and isinstance(direct_meta, dict):
             payload["meta"] = {**(payload.get("meta") or {}), **direct_meta}
@@ -3115,9 +3143,7 @@ class DashboardState:
 
         if genuine_slack:
             slack_namespace = _split_namespaced_channel_id(slack_channel)
-            visible_slack_channel = (
-                slack_namespace[1] if slack_namespace else (slack_channel or "")
-            )
+            visible_slack_channel = slack_namespace[1] if slack_namespace else (slack_channel or "")
             return links, True, visible_slack_channel, slack_ts or ""
         return links, False, "", ""
 
@@ -3619,9 +3645,7 @@ def _note_ts_epoch(note: dict[str, Any]) -> float | None:
         return None
 
 
-def sweep_expired_notifications(
-    log: list[dict[str, Any]], *, now: float | None = None
-) -> int:
+def sweep_expired_notifications(log: list[dict[str, Any]], *, now: float | None = None) -> int:
     """Remove expired PASSIVE notes in place (RFC Phase 5 TTL sweeper).
 
     A note expires when it is passive, carries a positive integer ``ttl``

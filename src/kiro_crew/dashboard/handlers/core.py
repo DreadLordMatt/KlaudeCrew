@@ -536,6 +536,8 @@ async def api_stt_config(request: web.Request) -> web.Response:
                 stt["language_code"] = body["language_code"]
             if "streaming" in body and isinstance(body["streaming"], bool):
                 stt["streaming"] = body["streaming"]
+            if "dictation_panel" in body and isinstance(body["dictation_panel"], bool):
+                stt["dictation_panel"] = body["dictation_panel"]
             await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
             await asyncio.to_thread(_atomic_json_write, path, data)
         cfg = KiroCrewConfig.load()
@@ -555,6 +557,7 @@ async def api_stt_config(request: web.Request) -> web.Response:
             "mlx_model": cfg.stt.mlx_model,
             "available": available,
             "streaming": cfg.stt.streaming,
+            "dictation_panel": cfg.stt.dictation_panel,
             "transcribe_region": cfg.stt.transcribe_region,
             "transcribe_profile": cfg.stt.transcribe_profile,
             "language_code": cfg.stt.language_code,
@@ -1200,6 +1203,13 @@ _EDITABLE_CONFIG: dict[str, dict] = {
         "type": "enum",
         "values": ["", "codes", "somewhat-technical", "non-technical"],
     },
+    # Anonymous usage beacon — the in-product opt-out (Settings → Privacy
+    # toggle), the GUI twin of `kirocrew telemetry disable`. Only the boolean
+    # enable is editable here: beacon_endpoint stays CLI/config-file-only so a
+    # dashboard caller cannot redirect the heartbeat to an arbitrary host.
+    # Nothing about this key is sensitive to read back, so the masked GET
+    # already surfaces it for the toggle's initial state.
+    "telemetry.beacon_enabled": {"type": "bool"},
     # SSO login flags for an edition that supplies a real sso_login_handler.
     # Bounded to a short string here; the companion login handler re-validates
     # each token against its own flag allowlist before spawning the login PTY

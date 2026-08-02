@@ -131,7 +131,7 @@ function BulkActions({ selectedIds, items, onDone }: { selectedIds: Set<string>;
       <span className="text-[13px] text-text-strong font-medium">{selectedIds.size} {i18nT('pages.knowledge.index.selected')}</span>
       <Btn disabled={pending} onClick={() => bulkArchiveMutation.mutate('archived')}>{i18nT('pages.knowledge.index.archive')}</Btn>
       <Btn disabled={pending} onClick={() => { if (confirm(`Delete ${selectedIds.size} items permanently?`)) bulkDeleteMutation.mutate() }}>{i18nT('pages.knowledge.index.delete')}</Btn>
-      <Btn onClick={copySelected}><Copy size={12} /> {copied ? 'Copied!' : 'Copy Content'}</Btn>
+      <Btn onClick={copySelected}><Copy size={12} /> {copied ? i18nT('pages.knowledge.index.copied') : i18nT('pages.knowledge.index.copy_content')}</Btn>
       <button onClick={onDone} className="ml-auto text-[12px] text-muted hover:text-text bg-transparent border-none cursor-pointer">{i18nT('pages.knowledge.index.clear')}</button>
     </div>
   )
@@ -582,7 +582,7 @@ export default function KnowledgePage() {
                 <div className="flex items-center justify-center gap-3 mt-4 py-3 border-t border-border">
                   <Btn disabled={page <= 1} onClick={() => setPage(p => p - 1)}>{i18nT('pages.knowledge.index.prev')}</Btn>
                   <span className="text-[13px] text-text font-medium">{i18nT('pages.knowledge.index.page')} {page} {i18nT('pages.knowledge.index.of')} {totalPages}</span>
-                  <span className="text-[11px] text-muted">({total} {i18nT('pages.knowledge.index.items')}</span>
+                  <span className="text-[11px] text-muted">{i18nT('pages.knowledge.index.items_count', { count: total })}</span>
                   <Btn disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>{i18nT('pages.knowledge.index.next')}</Btn>
                 </div>
               )}
@@ -626,7 +626,7 @@ export default function KnowledgePage() {
           <span className="whitespace-nowrap">{stats.sources} {i18nT('pages.knowledge.index.sources')}</span>
           {stats.embeddings?.enabled ? (
             <span className={`whitespace-nowrap ${stats.embeddings.available ? 'text-ok' : 'text-warn'}`} title={stats.embeddings.available ? `${stats.embeddings.model} — ${stats.embeddings.embedded_items} embedded` : `Embedding model loading (${stats.embeddings.model})`}>
-              ● {stats.embeddings.available ? `embeddings (${stats.embeddings.embedded_items})` : 'embeddings loading'}
+              ● {stats.embeddings.available ? `embeddings (${stats.embeddings.embedded_items})` : i18nT('pages.knowledge.index.embeddings_loading')}
             </span>
           ) : (
             <span className="text-muted whitespace-nowrap" title={i18nT('pages.knowledge.index.embedding_model_is_downloading_in_the_background')}>{i18nT('pages.knowledge.index.embeddings_initializing')}</span>

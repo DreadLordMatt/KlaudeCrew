@@ -51,8 +51,8 @@ export function SourceGroup({
   const [page, setPage] = useState(1)
 
   const isNoSource = sourceId === NO_SOURCE
-  const name = isNoSource ? 'No source' : (source?.name || 'Unknown source')
-  const subtitle = isNoSource ? 'Items added directly' : (source?.uri || '')
+  const name = isNoSource ? i18nT('pages.knowledge.sourceGroup.no_source') : (source?.name || i18nT('pages.knowledge.sourceGroup.unknown_source'))
+  const subtitle = isNoSource ? i18nT('pages.knowledge.sourceGroup.items_added_directly') : (source?.uri || '')
   const isFolder = source?.source_type === 'local_folder' || source?.source_type === 'obsidian_vault'
   const isArtifact = source?.source_type === 'artifact'
   // Sub-group items: folder/vault sources group by file path; the aggregate
@@ -141,7 +141,7 @@ export function SourceGroup({
             <div className="flex items-center justify-center gap-3 pt-2 mt-1 border-t border-border">
               <Btn disabled={page <= 1} onClick={() => setPage(p => p - 1)}>{i18nT('pages.knowledge.sourceGroup.prev')}</Btn>
               <span className="text-[12px] text-text">{i18nT('pages.knowledge.sourceGroup.page')} {page} {i18nT('pages.knowledge.sourceGroup.of')} {totalPages}</span>
-              <span className="text-[11px] text-muted">({total} {i18nT('pages.knowledge.sourceGroup.items')}</span>
+              <span className="text-[11px] text-muted">{i18nT('pages.knowledge.sourceGroup.items_count', { count: total })}</span>
               <Btn disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>{i18nT('pages.knowledge.sourceGroup.next')}</Btn>
             </div>
           )}

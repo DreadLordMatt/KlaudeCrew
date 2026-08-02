@@ -113,7 +113,11 @@ Credentials: `~/.kiro/crew/.env` — `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, `KIRO
 
 KiroCrew sends **one anonymous heartbeat per day** so maintainers can see how
 many copies are actively running, which versions are in use, and which
-platforms and install channels to support. This is on by default. To turn it off:
+platforms and install channels to support. This is on by default.
+
+To turn it off, flip **Settings → Privacy → Send anonymous usage heartbeat** in
+the dashboard (the same switch appears on the last step of first-run
+onboarding). Or from a terminal:
 
 ```bash
 kirocrew telemetry disable        # persists to config.json
@@ -121,16 +125,22 @@ export KIROCREW_TELEMETRY_DISABLED=1   # or per-shell / per-container
 kirocrew telemetry status         # print exactly what would be sent
 ```
 
-**Exactly these seven fields are sent, once per day, and nothing else:**
+The toggle and `kirocrew telemetry disable` write the same setting, so either
+one sticks across restarts and upgrades. `KIROCREW_TELEMETRY_DISABLED` overrides
+both — when it is set, the dashboard toggle is disabled and says so.
+
+**Exactly these nine fields are sent, at most once per day, and nothing else:**
 
 | Field | Example | Why |
 |-------|---------|-----|
 | Random instance id | `9c75560d…` (UUID4) | Lets us count how many copies ran on a given day. Generated once on first run and derived from nothing — not your hostname, username, MAC, IP, or any account. It identifies an installed copy, never a person. |
-| App version | `0.1.2` | Which releases are still in use |
+| App version | `0.1.2` | Which releases are still in use. **Release number only** — build stamps like `-nightly.20260731t065756` are stripped before sending, because a per-build timestamp is near-unique and would help identify a specific machine. |
+| Release channel | `stable` | One of `stable`, `insider`, `nightly` — whether pre-release builds are being adopted. Both nightly build stamps (desktop and wheel) report `nightly`. |
 | OS | `darwin` | Which platforms to support |
 | CPU architecture | `arm64` | Which architectures to build for |
 | Python minor version | `3.12` | When the minimum can move up |
 | Install channel | `dmg` | Which install path people actually use |
+| Governance posture | `none` | One of `none`, `unsigned`, `signed`, `verified` — whether an enterprise security ceiling is in force, and whether its signature verifies. A state, never an identity: it never includes your profile name or the organization that signed it. |
 | First-run flag | `1` / `0` | New installs vs returning |
 
 We report this as **Daily Active Instances** rather than "users": with no account

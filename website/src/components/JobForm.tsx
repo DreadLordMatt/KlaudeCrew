@@ -9,8 +9,12 @@ import type { CronPrefill } from '../utils/schedulePresets'
 import { SaveCreateLabel, CRON_SEL, expandDow } from '../utils/cronUtils'
 
 import { i18nT } from '../i18n/t'
+import { fmtWeekday } from '../i18n/format'
 export const TIMEZONES = ['America/Los_Angeles','America/Phoenix','America/Denver','America/Chicago','America/New_York','America/Sao_Paulo','Europe/London','Europe/Berlin','Europe/Paris','Asia/Kolkata','Asia/Shanghai','Asia/Tokyo','Australia/Sydney','Pacific/Auckland','UTC']
-const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+/** Monday-first weekday labels. A function, not a module-level array: a const
+ *  array of translated strings would freeze at the boot language. The index
+ *  contract is unchanged — grid index `i` still maps through GRID_TO_CRON_DOW. */
+const dayNames = () => [1, 2, 3, 4, 5, 6, 7].map((iso) => fmtWeekday(iso))
 const GRID_TO_CRON_DOW = [0, 1, 2, 3, 4, 5, 6, 0] // grid 1-7 → cron dow
 const CRON_DOW_TO_GRID: Record<number, number> = { 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 0: 7, 7: 7 }
 
@@ -62,8 +66,8 @@ function buildBody(
   // so the partial PATCH preserves the script/command binding (the update endpoint
   // does not accept script/command, so we never send them — only the fields it
   // supports: schedule, channel, silent, strict, hide-in-chat, timezone).
-  if (!f.name) { setError('Name is required'); return null }
-  if (!isLlmless && !f.message) { setError('Message is required'); return null }
+  if (!f.name) { setError(i18nT('components.jobForm.name_is_required')); return null }
+  if (!isLlmless && !f.message) { setError(i18nT('components.jobForm.message_is_required')); return null }
   const body: Record<string, string | number | boolean> = { name: f.name }
   if (!isLlmless) {
     body.message = f.message
@@ -80,13 +84,13 @@ function buildBody(
   if (f.schedMode === 'interval') {
     body.every = f.intVal * (f.intUnit === 'minutes' ? 60 : f.intUnit === 'hours' ? 3600 : 86400)
   } else if (f.schedMode === 'weekly') {
-    if (f.weekDays.length === 0) { setError('Select at least one day'); return null }
+    if (f.weekDays.length === 0) { setError(i18nT('components.jobForm.select_at_least_one_day')); return null }
     const [h, m] = f.weekTime.split(':').map(Number)
     body.cron = `${m} ${h} * * ${f.weekDays.map(d => GRID_TO_CRON_DOW[d]).join(',')}`
     body.timezone = tz
   } else {
     const expr = f.cronExpr.trim()
-    if (expr.split(/\s+/).length !== 5) { setError('Enter a valid 5-field cron expression'); return null }
+    if (expr.split(/\s+/).length !== 5) { setError(i18nT('components.jobForm.enter_a_valid_5_field_cron_expression')); return null }
     body.cron = expr
     body.timezone = tz
   }
@@ -171,7 +175,7 @@ export default function JobForm({ job, prefill, agents, defaultAgent, onSaved, l
       if (res.error) { setError(res.error); setSaving(false); return }
       if (!job) { setName(''); setMsg(''); setWeekDays([]); setIntVal(1); setChannel(''); setModel(''); setApprovalMode(''); setSilent(false); setStrictSchedule(false); setHideInChat(false) }
       onSaved()
-    } catch { setError('Failed to save'); setSaving(false) }
+    } catch { setError(i18nT('components.jobForm.failed_to_save')); setSaving(false) }
   }
 
   const toggleDay = (d: number) => setWeekDays(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d].sort())
@@ -237,7 +241,7 @@ export default function JobForm({ job, prefill, agents, defaultAgent, onSaved, l
             <option value="minutes">{i18nT('components.jobForm.minutes')}</option><option value="hours">{i18nT('components.jobForm.hours')}</option><option value="days">{i18nT('components.jobForm.days')}</option>
           </select>
         </>) : schedMode === 'weekly' ? (<>
-          <div className="flex gap-1 flex-wrap">{DAY_NAMES.map((d, i) => (
+          <div className="flex gap-1 flex-wrap">{dayNames().map((d, i) => (
             <button key={d} type="button" onClick={() => toggleDay(i + 1)} className={`px-2 py-1 rounded-md text-[12px] font-medium border cursor-pointer transition-all ${weekDays.includes(i + 1) ? 'bg-accent text-accent-fg border-accent' : 'bg-bg-elevated text-muted border-border hover:border-border-strong'}`}>{d}</button>
           ))}</div>
           <span className="text-muted text-[13px]">{i18nT('components.jobForm.at')}</span>
@@ -251,7 +255,7 @@ export default function JobForm({ job, prefill, agents, defaultAgent, onSaved, l
             {Array.from(new Set([tz, ...TIMEZONES])).map(z => <option key={z} value={z}>{z.replace(/_/g, ' ')}</option>)}
           </select>
         </>)}
-        {!vertical && !externalSubmit && <SendBtn onClick={submit} disabled={saving}>{saving ? 'Saving...' : (job ? 'Save' : 'Add')}</SendBtn>}
+        {!vertical && !externalSubmit && <SendBtn onClick={submit} disabled={saving}>{saving ? i18nT('components.jobForm.saving') : (job ? i18nT('components.jobForm.save') : i18nT('components.jobForm.add'))}</SendBtn>}
       </div>
 
       {/* Vertical-only: agent, channel, actions */}

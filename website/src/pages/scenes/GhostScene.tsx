@@ -5,6 +5,7 @@ import { isKnownAgent, markAgentsKnown, pruneAgents } from '../../hooks/sceneSta
 import { sceneFont, drawLabel, sceneLineHeight, drawSpeechBubble, SPEECH_BUBBLE_MS, KIRO_GHOST_PIXELS, TEXT_CANVAS_STYLE, SCENE_CONTAINER_STYLE, PIXEL_CANVAS_STYLE } from '../../hooks/sceneText'
 import { initSceneCanvases, runSceneLoop, useVisibleSync } from '../../hooks/sceneCanvas'
 import { useSceneInteraction, type SceneTooltipTheme } from '../../hooks/useSceneInteraction'
+import { i18nT } from '../../i18n/t'
 
 const GHOST_THEME: SceneTooltipTheme = { active: 'Haunting the codebase', idle: 'Drifting through walls' }
 
@@ -325,9 +326,9 @@ export default function GhostScene({ agents, visible = true }: Props) {
 
       // Title
       T.fillStyle = '#a89ee0'; T.font = sceneFont('title', 'bold')
-      T.fillText('Kiro Haunt', (W / 2 - 22) * S, 26 * S)
+      T.fillText(i18nT('pages.scenes.ghostScene.kiro_haunt'), (W / 2 - 22) * S, 26 * S)
       T.fillStyle = '#7a70ad'; T.font = sceneFont('detail')
-      T.fillText('friendly hauntings only', (W / 2 - 20) * S, 34 * S)
+      T.fillText(i18nT('pages.scenes.ghostScene.friendly_hauntings_only'), (W / 2 - 20) * S, 34 * S)
     }
 
     /* ── Update ── */
@@ -406,8 +407,8 @@ export default function GhostScene({ agents, visible = true }: Props) {
 
   return (
     <div style={SCENE_CONTAINER_STYLE(W, H)}>
-      <canvas ref={canvasRef} aria-label="Kiro ghost haunt animation" style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }} onMouseMove={canvasProps.onMouseMove} onMouseLeave={canvasProps.onMouseLeave} onClick={canvasProps.onClick} />
-      <canvas ref={textRef} aria-label="Kiro ghost haunt text overlay" style={TEXT_CANVAS_STYLE} />
+      <canvas ref={canvasRef} aria-label={i18nT('pages.scenes.ghostScene.kiro_ghost_haunt_animation')} style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }} onMouseMove={canvasProps.onMouseMove} onMouseLeave={canvasProps.onMouseLeave} onClick={canvasProps.onClick} />
+      <canvas ref={textRef} aria-label={i18nT('pages.scenes.ghostScene.kiro_ghost_haunt_text_overlay')} style={TEXT_CANVAS_STYLE} />
       {tooltipEl}
     </div>
   )

@@ -105,16 +105,20 @@ jobs:
           echo "Nightly (semver): ${BASE}-nightly.${STAMP_DATE}t${STAMP_TIME}"
           echo "Wheel (PEP 440):  ${BASE}.dev${STAMP}"
 
+  dependency-vulnerability-gate:
+    name: Production Dependency Vulnerability Gate
+    uses: ./.github/workflows/dependency-vulnerability.yml
+
   build-wheel:
     name: Build Wheel
-    needs: version
+    needs: [version, dependency-vulnerability-gate]
     uses: ./.github/workflows/build-wheel.yml
     with:
       wheel_version: ${{ needs.version.outputs.wheel_version }}
 
   build-desktop:
     name: Build Desktop
-    needs: version
+    needs: [version, dependency-vulnerability-gate]
     uses: ./.github/workflows/build-desktop.yml
     with:
       version: ${{ needs.version.outputs.nightly_version }}
@@ -124,8 +128,9 @@ jobs:
 
   # ── CLI channel publish ───────────────────────────────────────────────
   # Publishes the built wheel to the nightly CLI channel (cli/ + latest-cli.json).
-  # Depends only on the wheel (not build-desktop or the signing service), so a macOS signing
-  # failure never blocks the CLI release. See docs/release-automation.md.
+  # Depends only on the wheel and its CLI-specific KMS manifest signer (not
+  # build-desktop, Apple notarization, or CDSigner), so a macOS signing failure
+  # never blocks the CLI release. See docs/release-automation.md.
   publish-cli:
     name: Publish CLI (nightly channel)
     needs: [version, build-wheel]

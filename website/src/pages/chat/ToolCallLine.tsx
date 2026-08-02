@@ -13,6 +13,7 @@ import { extractToolFilePath } from '../../utils/toolFilePath'
 import { isSafePath } from '../../utils/safePath'
 import { fileReadUrl } from '../../utils/fileReadUrl'
 import McpAppFrame from '../../components/McpAppFrame'
+import { i18nT } from '../../i18n/t'
 
 // Tool-call ids that have already played their one-shot `.ft-block-reveal`
 // entrance fade. A CSS animation re-fires on every DOM *mount*, and a pill
@@ -31,7 +32,7 @@ const revealedToolIds = new Set<string>()
 /** Inline tool call pill. Click toggles an expanded panel below the pill that
  *  shows purpose / input / output (the same details that previously lived in
  *  the Activity sidebar's deprecated "Tools" tab). */
-export default memo(function ToolCallLine({ message, running: _running, slot, onFileOpen }: { message: ChatMessage; running: boolean; slot?: string; onFileOpen?: (path: string) => void }) {
+export default memo(function ToolCallLine({ message, running: _running, slot, onFileOpen, disclosure, disclosureKey, onDisclosureChange }: { message: ChatMessage; running: boolean; slot?: string; onFileOpen?: (path: string) => void; disclosure?: boolean; disclosureKey?: string; onDisclosureChange?: (key: string, expanded: boolean) => void }) {
   const dispatch = useAppDispatch()
   const label = message.content.replace(/^🔧\s*/, '')
   const toolCallId = message.meta?.tool_call_id as string | undefined
@@ -139,7 +140,26 @@ export default memo(function ToolCallLine({ message, running: _running, slot, on
   // (manual toggle / focus signal) so the panel stays open if the user took
   // explicit control, and only auto-collapse when the approval resolves
   // *and* we were the ones who opened it.
-  const [expanded, setExpanded] = useState(() => hasPendingPerm)
+  const [localExpanded, setLocalExpanded] = useState(() => hasPendingPerm)
+  // Disclosure is HOST-OWNED when `disclosure` is supplied. The transcript is
+  // virtualised, so this pill is unmounted whenever its row leaves the mounted
+  // window, and state kept only here dies with it. `undefined` means the host
+  // holds no choice for this pill, so the local value applies.
+  const expanded = disclosure ?? localExpanded
+  // Both the notifier and the key are passed in already-stable, so memo() on
+  // this component still short-circuits.
+  const onDisclosureChangeRef = useRef(onDisclosureChange)
+  onDisclosureChangeRef.current = onDisclosureChange
+  const disclosureKeyRef = useRef(disclosureKey)
+  disclosureKeyRef.current = disclosureKey
+  // Write both channels: the local value keeps an uncontrolled host (split-view
+  // ChatPane, app-sdk) working, and the notification is what survives a remount.
+  const applyExpanded = useCallback((next: boolean) => {
+    setLocalExpanded(next)
+    const notify = onDisclosureChangeRef.current
+    const key = disclosureKeyRef.current
+    if (notify && key) notify(key, next)
+  }, [])
   const [pendingAutoExpand, setPendingAutoExpand] = useState(() => hasPendingPerm)
   const prevPendingRef = useRef(hasPendingPerm)
   useEffect(() => {
@@ -147,7 +167,7 @@ export default memo(function ToolCallLine({ message, running: _running, slot, on
     prevPendingRef.current = hasPendingPerm
     if (hasPendingPerm && !wasPending) {
       // Approval just became pending → auto-expand
-      setExpanded(true)
+      applyExpanded(true)
       setPendingAutoExpand(true)
     } else if (!hasPendingPerm && wasPending && pendingAutoExpand) {
       // Approval just resolved (approved/rejected/cancelled) and the user
@@ -158,12 +178,12 @@ export default memo(function ToolCallLine({ message, running: _running, slot, on
       // mid-flux height for the exit animation and the panel snaps shut
       // instead of animating cleanly.
       const raf = requestAnimationFrame(() => {
-        setExpanded(false)
+        applyExpanded(false)
         setPendingAutoExpand(false)
       })
       return () => cancelAnimationFrame(raf)
     }
-  }, [hasPendingPerm, pendingAutoExpand])
+  }, [hasPendingPerm, pendingAutoExpand, applyExpanded])
 
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -175,12 +195,12 @@ export default memo(function ToolCallLine({ message, running: _running, slot, on
   const focusToolCallId = useAppSelector(s => s.chat.focusToolCallId)
   useEffect(() => {
     if (focusToolCallId && effectiveId && focusToolCallId === effectiveId) {
-      setExpanded(true)
+      applyExpanded(true)
       setPendingAutoExpand(false)
       requestAnimationFrame(() => containerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
       dispatch(clearFocusToolCallId())
     }
-  }, [focusToolCallId, effectiveId, dispatch])
+  }, [focusToolCallId, effectiveId, dispatch, applyExpanded])
 
   // File-op tool pills (read/edit/write) get a side-panel open affordance.
   // Extract the fs path from the tool's JSON args; the chip is gated on a
@@ -250,9 +270,9 @@ export default memo(function ToolCallLine({ message, running: _running, slot, on
   // user can't hide the input they're being asked to approve.
   const onToggle = useCallback(() => {
     if (hasPendingPerm) return
-    setExpanded(e => !e)
+    applyExpanded(!expanded)
     setPendingAutoExpand(false)
-  }, [hasPendingPerm])
+  }, [hasPendingPerm, expanded, applyExpanded])
 
   const fmtTime = (t: number) => t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
 
@@ -295,14 +315,43 @@ export default memo(function ToolCallLine({ message, running: _running, slot, on
   const [animateEntrance] = useState(() => !revealId || !revealedToolIds.has(revealId))
   useEffect(() => { if (revealId) revealedToolIds.add(revealId) }, [revealId])
 
+  // Drop the class once the fade has played. It is a ONE-SHOT animation, but the
+  // class used to persist for the row's whole life, and `ft-fade` animates
+  // opacity — so the element kept a compositing/stacking context long after the
+  // 0.6s was over. That traps a `position: fixed` DESCENDANT (an MCP app's
+  // full-screen sheet) inside this row's stacking context instead of the
+  // viewport's, leaving it painted beneath shell navigation. Removing the class
+  // when it finishes is both tidier and what keeps that escape hatch working.
+  //
+  // Guarded on the event target so a nested element's animation cannot end the
+  // parent's, and only armed while the class is present. Under
+  // `prefers-reduced-motion` the animation is `none` and never fires — harmless,
+  // because with no opacity animation there is no stacking context to escape.
+  const [revealPlayed, setRevealPlayed] = useState(false)
+  const revealing = animateEntrance && !revealPlayed
+
   return (
-    <div ref={containerRef} className={animateEntrance ? 'ft-block-reveal' : undefined}>
+    <div
+      ref={containerRef}
+      className={revealing ? 'ft-block-reveal' : undefined}
+      onAnimationEnd={revealing
+        ? (e) => { if (e.target === e.currentTarget) setRevealPlayed(true) }
+        : undefined}
+    >
       <div className="inline-flex items-start gap-1 group/toolpill">
+      {/* No `font-mono`: the pill's label is prose with the odd argument spliced
+          in ("Searching for 'YOLO' in src"), not code, and Tailwind's
+          `font-mono` pins `var(--mono)` — which the Font Family setting never
+          writes. The file-path chip below keeps mono, where it is earned. */}
       <button
         ref={pillButtonRef}
-        className={`inline-flex items-start gap-1 text-[13px] font-mono px-2 py-0.5 rounded-md transition-all text-left focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none ${hasPendingPerm ? 'cursor-default' : 'cursor-pointer hover:brightness-110'}`}
+        className={`inline-flex items-start gap-1 text-[13px] px-2 py-0.5 rounded-md transition-all text-left focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none ${hasPendingPerm ? 'cursor-default' : 'cursor-pointer hover:brightness-110'}`}
         aria-expanded={effectivelyExpanded}
-        aria-label={hasPendingPerm ? `Awaiting approval for tool: ${label}` : `${effectivelyExpanded ? 'Hide' : 'Show'} details for tool: ${label}`}
+        aria-label={hasPendingPerm
+          ? i18nT('pages.chat.toolCallLine.aria_awaiting_approval', { label })
+          : effectivelyExpanded
+            ? i18nT('pages.chat.toolCallLine.aria_hide_details', { label })
+            : i18nT('pages.chat.toolCallLine.aria_show_details', { label })}
         onClick={onToggle}
       >
         <Icon size={12} className={`shrink-0 ${iconClass}`} style={{ marginTop: '3px' }} />

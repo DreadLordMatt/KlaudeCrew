@@ -4,6 +4,8 @@ import { Toggle } from './ui'
 import CopyBranchButton from './CopyBranchButton'
 import { usePointerDrag } from '../hooks/usePointerDrag'
 import VoiceStatusBar from './VoiceStatusBar'
+import VoiceDictationPanel, { useDictationPanelUsable } from './VoiceDictationPanel'
+import type { AudioSample } from '../hooks/mic'
 import { createPortal } from 'react-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useBranding } from '../hooks/useBranding'
@@ -220,6 +222,12 @@ interface ChatInputProps {
   voiceLevel?: number
   voiceDeviceLabel?: string
   onClearVoiceError?: () => void
+  /** Show the animated dictation panel while recording (stt.dictation_panel). */
+  voiceDictationPanel?: boolean
+  /** Per-frame audio features driving the dictation panel's shader. */
+  voiceSampleRef?: { current: AudioSample }
+  /** Latest partial hypothesis, rendered muted in the dictation panel. */
+  voicePartial?: string
   /** Chat-level controls in input bar */
   agentName?: string
   agentSource?: string
@@ -402,6 +410,9 @@ function ChatInput({
   voiceError = null,
   voiceLevel = 0,
   voiceDeviceLabel = '',
+  voiceDictationPanel = false,
+  voiceSampleRef,
+  voicePartial = '',
   onClearVoiceError,
   agentName,
   agentSource,
@@ -556,13 +567,13 @@ function ChatInput({
         setApprovalNotice(
           approvalIsUnattended
             ? `That ${approvalSource} request already timed out and was denied — the job is no longer waiting. Check the approvals feed for the record.`
-            : 'That approval expired — the turn it belonged to is no longer waiting.'
+            : i18nT('components.chatInput.that_approval_expired_the_turn_it_belonged_to_is')
         )
         return
       }
       // eslint-disable-next-line no-console -- surface real approval-resolution failures to the dev console
       console.error('Approval failed:', err)
-      setApprovalNotice('Could not submit that decision — see the console for details.')
+      setApprovalNotice(i18nT('components.chatInput.could_not_submit_that_decision_see_the_console_f'))
     }
     if (['trust_command', 'trust_base', 'trust', 'trust_reads'].includes(decision) && activeSlot) {
       // Defence in depth: the Trust controls are not rendered for unattended
@@ -621,6 +632,15 @@ function ChatInput({
   const approvalBtnClass = 'inline-flex items-center gap-1 px-2 py-1 rounded-md bg-[color-mix(in_srgb,var(--warn)_12%,transparent)] border border-border text-text text-[12px] cursor-pointer font-body hover:bg-[color-mix(in_srgb,var(--warn)_25%,transparent)] hover:text-text hover:border-border-strong transition-colors disabled:opacity-50'
 
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  // Dictation-panel gate. Three independent conditions must hold: the setting
+  // is on, the browser has WebGL2, and the OS is not asking for reduced motion
+  // (the hook covers the latter two). A mic error always falls through to
+  // VoiceStatusBar, which owns the dismissible error affordance — the panel
+  // has no way to surface it. Resolves to the sample ref (not a boolean) so
+  // the non-optional prop narrows without a cast.
+  const dictationUsable = useDictationPanelUsable(voiceDictationPanel)
+  const showDictation =
+    dictationUsable && voiceRecording && !voiceError && voiceSampleRef ? voiceSampleRef : null
   const wrapperRef = useRef<HTMLDivElement>(null)
   // Backdrop mirror that paints chip backgrounds behind paste tokens; its scroll
   // is kept in lockstep with the textarea (see syncMirrorScroll on the textarea).
@@ -652,13 +672,62 @@ function ChatInput({
   // previously discoverable is lost, and names the branch even when the label
   // is truncated or the shelf has collapsed to icon-only.
   const projectChipTitle = useMemo(() => {
-    if (!project) return 'Select project'
+    if (!project) return i18nT('components.chatInput.select_project')
     const base = `Project: ${project}`
     if (!projectBranch) return base
     return projectDetached
       ? `${base}\nDetached HEAD at ${projectBranch}`
       : `${base}\nBranch: ${projectBranch}`
   }, [project, projectBranch, projectDetached])
+  // Keep the (visually collapsed) textarea focused while dictating, so the
+  // panel's "Enter to send" hint routes through the composer's normal submit
+  // path instead of needing a duplicated send handler.
+  useEffect(() => {
+    if (showDictation) inputRef.current?.focus()
+  }, [showDictation])
+
+  // Escape stops dictation, from ANYWHERE. Deliberately a document-level
+  // listener rather than the textarea's onKeyDown: starting a recording means
+  // clicking the mic button, so focus sits on that button and a textarea-scoped
+  // handler never fires — the panel would advertise "Esc to stop" and do
+  // nothing. Keeps the transcript: this stops capture, it does not discard what
+  // was already transcribed.
+  //
+  // BUBBLE phase, not capture, and it yields three ways. Capture phase runs
+  // before every descendant, so an open menu/popover/selector (this composer
+  // has many) would lose its own Escape to this handler — recording would stop
+  // and the menu would stay open. Bubbling lets the innermost control consume
+  // Escape first; Radix and friends call preventDefault() when they do, which
+  // is what `defaultPrevented` detects. The three explicit refs cover the
+  // hand-rolled pickers that close on Escape WITHOUT preventing default, so
+  // they cannot be detected that way.
+  //
+  // The `[role="dialog"]` probe is the precedence rule: Escape belongs to the
+  // TOPMOST dismissible surface, and the composer is not it while a dialog is
+  // up. Modal, CommandPalette and SnipOverlay all bind Escape on `window` and
+  // all carry role="dialog", so one presence check defers to every one of them
+  // rather than enumerating them. Without it this handler would newly steal
+  // Escape from each — before this feature existed, Escape reached them
+  // normally, so stealing it would be a regression, not a trade.
+  //
+  // stopPropagation() only once we have decided the key is OURS. document
+  // bubbles on to `window`, and those window handlers do not check
+  // defaultPrevented, so a snip started during recording would otherwise be
+  // cancelled by the same keypress that stopped the recording.
+  useEffect(() => {
+    if (!voiceRecording || !onVoiceToggle) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.isComposing || e.defaultPrevented) return
+      if (slashMenuOpenRef.current || filePickerOpenRef.current || skillPickerOpenRef.current) return
+      if (document.querySelector('[role="dialog"]')) return
+      e.preventDefault()
+      e.stopPropagation()
+      onVoiceToggle()
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [voiceRecording, onVoiceToggle])
+
   const ctxWrapRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!ctxPopoverOpen) return
@@ -761,7 +830,7 @@ function ChatInput({
   const { botName } = useBranding()
   const isMobile = useIsMobile()
   const ime = useImeGuard()
-  const resolvedPlaceholder = placeholder || `Message ${botName}…  (/command · @file · $skill)`
+  const resolvedPlaceholder = placeholder || i18nT('components.chatInput.message_placeholder', { bot: botName })
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileQuery, setFileQuery] = useState('')
@@ -1813,7 +1882,7 @@ function ChatInput({
                 </span>
                 {spawnApprovalsResolving ? (
                   <span className="inline-flex items-center gap-1 text-[12px] text-muted/60 shrink-0">
-                    <Loader2 size={12} className="animate-spin shrink-0" />Resolving…
+                    <Loader2 size={12} className="animate-spin shrink-0" />{i18nT('components.chatInput.resolving')}
                   </span>
                 ) : (
                   <div className="flex items-center gap-1.5 shrink-0">
@@ -1823,7 +1892,7 @@ function ChatInput({
                       className={approvalBtnClass}
                     >
                       <CheckCircle size={12} className="shrink-0" />
-                      {pendingSpawnApprovals.length === 1 ? 'Approve' : 'Approve all'}
+                      {pendingSpawnApprovals.length === 1 ? i18nT('components.chatInput.approve') : i18nT('components.chatInput.approve_all')}
                     </button>
                     <button
                       type="button"
@@ -1831,7 +1900,7 @@ function ChatInput({
                       className={`${approvalBtnClass} hover:!text-danger hover:!border-danger`}
                     >
                       <Ban size={12} className="shrink-0" />
-                      {pendingSpawnApprovals.length === 1 ? 'Reject' : 'Reject all'}
+                      {pendingSpawnApprovals.length === 1 ? i18nT('components.chatInput.reject') : i18nT('components.chatInput.reject_all')}
                     </button>
                     <button
                       type="button"
@@ -1855,7 +1924,7 @@ function ChatInput({
                       </code>
                       {a.approving ? (
                         <span className="inline-flex items-center gap-1 text-[11px] text-muted/60 shrink-0">
-                          <Loader2 size={11} className="animate-spin shrink-0" />Resolving…
+                          <Loader2 size={11} className="animate-spin shrink-0" />{i18nT('components.chatInput.resolving')}
                         </span>
                       ) : (
                         <div className="flex items-center gap-1 shrink-0">
@@ -1865,7 +1934,7 @@ function ChatInput({
                             onClick={() => resolveOneSpawn(a, 'approve')}
                             className={approvalBtnClass}
                           >
-                            <CheckCircle size={12} className="shrink-0" />Approve
+                            <CheckCircle size={12} className="shrink-0" />{i18nT('components.chatInput.approve')}
                           </button>
                           <button
                             type="button"
@@ -1873,7 +1942,7 @@ function ChatInput({
                             onClick={() => resolveOneSpawn(a, 'reject')}
                             className={`${approvalBtnClass} hover:!text-danger hover:!border-danger`}
                           >
-                            <Ban size={12} className="shrink-0" />Reject
+                            <Ban size={12} className="shrink-0" />{i18nT('components.chatInput.reject')}
                           </button>
                         </div>
                       )}
@@ -2064,17 +2133,21 @@ function ChatInput({
       >
         <FilePreviewStrip files={pendingFiles} resizedInfo={resizedInfo} onRemove={onRemoveFile} />
 
-        <VoiceStatusBar recording={voiceRecording} level={voiceLevel} deviceLabel={voiceDeviceLabel} error={voiceError} onDismissError={onClearVoiceError} />
+        {showDictation ? (
+          <VoiceDictationPanel sampleRef={showDictation} value={value} partial={voicePartial} deviceLabel={voiceDeviceLabel} />
+        ) : (
+          <VoiceStatusBar recording={voiceRecording} level={voiceLevel} deviceLabel={voiceDeviceLabel} error={voiceError} onDismissError={onClearVoiceError} />
+        )}
 
         {optimizing && <span className="absolute inset-0 flex items-start px-4 pt-3 text-sm text-white font-medium pointer-events-none z-10 bg-black/60 rounded-2xl"><Sparkles size={14} className="inline mr-1 text-yellow-400" /> {i18nT('components.chatInput.optimizing_prompt')}</span>}
-        <div className={`relative ${manualHeight !== null ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
+        <div className={`relative ${showDictation ? 'sr-only' : ''} ${manualHeight !== null ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
         <PasteHighlightLayer ref={mirrorRef} value={value} blocks={pasteBlocks} />
         <textarea
           ref={inputRef}
           aria-label={i18nT('components.chatInput.message_input')}
           className={`relative w-full bg-transparent border-none ${INPUT_TYPO} text-text outline-none min-h-[44px] max-h-[50vh] placeholder:text-muted resize-none ${manualHeight !== null ? 'flex-1' : ''} ${disabled ? 'opacity-40 pointer-events-none' : ''} ${optimizing ? 'opacity-30' : ''}`}
           style={manualHeight !== null ? { height: '100%' } : undefined}
-          placeholder={!connected ? 'Gateway offline — message will not send' : disabledProp ? 'Stopping…' : voiceRecording ? 'Recording… click mic to stop' : voiceTranscribing ? 'Transcribing, please wait…' : resolvedPlaceholder}
+          placeholder={!connected ? i18nT('components.chatInput.gateway_offline_message_will_not_send') : disabledProp ? i18nT('components.chatInput.stopping') : voiceRecording ? i18nT('components.chatInput.recording_click_mic_to_stop') : voiceTranscribing ? i18nT('components.chatInput.transcribing_please_wait') : resolvedPlaceholder}
           readOnly={optimizing}
           rows={1}
           value={value}
@@ -2240,8 +2313,8 @@ function ChatInput({
                 onClick={onVoiceToggle}
                 onPointerDown={onVoicePrewarm}
                 disabled={disabled || voiceTranscribing || optimizing}
-                aria-label={voiceRecording ? 'Stop recording' : voiceTranscribing ? 'Transcribing…' : 'Voice input'}
-                title={voiceRecording ? 'Stop recording' : voiceTranscribing ? 'Transcribing…' : 'Voice input'}
+                aria-label={voiceRecording ? i18nT('components.chatInput.stop_recording') : voiceTranscribing ? i18nT('components.chatInput.transcribing') : i18nT('components.chatInput.voice_input')}
+                title={voiceRecording ? i18nT('components.chatInput.stop_recording') : voiceTranscribing ? i18nT('components.chatInput.transcribing') : i18nT('components.chatInput.voice_input')}
               >
                 {voiceTranscribing ? <Loader2 size={18} className="animate-spin" /> : <Mic size={18} />}
               </button>
@@ -2296,8 +2369,8 @@ function ChatInput({
                         className="w-8 h-8 bg-transparent border-none flex items-center justify-center cursor-pointer hover:bg-black/15 transition-all text-inherit"
                         onClick={fireComposer}
                         disabled={disabled}
-                        title={busySendMode === 'steer' ? 'Steer — inject into the running turn (Enter)' : 'Queue — run after the current turn finishes (Enter)'}
-                        aria-label={busySendMode === 'steer' ? 'Steer' : 'Queue message'}
+                        title={busySendMode === 'steer' ? i18nT('components.chatInput.steer_inject_into_the_running_turn_enter') : i18nT('components.chatInput.queue_run_after_the_current_turn_finishes_enter')}
+                        aria-label={busySendMode === 'steer' ? i18nT('components.chatInput.steer') : i18nT('components.chatInput.queue_message')}
                         data-testid="busy-send-button"
                       >
                         {busySendMode === 'steer' ? <Target size={16} /> : <ArrowUpFromLine size={16} />}
@@ -2369,8 +2442,8 @@ function ChatInput({
                 // optimizePrompt(). optimizing ⊂ optimizePending, so this stays
                 // disabled on the originating session too.
                 disabled={!value.trim() || optimizePending || !connected}
-                aria-label={optimizePending && !optimizing ? 'Optimize prompt — busy optimizing another chat' : 'Optimize prompt'}
-                title={optimizePending && !optimizing ? 'Optimizing another chat — please wait' : `Optimize prompt (${platformShortcut('Cmd+Shift+Enter')})`}
+                aria-label={optimizePending && !optimizing ? i18nT('components.chatInput.optimize_prompt_busy_optimizing_another_chat') : i18nT('components.chatInput.optimize_prompt')}
+                title={optimizePending && !optimizing ? i18nT('components.chatInput.optimizing_another_chat_please_wait') : `Optimize prompt (${platformShortcut('Cmd+Shift+Enter')})`}
                 {...offlineProps(connected, 'optimize', 'Optimize')}
               >
                 {optimizing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
@@ -2399,12 +2472,15 @@ function ChatInput({
         <div ref={shelfRef} className="pt-1 flex items-center gap-2 min-w-0">
           <div className="flex items-center gap-2 min-w-0 flex-1">
           {onAgentClick && agentName && (
+            /* Chrome type: an agent name is a label, not code. `font-mono` here
+               pinned `var(--mono)`, which Settings → Display → Font Family never
+               writes, so the shelf ignored the user's typeface entirely. */
             <button
-              className={`inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] font-mono px-2.5 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent ${agentSource === 'package' ? 'text-[var(--aim)] hover:text-[var(--aim)]' : 'text-muted hover:text-text disabled:hover:text-muted'}`}
+              className={`inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] px-2.5 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent ${agentSource === 'package' ? 'text-[var(--aim)] hover:text-[var(--aim)]' : 'text-muted hover:text-text disabled:hover:text-muted'}`}
               onClick={e => onAgentClick(e.currentTarget.getBoundingClientRect())}
               disabled={isRunning}
-              title={isRunning ? 'Stop the current response to switch agents' : `Agent: ${agentName}`}
-              aria-label={isRunning ? 'Stop the current response to switch agents' : `Agent: ${agentName}`}
+              title={isRunning ? i18nT('components.chatInput.stop_the_current_response_to_switch_agents') : `Agent: ${agentName}`}
+              aria-label={isRunning ? i18nT('components.chatInput.stop_the_current_response_to_switch_agents') : `Agent: ${agentName}`}
             >
               <Bot size={13} className="shrink-0 opacity-70" />
               {!shelfCompact && <span className="truncate max-w-[160px]">{agentName}</span>}
@@ -2416,13 +2492,13 @@ function ChatInput({
              copies. A <button> inside a <button> is invalid HTML and browsers
              collapse it, so the pill is a plain container and each segment owns
              its own click target and hover state. */
-          <div className="inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] font-mono text-muted">
+          <div className="inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] text-muted">
           <button
-            className="inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] font-mono text-muted hover:text-text px-2.5 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted"
+            className="inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] text-muted hover:text-text px-2.5 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted"
             onClick={e => onProjectClick(e.currentTarget.getBoundingClientRect())}
             disabled={isRunning}
-            title={isRunning ? 'Stop the current response to switch project' : projectChipTitle}
-            aria-label={isRunning ? 'Stop the current response to switch project' : projectChipTitle}
+            title={isRunning ? i18nT('components.chatInput.stop_the_current_response_to_switch_project') : projectChipTitle}
+            aria-label={isRunning ? i18nT('components.chatInput.stop_the_current_response_to_switch_project') : projectChipTitle}
           >
             <FolderOpen size={13} className="shrink-0 opacity-70" />
             {/* Budget favours the branch: the folder name is also in the tooltip
@@ -2430,17 +2506,19 @@ function ChatInput({
                 the ambiguity this label exists to remove. The enclosing shelf
                 group is flex-1/min-w-0, so both segments still shrink below
                 these caps on a narrow window. */}
-            {!shelfCompact && <span className="truncate max-w-[160px]">{project ? (project.split('/').filter(Boolean).pop() || project) : 'Project'}</span>}
+            {!shelfCompact && <span className="truncate max-w-[160px]">{project ? (project.split('/').filter(Boolean).pop() || project) : i18nT('components.chatInput.project')}</span>}
           </button>
           {!shelfCompact && !!projectBranch && (
             <>
               <span className="opacity-40 shrink-0" aria-hidden="true">·</span>
               {/* Copying stays enabled while a response is running — unlike
-                  switching project, reading the branch name is harmless. */}
+                  switching project, reading the branch name is harmless. A git
+                  ref IS code, so it keeps mono now that the pill container no
+                  longer supplies it. */}
               <CopyBranchButton
                 branch={projectBranch}
                 label={projectDetached ? 'commit' : 'branch name'}
-                className="max-w-[220px] opacity-70 hover:opacity-100 hover:text-text"
+                className="max-w-[220px] font-mono opacity-70 hover:opacity-100 hover:text-text"
               />
             </>
           )}
@@ -2457,7 +2535,7 @@ function ChatInput({
                 aria-label={i18nT('components.chatInput.context_usage')}
               >
                 <ContextBar pct={contextPct} width={40} height={3} />
-                {showContextPct && <span className="text-[11px] font-mono ml-1.5 tabular-nums" style={{ color: contextColor(contextPct) }}>{contextPctClamped(contextPct)}%</span>}
+                {showContextPct && <span className="text-[11px] ml-1.5 tabular-nums" style={{ color: contextColor(contextPct) }}>{contextPctClamped(contextPct)}%</span>}
               </button>
               {ctxPopoverOpen && (
                 <div className="absolute bottom-full right-0 mb-1 z-[60] w-52 rounded-xl border border-border bg-bg-elevated shadow-xl p-3 animate-slide-up">
@@ -2494,10 +2572,10 @@ function ChatInput({
           )}
           {onModelClick && modelName && (
             <button
-              className="inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] font-mono text-muted hover:text-text px-2 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted"
+              className="inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] text-muted hover:text-text px-2 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted"
               onClick={e => onModelClick(e.currentTarget.getBoundingClientRect())}
               disabled={isRunning}
-              title={isRunning ? 'Stop the current response to switch model' : `Model: ${modelName}`}
+              title={isRunning ? i18nT('components.chatInput.stop_the_current_response_to_switch_model') : `Model: ${modelName}`}
             >
               <span className="truncate max-w-[180px]">{modelName}</span>
               {onReasoningEffortClick && !shelfCompact && (

@@ -23,7 +23,6 @@ function spliceChildren(parent: HastParent, index: number, nodes: Array<HastElem
   if (parent.type === 'root') parent.children.splice(index, 1, ...nodes)
   else parent.children.splice(index, 1, ...nodes)
 }
-import mermaid from 'mermaid'
 import '../utils/hljs'
 import { api } from '../api/client'
 import { useBlockAssembler, maskInlineCode } from '../hooks/useBlockAssembler'
@@ -71,7 +70,28 @@ function isDarkTheme(): boolean {
   return (document.documentElement.getAttribute('data-theme') || '').includes('dark')
 }
 
-function initMermaid(): void {
+/**
+ * mermaid, loaded on first use.
+ *
+ * mermaid plus its eager dependencies are ~90-130 KB gzip, and this module is
+ * on the critical path (every chat message renders through it) while a
+ * ```mermaid fence is rare. A static import therefore put the whole diagram
+ * engine in the entry chunk for every user. `MermaidBlock` already renders
+ * asynchronously inside an effect, so deferring the module costs nothing.
+ *
+ * The promise is cached at module scope so N diagram blocks share one load, and
+ * `import()` itself is idempotent regardless.
+ */
+type MermaidApi = typeof import('mermaid')['default']
+
+let mermaidLoad: Promise<MermaidApi> | null = null
+
+function loadMermaid(): Promise<MermaidApi> {
+  if (!mermaidLoad) mermaidLoad = import('mermaid').then(m => m.default)
+  return mermaidLoad
+}
+
+function initMermaid(mermaid: MermaidApi): void {
   const dark = isDarkTheme()
   mermaid.initialize({
     startOnLoad: false,
@@ -102,9 +122,8 @@ function initMermaid(): void {
   })
 }
 
-initMermaid()
-
 import { CodeBlock } from './CodeBlock'
+import { ExcalidrawBlock } from './ExcalidrawBlock'
 
 /** Forward the `data-sourcepos` attribute from rehypeSourcepos onto the
  *  rendered element. Used in every MD_COMPONENTS override; returns an
@@ -123,8 +142,12 @@ const MermaidBlock = memo(function MermaidBlock({ code }: { code: string }) {
   useEffect(() => {
     if (!ref.current || renderedRef.current === code) return
     renderedRef.current = code
-    initMermaid()
-    mermaid.render(`mermaid-${id}`, code).then(({ svg }) => {
+    loadMermaid().then(mermaid => {
+      // Re-initialized per render so a theme switch between two diagrams is
+      // picked up; initialize() is cheap and idempotent.
+      initMermaid(mermaid)
+      return mermaid.render(`mermaid-${id}`, code)
+    }).then(({ svg }) => {
       if (!ref.current) return
       const range = document.createRange()
       range.selectNodeContents(ref.current)
@@ -197,6 +220,7 @@ const MD_COMPONENTS: Components = {
     const codeStr = String(children).replace(/\n$/, '')
 
     if (lang === 'mermaid') return <MermaidBlock code={codeStr} />
+    if (lang === 'excalidraw') return <ExcalidrawBlock code={codeStr} />
 
     if (!className) {
       if (PATH_RE.test(codeStr)) {
@@ -1092,6 +1116,12 @@ function BlockRenderer({ block, prevBlock, onFileOpen, sourcePos, messageTs, wid
     }
     case 'mermaid':
       return block.complete ? <MermaidBlock code={block.content} /> : (
+        <div className="my-2 p-3 bg-bg-elevated border border-border rounded-md text-muted text-[12px] italic animate-pulse">{i18nT('components.markdownRenderer.generating_diagram')}</div>
+      )
+    case 'excalidraw':
+      // Held back until the fence closes: a half-streamed scene is invalid JSON,
+      // so attempting to draw it would only flash the raw-source fallback.
+      return block.complete ? <ExcalidrawBlock code={block.content} /> : (
         <div className="my-2 p-3 bg-bg-elevated border border-border rounded-md text-muted text-[12px] italic animate-pulse">{i18nT('components.markdownRenderer.generating_diagram')}</div>
       )
     case 'code': {

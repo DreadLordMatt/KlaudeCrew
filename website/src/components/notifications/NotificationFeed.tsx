@@ -8,6 +8,8 @@ import { api } from '../../api/client'
 import { EmptyState, SearchInput } from '../ui'
 import Clickable from '../Clickable'
 import { disintegrate } from '../../lib/disintegrate'
+// Aliased: this file defines its own minute-granularity `fmtRelative` wrapper.
+import { fmtRelative as fmtRelativeLocalized } from '../../i18n/format'
 import type { Notification } from '../../types'
 import {
   type Kind, type Category, KIND_KEYS, CATEGORIES, KINDS_STORAGE_KEY, loadActiveKinds,
@@ -27,15 +29,21 @@ function loadSeenChannels(): Set<string> {
   return new Set()
 }
 
-/** macOS Notification Center-style relative timestamp ("now", "35m ago", "2h ago"). */
+/** macOS Notification Center-style relative timestamp ("now", "35m ago", "2h ago").
+ *
+ * Delegated to the locale-aware seam: the hand-rolled ladder this replaces
+ * rendered English in every language and encoded its own "yesterday" special
+ * case, which CLDR already knows for all 10 locales. English output is
+ * unchanged.
+ *
+ * Minute granularity is preserved deliberately — a notification feed that
+ * counted seconds would rewrite every row on every tick. Anything under a
+ * minute is collapsed to the locale's "now" rather than "45s ago". */
 function fmtRelative(ts: string): string {
-  const mins = Math.floor((Date.now() - parseTs(ts).getTime()) / 60_000)
-  if (mins < 1) return 'now'
-  if (mins < 60) return `${mins}m ago`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return days === 1 ? 'yesterday' : `${days}d ago`
+  const at = parseTs(ts)
+  const now = Date.now()
+  if (now - at.getTime() < 60_000) return fmtRelativeLocalized(now, { now })
+  return fmtRelativeLocalized(at, { now })
 }
 
 /**
@@ -209,7 +217,7 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
             key={c.key}
             type="button"
             aria-pressed={isActive}
-            title={c.key === 'all' ? (allActive ? 'Clear all filters' : 'Select all categories') : `Toggle ${c.label}`}
+            title={c.key === 'all' ? (allActive ? i18nT('components.notifications.notificationFeed.clear_all_filters') : i18nT('components.notifications.notificationFeed.select_all_categories')) : `Toggle ${c.label}`}
             className={`px-2 py-1 rounded-md text-[12px] font-medium cursor-pointer border transition-all font-body ${isActive ? 'bg-accent-subtle text-accent border-accent' : 'bg-transparent text-muted border-border hover:text-text hover:border-border-strong'}`}
             onClick={() => toggleCategory(c.key)}
           >
@@ -221,11 +229,11 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
         <button
           type="button"
           aria-pressed={showMuted}
-          title={showMuted ? 'Hide muted-channel notifications' : `Show ${silencedCount} muted-channel notification${silencedCount === 1 ? '' : 's'}`}
+          title={showMuted ? i18nT('components.notifications.notificationFeed.hide_muted_channel_notifications') : `Show ${silencedCount} muted-channel notification${silencedCount === 1 ? '' : 's'}`}
           className={`px-2 py-1 rounded-md text-[12px] font-medium cursor-pointer border border-dashed transition-all font-body ${showMuted ? 'bg-bg-hover text-text border-border-strong' : 'bg-transparent text-muted border-border hover:text-text hover:border-border-strong'}`}
           onClick={() => setShowMuted(v => !v)}
         >
-          <BellOff className="lucide-inline" /> {i18nT('components.notifications.notificationFeed.muted')}{silencedCount})
+          <BellOff className="lucide-inline" /> {i18nT('components.notifications.notificationFeed.muted_count', { count: silencedCount })}
         </button>
       )}
     </div>
@@ -278,7 +286,7 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
       {/* List */}
       <div className={`flex-1 overflow-y-auto ${mac ? 'px-4 -mx-4 pb-2' : 'scroll-shadow'}`}>
         {filtered.length === 0 ? (
-          <EmptyState testId="notification-feed-empty" icon={<Bell className="lucide-inline" />} title={i18nT('components.notifications.notificationFeed.no_notifications')} subtitle={noneActive ? 'No categories selected — click a category above' : filter ? 'Try a different search' : 'Activity will appear here'} />
+          <EmptyState testId="notification-feed-empty" icon={<Bell className="lucide-inline" />} title={i18nT('components.notifications.notificationFeed.no_notifications')} subtitle={noneActive ? i18nT('components.notifications.notificationFeed.no_categories_selected_click_a_category_above') : filter ? i18nT('components.notifications.notificationFeed.try_a_different_search') : i18nT('components.notifications.notificationFeed.activity_will_appear_here')} />
         ) : (
           Array.from(stackedGroups.entries()).map(([group, rows]) => (
             <div key={group} className="mb-3">
@@ -393,7 +401,7 @@ export default function NotificationFeed({ selectedTs, onSelect, variant = 'pane
                                 ? `${actionBtn} text-muted`
                                 : 'px-2 py-0.5 rounded-full text-[11px] font-medium cursor-pointer bg-bg-hover text-muted border border-border hover:text-text hover:border-border-strong transition-colors font-body whitespace-nowrap'}
                               onClick={e => { e.stopPropagation(); toggleStack(stackKey) }}
-                            >{mac ? 'Show less' : <><Layers className="lucide-inline" /> {stackExpanded ? 'Show less' : `${stackCount - 1} more`}</>}</button>
+                            >{mac ? i18nT('components.notifications.notificationFeed.show_less') : <><Layers className="lucide-inline" /> {stackExpanded ? i18nT('components.notifications.notificationFeed.show_less') : `${stackCount - 1} more`}</>}</button>
                           )}
                         </div>
                       )}

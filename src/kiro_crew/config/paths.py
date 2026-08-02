@@ -85,9 +85,7 @@ def preserved_entries(home: Path) -> list[str]:
     nothing rather than raising into a boot path.
     """
     try:
-        return sorted(
-            name for name in PRESERVED_VENV_DIR_NAMES if (home / name).is_dir()
-        )
+        return sorted(name for name in PRESERVED_VENV_DIR_NAMES if (home / name).is_dir())
     except OSError:  # pragma: no cover - defensive
         return []
 
@@ -146,6 +144,20 @@ _WORKSPACE_DIR_NAME = "kirocrew-workspace"
 # the untouched ~/.kiro/crew, splitting the process across two data roots.
 # ``None`` means "not yet resolved this process".
 _resolved_home: Path | None = None
+
+# Memo for ``config_dir()``: ``(raw KIROCREW_HOME, _resolved_home at the time,
+# result)``. ``config_dir()`` is called from 323 sites and each uncached call
+# does a ``Path.resolve()`` + ``mkdir`` and, on the default path, a breadcrumb
+# read/write plus the leftover-archive sweep — measured 94.9us per call. Keying
+# on the RAW env value keeps the override honoured the moment it changes
+# (``KIROCREW_HOME`` is repointed per test by the suite's isolation fixture, and
+# by pods/worktrees at runtime), and keying on ``_resolved_home`` by identity
+# ties the default-path entry to the resolution cache below — so clearing
+# ``_resolved_home`` (which the test suite does per test) invalidates this memo
+# too instead of pinning a stale home. In a real process both keys are stable
+# after the first call, which is what makes the breadcrumb write and the archive
+# sweep effectively once-per-process rather than once-per-call.
+_config_dir_memo: tuple[str | None, Path | None, Path] | None = None
 
 
 def _default_home() -> Path:
@@ -247,7 +259,8 @@ def _maybe_migrate_legacy_home() -> Path:
                     "debris). Any data written there is ignored. Investigate and "
                     "remove it manually once confirmed stale (kirocrew doctor "
                     "surfaces this).",
-                    new_home, legacy,
+                    new_home,
+                    legacy,
                 )
         except OSError:
             pass  # best-effort probe — never block resolution
@@ -375,6 +388,36 @@ def _finalize_fresh_home(new_home: Path, marker: Path) -> Path:
     return new_home
 
 
+# System directory trees no resolved home may live under, matched on the first
+# two path components.
+_UNSAFE_HOME_PREFIXES = frozenset(
+    {
+        ("/", "usr"),
+        ("/", "System"),
+        ("/", "etc"),
+    }
+)
+
+# macOS resolves ``/etc`` to ``/private/etc``, so an override spelled ``/etc``
+# reaches the guard already resolved and would otherwise miss the check above.
+#
+# Matched as a THREE-component prefix, so the whole ``/private/etc`` TREE is
+# refused — not just the bare directory. ``("/", "etc")`` above is a prefix on
+# Linux and refuses ``/etc/anything``; an exact match here would have left
+# ``KIROCREW_HOME=/etc/kirocrew`` accepted on macOS only, so the two platforms
+# would disagree about the same path.
+#
+# Deliberately scoped to ``/private/etc`` rather than all of ``/private``:
+# ``tempfile.gettempdir()`` resolves under ``/private/var/folders/<...>/T`` on
+# macOS, so refusing that tree would reject every legitimate temp-dir data home
+# that tests, pods and worktree previews rely on.
+_UNSAFE_RESOLVED_PREFIXES = frozenset(
+    {
+        ("/", "private", "etc"),
+    }
+)
+
+
 def _is_unsafe_home(p: Path) -> bool:
     """Whether *p* is too dangerous to use as a resolved home directory.
 
@@ -382,10 +425,30 @@ def _is_unsafe_home(p: Path) -> bool:
     Windows drive root is its own parent (``/`` -> ``/``, ``C:\\`` -> ``C:\\``),
     so this refuses a bare "/" on every OS (not just POSIX).
 
+    Both system-directory checks are PREFIX matches, so a system directory and
+    everything under it are refused together. That symmetry is the point: the
+    ``("/", "etc")`` entry already refuses ``/etc/anything`` on Linux, so the
+    macOS-resolved form has to cover ``/private/etc/anything`` too, or the same
+    override would be rejected on one platform and accepted on the other.
+
+    The macOS case exists because callers pass an already-``resolve()``d path:
+    ``KIRO_HOME=/etc`` arrives here as ``/private/etc``, whose ``parts[:2]`` is
+    ``("/", "private")``. A check that knew only the unresolved spelling let it
+    through, and KiroCrew would then create agent JSON inside ``/etc``.
+
+    Deliberately NOT refusing the whole ``/private`` tree: on macOS
+    ``tempfile.gettempdir()`` resolves under ``/private/var/folders/...``, so a
+    prefix match there would reject every temp-dir data home — which tests, pods
+    and worktree previews legitimately use.
+
     Shared by :func:`_valid_override_home` (``KIROCREW_HOME``) and
     :func:`kiro_home` (``KIRO_HOME``) so both overrides refuse the same targets.
     """
-    return p == p.parent or p.parts[:2] in (("/", "usr"), ("/", "System"), ("/", "etc"))
+    if p == p.parent:
+        return True
+    if p.parts[:2] in _UNSAFE_HOME_PREFIXES:
+        return True
+    return p.parts[:3] in _UNSAFE_RESOLVED_PREFIXES
 
 
 def _valid_override_home() -> Path | None:
@@ -409,9 +472,15 @@ def _valid_override_home() -> Path | None:
 
 
 def config_dir() -> Path:
+    global _config_dir_memo
+    override_raw = os.environ.get("KIROCREW_HOME")
+    memo = _config_dir_memo
+    if memo is not None and memo[0] == override_raw and memo[1] is _resolved_home:
+        return memo[2]
     p = _valid_override_home()
     if p is not None:
         p.mkdir(parents=True, exist_ok=True)
+        _config_dir_memo = (override_raw, _resolved_home, p)
         return p
     if os.environ.get("KIROCREW_HOME"):
         logger.warning(
@@ -424,12 +493,61 @@ def config_dir() -> Path:
     # Best-effort + idempotent; guarded so a breadcrumb failure never blocks the
     # data-home resolution the whole app depends on.
     _write_recovery_breadcrumb(d)
-    # One-shot (but re-checked every call, so a leftover created or missed
-    # between starts is still caught) removal of an ungated archive/backup an
-    # earlier release of this migration could have left behind. Default path
-    # only — see _sweep_ungated_archive_leftovers.
+    # Removal of an ungated archive/backup an earlier release of this migration
+    # could have left behind. Default path only — see
+    # _sweep_ungated_archive_leftovers.
     _sweep_ungated_archive_leftovers()
+    _config_dir_memo = (override_raw, _resolved_home, d)
     return d
+
+
+def data_home() -> Path:
+    """The resolved data home, WITHOUT re-running start-of-process maintenance.
+
+    :func:`config_dir` is *resolve + maintain*: besides resolving the home it
+    also ``mkdir``s it, refreshes the recovery breadcrumb (a stat + a read) and
+    re-runs :func:`_sweep_ungated_archive_leftovers`, which can ``shutil.rmtree``
+    a leftover archive. That work belongs to process start --
+    :func:`ensure_data_home` is the startup hook -- not to every caller that
+    merely needs a path. While callers bound the result to a module constant at
+    import the distinction did not matter; resolving per call (issue #874) makes
+    it load-bearing, because a request handler would otherwise perform a
+    destructive sweep on the event loop as a side effect of asking where a
+    directory is.
+
+    Use this from any hot or async path. Three cases, in order:
+
+    1. A **valid** ``KIROCREW_HOME`` override -> delegate to :func:`config_dir`
+       on every call, so an override set *after* this module was imported is
+       still honoured (that is the whole point of #874). That branch does
+       neither the breadcrumb refresh nor the sweep -- only a cheap ``mkdir`` --
+       so it is already safe.
+
+       The test is :func:`_valid_override_home`, i.e. the SAME predicate
+       :func:`config_dir` gates on -- not merely "is the env var set". An
+       override naming a system directory is *rejected* there and resolution
+       falls through to the default home, so gating on the raw env var would
+       send every call down the maintenance path and re-run the destructive
+       sweep per request. The two predicates must not drift apart.
+    2. Default home already resolved -> return the cached value directly. No
+       ``mkdir``, no breadcrumb, no sweep.
+    3. Not yet resolved -> delegate to :func:`config_dir`, so the FIRST
+       resolution in a process still migrates, creates the home and sweeps
+       exactly once. That is precisely the contract
+       :func:`_sweep_ungated_archive_leftovers` documents ("a leftover created
+       between two starts ... is still caught on the next start") -- the sweep is
+       specified per *start*, and running it per *call* was the mechanism, not
+       the requirement.
+
+    Deliberately NOT a cache of its own: case 1 must stay live, and case 2 reads
+    the same ``_resolved_home`` that :func:`config_dir` populates, so there is
+    one source of truth for where the home is.
+    """
+    if _valid_override_home() is not None:
+        return config_dir()
+    if _resolved_home is not None:
+        return _resolved_home
+    return config_dir()
 
 
 def ensure_data_home() -> Path:

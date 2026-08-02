@@ -266,15 +266,15 @@ def _budget(fraction: float) -> int:
 # against a base scaled to the active model's window, so a smaller-window model
 # gets proportionally smaller caps. These constants stay as the reference /
 # fallback (used when the window is unknown ⇒ 1M) and by tests.
-_HISTORY_BUDGET_CHARS = _budget(0.21)    # thread history (fallback/truncated)  = 21%
-_MEMORY_PREFS_CAP = _budget(0.026)       # user preferences                     = 2.6%
-_MEMORY_PROJECTS_CAP = _budget(0.039)    # active projects                      = 3.9%
-_MEMORY_HISTORY_CAP = _budget(0.16)      # daily history (multi-tier decay)     = 16%
-_LESSONS_CAP = _budget(0.226)            # learned corrections (high priority)  = 22.6%
-_SEMANTIC_MEMORY_CAP = _budget(0.077)    # semantic memory (vector)             = 7.7%
-_EPISODIC_MEMORY_CAP = _budget(0.077)    # episodic memory (vector)             = 7.7%
-_SKILLS_CAP = _budget(0.15)              # skills top-K block (lazy-loaded)     = 15%
-_STEERING_CAP = _budget(0.10)            # steering resource files              = 10%
+_HISTORY_BUDGET_CHARS = _budget(0.21)  # thread history (fallback/truncated)  = 21%
+_MEMORY_PREFS_CAP = _budget(0.026)  # user preferences                     = 2.6%
+_MEMORY_PROJECTS_CAP = _budget(0.039)  # active projects                      = 3.9%
+_MEMORY_HISTORY_CAP = _budget(0.16)  # daily history (multi-tier decay)     = 16%
+_LESSONS_CAP = _budget(0.226)  # learned corrections (high priority)  = 22.6%
+_SEMANTIC_MEMORY_CAP = _budget(0.077)  # semantic memory (vector)             = 7.7%
+_EPISODIC_MEMORY_CAP = _budget(0.077)  # episodic memory (vector)             = 7.7%
+_SKILLS_CAP = _budget(0.15)  # skills top-K block (lazy-loaded)     = 15%
+_STEERING_CAP = _budget(0.10)  # steering resource files              = 10%
 _PER_MESSAGE_CAP = 8_000  # truncate individual messages on fallback path
 # Historical char cap for the episodic-memory block injected on new sessions
 # (build_message). Bounds the top-8 episodic fragments; scaled down with the
@@ -569,26 +569,43 @@ Respond with ONLY the compressed summary, no preamble."""
 # Docs directory bundled inside the kiro_crew package
 _BUNDLED_DOCS_DIR = Path(__file__).resolve().parent / "docs"
 
-# Display names for runtime environments, keyed by the source tag from
-# sel.py _infer_source().  Kept here so the mapping is close to the
-# injection site and easy to extend.
+# Display names for runtime environments, keyed by trusted dispatcher source
+# tags and session namespaces. Kept close to the injection site so new
+# transports can extend it alongside their dispatcher wiring.
 _RUNTIME_DISPLAY = {
     "dashboard": "KiroCrew dashboard",
     "cron": "KiroCrew cron job",
     "subagent": "KiroCrew subagent",
     "taskrunner": "KiroCrew task runner",
     "background": "KiroCrew background",
+    "heartbeat": "KiroCrew heartbeat",
     "cli": "CLI terminal",
     "slack": "Slack",
+    "discord": "Discord",
+    "telegram": "Telegram",
+    "wecom": "WeCom",
+    "weixin": "Weixin",
+    "webex": "Webex",
+    "teams": "Microsoft Teams",
 }
 
 
-def _runtime_display_name(session_key: str) -> str:
+def _runtime_display_name(session_key: str, runtime_source: str | None = None) -> str:
     """Map a session_key to a human-readable runtime name.
 
-    Uses the same prefix heuristic as ``sel.py:_infer_source()`` so both
-    SEL audit logs and LLM context agree on the runtime.
+    ``runtime_source`` is the authoritative transport for the current turn.
+    It is intentionally separate from ``session_key``: a dashboard session can
+    be resumed from Discord, and ``messaging.dm_scope="unified"`` deliberately
+    removes the transport from the stable session key.
+
+    Without an explicit source, infer the runtime from namespaced session keys.
+    Unknown/bare keys retain the historical Slack fallback for legacy Slack
+    thread timestamps.
     """
+    source = (runtime_source or "").strip().lower()
+    if source:
+        return _RUNTIME_DISPLAY.get(source, source)
+
     if session_key.startswith("dashboard:") or session_key.startswith("dashboard_"):
         source = "dashboard"
     elif session_key.startswith("cron:") or session_key.startswith("cron_"):
@@ -599,10 +616,25 @@ def _runtime_display_name(session_key: str) -> str:
         source = "taskrunner"
     elif session_key == "_bg":
         source = "background"
+    elif session_key == "_hb":
+        source = "heartbeat"
     elif session_key == "cli_chat":
         source = "cli"
     else:
         source = "slack"
+        lowered_key = session_key.lower()
+        for namespace in (
+            "discord",
+            "telegram",
+            "wecom",
+            "weixin",
+            "webex",
+            "teams",
+            "slack",
+        ):
+            if lowered_key.startswith((f"{namespace}:", f"{namespace}_")):
+                source = namespace
+                break
     return _RUNTIME_DISPLAY.get(source, source)
 
 
@@ -641,9 +673,7 @@ _USER_ROLE_DESCRIPTIONS: dict[str, str] = {
 
 _TECHNICAL_LEVEL_DESCRIPTIONS: dict[str, str] = {
     "codes": "writes code daily — comfortable with full technical depth",
-    "somewhat-technical": (
-        "somewhat technical — reads some code but doesn't write it daily"
-    ),
+    "somewhat-technical": ("somewhat technical — reads some code but doesn't write it daily"),
     "non-technical": "not technical — prefers plain language over code and jargon",
 }
 
@@ -669,9 +699,7 @@ def _build_user_profile_section(cfg: "KiroCrewConfig") -> str:
     if tech_desc:
         facts.append(f"Technical comfort: {tech_desc}.")
     return (
-        "[USER PROFILE]\n"
-        + " ".join(facts)
-        + "\n"
+        "[USER PROFILE]\n" + " ".join(facts) + "\n"
         "Calibrate communication to this profile: match vocabulary, depth of "
         "explanation, and examples to their role and technical comfort. Explain "
         "concepts outside their domain plainly; skip basic explanations inside "
@@ -692,6 +720,30 @@ def _build_user_profile_section(cfg: "KiroCrewConfig") -> str:
 #: ``"None"`` and ``["zh-CN"]`` as ``"['zh-CN']"``. Anything that is not
 #: tag-shaped is dropped rather than pasted into the system prompt.
 _UI_LANGUAGE_TAG_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,2}$")
+
+
+def ui_language_tag(cfg: "KiroCrewConfig") -> str:
+    """Return ``dashboard.language`` as a validated BCP-47 tag, or ``""``.
+
+    Public because the UI language now steers more than the session-context block
+    below: the dashboard's auto-titler asks a background model for a session name
+    that renders in the sidebar, so it needs the same tag resolved the same way.
+    One resolver keeps the two from disagreeing about what counts as a usable
+    value (see ``_UI_LANGUAGE_TAG_RE`` for why the shape is re-checked here even
+    though the writer validates it).
+
+    ``""`` means "the backend does not know" — either nothing was chosen (the
+    "follow the browser" sentinel, resolved in the SPA's ``resolveLanguage()``)
+    or the stored value is not tag-shaped. Callers must treat it as unknown
+    rather than as English.
+    """
+    lang = cfg.dashboard.language
+    if not isinstance(lang, str):
+        return ""
+    lang = lang.strip()
+    if not lang or not _UI_LANGUAGE_TAG_RE.match(lang):
+        return ""
+    return lang
 
 
 def _build_ui_language_section(cfg: "KiroCrewConfig") -> str:
@@ -732,11 +784,8 @@ def _build_ui_language_section(cfg: "KiroCrewConfig") -> str:
     This is best-effort steering, not enforcement — there is no fallback if the
     model ignores it.
     """
-    lang = cfg.dashboard.language
-    if not isinstance(lang, str):
-        return ""
-    lang = lang.strip()
-    if not lang or not _UI_LANGUAGE_TAG_RE.match(lang):
+    lang = ui_language_tag(cfg)
+    if not lang:
         return ""
     return (
         f"[UI LANGUAGE] {lang}\n"
@@ -819,10 +868,10 @@ _CRITICAL_RULES = (
     "Write every option label in the USER's voice, not yours. Clicking a label "
     "inserts it verbatim into the user's input box and sends it as their next "
     "message to you, so each label must read as a short instruction or answer "
-    "FROM the user (\"Merge it now\", \"Show me the diff\", \"Skip the rebase\", "
-    "\"Yes, delete it\"). Never phrase a label in your own voice or as your own "
-    "next action (\"I'll merge it\", \"Let me show the diff\", \"I can rebase "
-    "first\"), and never phrase it as a question back to the user.\n"
+    'FROM the user ("Merge it now", "Show me the diff", "Skip the rebase", '
+    '"Yes, delete it"). Never phrase a label in your own voice or as your own '
+    'next action ("I\'ll merge it", "Let me show the diff", "I can rebase '
+    'first"), and never phrase it as a question back to the user.\n'
     "[END CRITICAL RULES]\n\n"
 )
 
@@ -1207,9 +1256,7 @@ class ContextBuilder:
                 cap = resolve_max_subagents(KiroCrewConfig.load())
             except Exception:
                 cap = 0
-            prompt = prompt.replace(
-                "{{MAX_SUBAGENTS}}", str(cap) if cap > 0 else "several"
-            )
+            prompt = prompt.replace("{{MAX_SUBAGENTS}}", str(cap) if cap > 0 else "several")
 
         cfg = KiroCrewConfig.load()
 
@@ -1222,8 +1269,8 @@ class ContextBuilder:
                 "## Response Verbosity: Concise\n\n"
                 "Concise mode is on. Reduce length without losing substance:\n"
                 "- Lead with the answer or result. Skip preamble, filler, and "
-                "pleasantries (e.g. \"Sure!\", \"Great question\", \"I'd be happy "
-                "to\", \"basically\", \"let me…\").\n"
+                'pleasantries (e.g. "Sure!", "Great question", "I\'d be happy '
+                'to", "basically", "let me…").\n'
                 "- Keep progress signal brief, not absent: a short high-level note "
                 "of what you're doing or will do next is fine (it builds confidence "
                 "about what's happening underneath), but skip step-by-step "
@@ -1332,6 +1379,7 @@ class ContextBuilder:
         provider_type: str = "acp",
         minimal_context: bool = False,
         *,
+        runtime_source: str | None = None,
         exclude_last_n: int = 0,
         model_window: int | None = None,
     ) -> str:
@@ -1384,7 +1432,7 @@ class ContextBuilder:
             agent_label = agent or "kirocrew"
             parts.append(f"[CURRENT AGENT] {agent_label}\n")
             if session_key:
-                runtime = _runtime_display_name(session_key)
+                runtime = _runtime_display_name(session_key, runtime_source)
                 parts.append(f"[RUNTIME] {runtime}\n")
             parts.append("\n")
             # Cron/minimal runs still render tool-call pills in the dashboard
@@ -1395,7 +1443,8 @@ class ContextBuilder:
             parts.append(_build_ui_language_section(KiroCrewConfig.load()))
             logger.debug(
                 "Minimal session context: agent=%s, %d chars",
-                agent_label, sum(len(p) for p in parts),
+                agent_label,
+                sum(len(p) for p in parts),
             )
             return "".join(parts)
 
@@ -1430,11 +1479,11 @@ class ContextBuilder:
         # incorrectly tell the user to "go to the dashboard" when it IS
         # the dashboard.
         #
-        # Runtime detection reuses the same heuristic as sel.py
-        # _infer_source() to keep a single source of truth.
+        # Prefer the trusted per-turn source supplied by the dispatcher. The
+        # session-key fallback preserves callers that do not carry one.
         agent_label = agent or "kirocrew"
         if session_key:
-            runtime = _runtime_display_name(session_key)
+            runtime = _runtime_display_name(session_key, runtime_source)
             parts.append(
                 f"[CURRENT AGENT] {agent_label}\n"
                 f"[RUNTIME] {runtime}\n"
@@ -1506,7 +1555,7 @@ class ContextBuilder:
             steering_ctx = _load_steering_resources()
             if steering_ctx:
                 if lazy_skills and len(steering_ctx) > caps.steering:
-                    steering_ctx = steering_ctx[:caps.steering] + "\n...[steering truncated]\n"
+                    steering_ctx = steering_ctx[: caps.steering] + "\n...[steering truncated]\n"
                 parts.append(steering_ctx)
 
         # Thread conversation history — highest priority context.
@@ -1632,16 +1681,19 @@ class ContextBuilder:
             )
             if skills_ctx:
                 if lazy_skills and len(skills_ctx) > caps.skills:
-                    skills_ctx = skills_ctx[:caps.skills] + "\n...[skills truncated]\n"
+                    skills_ctx = skills_ctx[: caps.skills] + "\n...[skills truncated]\n"
                 parts.append(skills_ctx)
 
         # Lessons: merge global + workspace-scoped — inject for ALL agents
         # (skipped for temporary sessions)
         lessons_ctx = ""
         if not blocks_reads:
-            if memory.vector_store and memory.vector_store.get_lessons():
-                lessons_ctx = memory.vector_store.get_lessons_context()
-            else:
+            # One query, not two: get_lessons_context() already returns "" when the
+            # store holds no lessons, so the former get_lessons() existence probe
+            # was a duplicate SELECT * over the same rows (embedding blobs included)
+            # whose only use was an emptiness check.
+            lessons_ctx = memory.vector_store.get_lessons_context() if memory.vector_store else ""
+            if not lessons_ctx:
                 lessons_ctx = self.lessons.get_context()
             # Merge workspace-scoped lessons if workspace differs from default
             if workspace and workspace != "default":
@@ -1680,7 +1732,7 @@ class ContextBuilder:
                         len(lessons_ctx),
                         caps.lessons,
                     )
-                    lessons_ctx = lessons_ctx[:caps.lessons] + "\n…[lessons truncated]\n"
+                    lessons_ctx = lessons_ctx[: caps.lessons] + "\n…[lessons truncated]\n"
                 parts.append(lessons_ctx)
 
         # Provenance-tagged entries from recent sessions (skipped for temporary)
@@ -1740,6 +1792,7 @@ class ContextBuilder:
         provider_type: str = "acp",
         minimal_context: bool = False,
         *,
+        runtime_source: str | None = None,
         exclude_last_n: int = 0,
         folder_path: str | None = None,
         model_window: int | None = None,
@@ -1810,6 +1863,7 @@ class ContextBuilder:
                 blocks_reads=blocks_reads,
                 provider_type=provider_type,
                 minimal_context=minimal_context,
+                runtime_source=runtime_source,
                 exclude_last_n=exclude_last_n,
                 model_window=model_window,
             )
@@ -1825,7 +1879,7 @@ class ContextBuilder:
                 # after the block is safe.
                 if session_ctx.startswith(_CRITICAL_RULES):
                     session_ctx = _CRITICAL_RULES + _neutralize_structural_markers(
-                        session_ctx[len(_CRITICAL_RULES):]
+                        session_ctx[len(_CRITICAL_RULES) :]
                     )
                 else:
                     session_ctx = _neutralize_structural_markers(session_ctx)
@@ -1836,7 +1890,9 @@ class ContextBuilder:
                         "[SESSION CONTEXT — background reference only, NOT a task to act on.\n"
                         "This is your memory, lessons, and conversation history from prior "
                         "sessions. Use it to stay consistent but ONLY respond to the "
-                        "CURRENT USER REQUEST below.]\n" + session_ctx + "[END OF SESSION CONTEXT]\n\n"
+                        "CURRENT USER REQUEST below.]\n"
+                        + session_ctx
+                        + "[END OF SESSION CONTEXT]\n\n"
                     )
             # Session replay: inject OUTSIDE the capped session context so it
             # doesn't get truncated at 165K. This is the full conversation
@@ -1847,6 +1903,19 @@ class ContextBuilder:
                     + _neutralize_structural_markers(compressed_history)
                     + "\n[END CONVERSATION HISTORY]\n\n"
                 )
+
+        # The stable session key describes conversation identity, not
+        # necessarily the interface carrying this turn. Cross-surface resume
+        # keeps the original key (for native ACP history fidelity), so refresh
+        # the runtime on every follow-up from trusted dispatcher metadata.
+        if not is_new_session and runtime_source:
+            runtime = _runtime_display_name(session_key or "", runtime_source)
+            parts.append(
+                f"[RUNTIME] {runtime}\n"
+                "This is the interface carrying the current user message and is "
+                "authoritative for this turn, even if the session originated on "
+                "another interface.\n\n"
+            )
 
         # Channel history — inject on every message for group channel context
         ch_ctx: str | None = None
@@ -2060,8 +2129,8 @@ class ContextBuilder:
                 "\n\n(If presenting choices, end with [OPTIONS: choice1 | choice2 | choice3] "
                 "as the very last line — exactly once, nothing after it. "
                 "Users can select multiple options before submitting. Label each choice "
-                "in the user's voice as an instruction to you — \"Merge it now\", not "
-                "\"I'll merge it\".)"
+                'in the user\'s voice as an instruction to you — "Merge it now", not '
+                '"I\'ll merge it".)'
             )
             # Dashboard-only, situational nudges for tools that may otherwise
             # never surface with MCP Tool Search. Gated here because both tools
@@ -2069,8 +2138,7 @@ class ContextBuilder:
             # ask_question is a MID-turn blocking decision; [OPTIONS:] remains
             # the cheaper END-turn choice mechanism on every interactive surface.
             if session_key and (
-                session_key.startswith("dashboard:")
-                or session_key.startswith("dashboard_")
+                session_key.startswith("dashboard:") or session_key.startswith("dashboard_")
             ):
                 parts.append(
                     "\n\n(If you need the user's answer to a blocking question BEFORE "

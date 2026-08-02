@@ -394,7 +394,7 @@ function InstallStatus({
     <Btn
       primary={large}
       disabled={!installReady}
-      title={installReady ? undefined : 'Waiting for the install plan to load'}
+      title={installReady ? undefined : i18nT('components.mcpBrowserModal.waiting_for_the_install_plan_to_load')}
       onClick={(e: React.MouseEvent) => { e.stopPropagation(); onInstall(server) }}
     >
       <Download size={iconSize} aria-hidden="true" />
@@ -486,7 +486,7 @@ function ServerDetailPanel({
       )}
       {phase?.step === 'conflict' && (
         <div className="mb-3 p-2 rounded bg-warn-subtle border border-[var(--warn)]/30 text-xs text-[var(--warn)]">
-          {i18nT('components.mcpBrowserModal.a_server_named')}{server.name}{i18nT('components.mcpBrowserModal.already_exists_with_a_different_configuration_ma')}
+          {i18nT('components.mcpBrowserModal.a_server_named_already_exists', { name: server.name })}
         </div>
       )}
 

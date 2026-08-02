@@ -13,6 +13,7 @@ import { api, ApiError } from '../api/client'
 import Modal from './Modal'
 import { Btn } from './ui'
 import MarkdownRenderer from './MarkdownRenderer'
+import { safeHttpUrl } from '../lib/safeUrl'
 import { DiscoverySearchBar, DiscoveryStates } from './DiscoverySearchBar'
 import { SkillMetaStrip } from './SkillDirectoryBrowser'
 import { parseFrontmatter } from './SkillForm'
@@ -327,7 +328,7 @@ function InstallStatus({
     return (
       <span className="flex items-center gap-1 text-xs text-green-400" role="status">
         <Check size={iconSize} aria-hidden="true" />
-        {phase.fileCount > 1 ? `Installed ${phase.fileCount} files` : 'Installed'}
+        {phase.fileCount > 1 ? `Installed ${phase.fileCount} files` : i18nT('components.skillBrowserModal.installed')}
       </span>
     )
   }
@@ -356,7 +357,7 @@ function InstallStatus({
       onClick={(e: React.MouseEvent) => { e.stopPropagation(); onInstall(skill) }}
     >
       <Download size={iconSize} aria-hidden="true" />
-      {i18nT('components.skillBrowserModal.install')}{large ? ' Skill' : ''}
+      {large ? i18nT('components.skillBrowserModal.install_skill') : i18nT('components.skillBrowserModal.install')}
     </Btn>
   )
 }
@@ -417,9 +418,9 @@ function SkillDetailPanel({
             <FileText size={11} aria-hidden="true" /> {i18nT('components.skillBrowserModal.file', { count: preview!.file_count })}
           </span>
         )}
-        {skill.repo_url && (
+        {safeHttpUrl(skill.repo_url ?? '') && (
           <a
-            href={skill.repo_url}
+            href={safeHttpUrl(skill.repo_url ?? '')!}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 text-accent hover:underline"
@@ -452,14 +453,14 @@ function SkillDetailPanel({
         </>
       ) : (
         <p className="text-sm text-muted">
-          {stripDescription || 'No preview available.'}
+          {stripDescription || i18nT('components.skillBrowserModal.no_preview_available')}
         </p>
       )}
 
       {(preview?.files?.length ?? 0) > 1 && (
         <details className="mt-4">
           <summary className="text-xs text-muted cursor-pointer hover:text-text">
-            {i18nT('components.skillBrowserModal.bundle_contents')}{preview!.file_count} {i18nT('components.skillBrowserModal.files')}
+            {i18nT('components.skillBrowserModal.bundle_contents_count', { count: preview!.file_count })}
           </summary>
           <ul className="mt-1.5 text-xs text-muted font-mono space-y-0.5 max-h-40 overflow-y-auto scrollbar-overlay">
             {preview!.files!.map(f => <li key={f}>{f}</li>)}

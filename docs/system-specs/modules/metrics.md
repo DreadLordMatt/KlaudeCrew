@@ -1,6 +1,6 @@
 # Metrics Telemetry Module
 
-Last Updated: 2026-07-30 (anonymous usage beacon — a THIRD, separate telemetry path)
+Last Updated: 2026-08-01 (in-product beacon opt-out toggle + onboarding privacy step)
 
 ## Overview
 
@@ -20,7 +20,7 @@ Source: `src/kiro_crew/metrics/` — `schema.py`, `recorder.py`, `provider.py`,
 |------|---------|
 | `schema.py` | Namespace constants (`NS_CORE = "kirocrew."`, `NS_GENAI = "gen_ai."`, `NS_APP_PREFIX = "app."`) + `validate_name` / `validate_attrs` / `redact` guardrails. Documents the low-cardinality contract. |
 | `recorder.py` | `MetricsRecorder` — facade over the OTEL `Meter`. Every metric passes namespace + privacy guardrails BEFORE reaching an instrument. Instrument-cache creation is lock-guarded (atomic check-then-create). Best-effort: a telemetry failure never propagates to the caller. `meter=None` = no-op recorder. |
-| `provider.py` | Consent gate + process-global recorder (`get_recorder()`) + graceful `shutdown()` / `reset_for_testing()`. When enabled, wires a `PeriodicExportingMetricReader` to the local JSONL exporter. Installs a `View` applying `ExplicitBucketHistogramAggregation(_LATENCY_BUCKETS_MS)` (1ms–60s boundaries) to EVERY histogram so bucket-derived p50/p90 stay meaningful across the full startup / acquire / lazy-load range (OTEL's default buckets top out at 10s). |
+| `provider.py` | Consent gate + process-global recorder (`get_recorder()`) + graceful `shutdown()` / `reset_for_testing()`. When enabled, wires a `PeriodicExportingMetricReader` to the local JSONL exporter. Installs **one `View` per instrument** from `_HISTOGRAM_BUCKETS_MS`, each with its own `ExplicitBucketHistogramAggregation` boundaries (see below) — deliberately NOT a catch-all `instrument_type=Histogram` View. |
 | `local_exporter.py` | `JsonlMetricExporter` — appends one JSON line per export cycle to `<dir>/metrics-YYYY-MM-DD-<pid>.jsonl` (default dir `~/.kiro/crew/metrics`). Per-PID single-writer shards keep append + rotation lock-free, so concurrent exporters do not lose DELTA cycles. A private `.metrics.lock` serializes only retention sweeps; pruning skips canonical shards owned by live PIDs or modified within the safety window. **Bounded retention (rec #14):** shards rotate before an append exceeds `max_total_mb`; closed/expired shards are pruned directly by age and oldest-first size. Pruning is throttled to at most once per 300s and fully best-effort. Dir mode is 0o700, file mode 0o600, and nothing egresses the host. Declares DELTA `preferred_temporality` for Counter/UpDownCounter/Histogram so daily aggregation is an element-wise sum across cycles/PIDs. |
 | `http_metrics.py` | Gateway HTTP observability (rec #1): `record_boot_to_ready()` (boot-to-ready histogram) + `make_route_latency_middleware()` (per-route latency, wired as the outermost middleware on both `start_dashboard`/`start_api_server`). Bounds `route_template` cardinality via `collect_route_templates()` (build-time snapshot) + `route_template()` (`__unknown__` fallback); clamps `method` to a fixed allowlist and `status_class` to `1xx`..`5xx`/`other`. Upgraded WebSocket connections and `text/event-stream` SSE responses are excluded because their handler elapsed time is connection/turn lifetime, not HTTP request latency. Best-effort — a telemetry failure never alters a response. |
 
@@ -148,6 +148,75 @@ when extra missing), `test/metrics/test_schema.py` (redaction / namespace).
 | `kirocrew.skill.lazy_load.count` / `.duration` | counter + histogram (ms) | `hit` (bool) | `skills.py::SkillsLoader.load_skill` via `_emit_lazy_load_metric` (best-effort; never breaks skill loading). |
 | `kirocrew.gateway.boot.duration` | histogram (ms) | `server` (`dashboard` / `api`), `outcome` (`ready`) | `dashboard/server.py::start_dashboard` / `start_api_server` — boot-to-ready: wall-clock from the server's `start_time` until full init completes and it is about to accept traffic. Emitted via `metrics/http_metrics.py::record_boot_to_ready`. Best-effort; never blocks startup. |
 | `kirocrew.gateway.request.duration` | histogram (ms) | `method` (fixed HTTP-verb allowlist, else `OTHER`), `route_template` (matched aiohttp canonical TEMPLATE, e.g. `/api/artifacts/{slug}`, else `__unknown__`), `status_class` (`1xx`..`5xx` / `other`) | `metrics/http_metrics.py::make_route_latency_middleware` — outermost gateway middleware on BOTH `start_dashboard` and `start_api_server`. Times full in-gateway HTTP handling; upgraded WebSocket connections and `text/event-stream` SSE responses are excluded so connection/turn lifetime cannot pollute request latency. **Bounded cardinality** (see below). |
+
+### Histogram bucket boundaries: per instrument, not shared
+
+Boundaries live in `metrics/provider.py::_HISTOGRAM_BUCKETS_MS`, a metric-name →
+boundaries map from which one `View(instrument_name=…)` is built per instrument.
+Three families, each sized to its instrument's measured range:
+
+| Family | Range | Instruments |
+|---|---|---|
+| `_FAST_BUCKETS_MS` | 0.5ms – 60s | `gateway.request`, `mcp.backend.acquire`, `skill.lazy_load` |
+| `_STARTUP_BUCKETS_MS` | 1ms – 60s | `session.startup`, `mcp.lazy_load`, `gateway.boot` |
+| `_TURN_BUCKETS_MS` | 1s – 1h | `turn.duration` |
+
+**Why not one shared array.** A single 1ms–60s array previously served every
+histogram through a catch-all `View(instrument_type=Histogram)`. Its ceiling was
+sized for session startup, so the first `kirocrew.turn.duration` sample ever
+recorded (227589ms — an agent turn is a whole agent loop including tool
+round-trips and any wait on an interactive approval) landed in the `+Inf`
+overflow bucket. Since `_pct_from_buckets` can only report an overflow bucket's
+LOWER bound, the aggregator returned `p50 == p90 == 60000` — a ceiling artifact
+presented as a real latency, while `mean`/`max` (exact, from `sum`/`max`) stayed
+correct beside it. `p50 == p90` is the signature of this failure. Instruments in
+this system span six orders of magnitude (sub-ms pooled acquires to multi-minute
+agent turns), so one array must sacrifice either fast-end resolution or slow-end
+truth.
+
+**Why there is no catch-all fallback.** The OTEL SDK applies EVERY matching
+View, not the first. A per-instrument View plus a catch-all therefore publishes
+the same metric name twice with different bounds. The SDK offers no negation in
+View matching, so the catch-all had to be removed rather than narrowed.
+
+**Boundary generations never merge.** Bounds are baked into each data point at
+record time, so any boundary change makes the 14-day scan window straddle two
+incompatible generations of one metric. `handlers/telemetry.py::_Hist` therefore
+groups data points by their EXACT `explicit_bounds` and reports statistics from a
+single group — **the one holding the newest data point**. Selection is by recency,
+not volume: majority selection would let a stale generation keep winning while it
+out-counted the new one, so right after a boundary change the old bounds would be
+reported for up to the whole 14-day window — for `turn.duration` that means
+continuing to serve the ceiling-pinned percentiles this grouping exists to remove,
+while omitting the new samples. Recency makes the change take effect on the first
+post-change sample; the reported population is then small but truthful, and
+`count` says so. (`count` remains a tie-break for data points carrying no
+`time_unix_nano`.) **Outcome tallies
+are grouped too** — accumulated inside `_Hist` rather than alongside it, because
+scoping only the buckets and count would leave the outcome breakdown summing
+across generations: the page would show N turns beside an outcome bar totalling
+more than N, and a `fault_rate` computed over a different population than the
+latency next to it. Both the `startup` and `turn` blocks expose
+`other_generations` (0 = a clean window; >0 = the window straddles a boundary
+change and only the dominant generation is reported).
+
+This is load-bearing, not defensive: the historical shared array and
+`_TURN_BUCKETS_MS` have the SAME bucket-count length, so a length-only check
+would have merged them positionally — adding a pre-change sample from the old
+`+Inf` bucket into the new `+Inf` bucket and reporting **p90 = 3,600,000ms (one
+hour)**, while a 5s sample landed in a 5-minute bucket. Grouping also keeps
+`count`/`sum`/`min`/`max` consistent with the percentiles; accumulating those
+across generations while only one generation's buckets survived would describe a
+mean over one population and percentiles over another.
+
+**Completeness is therefore load-bearing.** With no catch-all, a histogram
+missing from the map silently falls back to OTEL's default 10s-ceiling
+boundaries — reintroducing the same class of bug. `test/metrics/
+test_provider_bucket_views.py` scans the source for `kirocrew.*.duration` metric
+names and fails when one has no map entry (and when a map entry has no emitting
+call site). It also pins the no-duplicate-streams property and asserts the
+227589ms regression sample no longer overflows. **When adding a duration
+histogram, add it to `_HISTOGRAM_BUCKETS_MS`.**
 
 ### Bounded cardinality of `kirocrew.gateway.request.duration` (rec #1)
 
@@ -340,7 +409,7 @@ The metric is **`DailyActiveInstances`** — deliberately not "DAU" and not
 `Instance` is the honest middle: it names a *running thing* (not the act of
 installing) without claiming to have resolved it to a human.
 
-### The seven fields (a fixed allowlist)
+### The nine fields (a fixed allowlist)
 
 `payload()` is the only producer; there is no caller-supplied field, so the
 shape cannot be widened from a call site.
@@ -348,13 +417,55 @@ shape cannot be widened from a call site.
 | Field | Example | Why |
 |-------|---------|-----|
 | `id` | 32-char hex | Random UUID4. Dedup key for `COUNT(DISTINCT)`. |
-| `v` | `0.1.2` | Version adoption. |
+| `v` | `0.1.2` | Version adoption. **Release only** — every build stamp is stripped by `release()`. |
+| `chan` | `stable` | Release channel; one of `stable`/`insider`/`nightly`. Follows `auto-update.js::channelForVersion`, plus the PEP 440 `.dev` stamp that helper never sees (see below). |
 | `os` | `darwin` | Platform mix. |
 | `arch` | `arm64` | Architecture mix. |
 | `py` | `3.12` | **Minor only.** Answers "when can the floor move off 3.10". |
 | `dist` | `dmg` | Which install path users take. Clamped to a fixed set. |
 | `gov` | `verified` | Governance posture: `none` / `unsigned` / `signed` / `verified`. What share of DAU run under a Level-1 ceiling, and how many verify its signature. A STATE, never an identity — deliberately not the profile name (free-form stems) nor `identity.issuer` (names the signing org). |
 | `first_seen` | `1`/`0` | One bit → new-install and "launched once, never again" rate. |
+
+#### Why `v` is clamped, and why the channel is its own field
+
+`__version__` is **not** low-cardinality in the field. Dev and nightly builds
+carry a per-build timestamp (`0.1.2-nightly.20260731t065756`,
+`0.1.2.dev20260731065756`), so sending it raw both fingerprints and misleads:
+
+* **It fragmented the one number the field exists to produce.** A real
+  57-install `0.1.2` population reported as 35 plus a fringe of one-install
+  series — which reads as adoption decay when nothing changed.
+* **It was silently lossy.** The aggregator caps each breakdown at
+  `BREAKDOWN_LIMIT` (25) per day. Past that, real low-install releases fall
+  below the cut and vanish from **both** CloudWatch and the permanent rollup —
+  and a long-tail release is exactly the one you most need to know is still
+  running. The limit now queries `LIMIT+1` and **reports** truncation (log line
+  plus a `truncated` key in the invocation result) instead of dropping quietly.
+* **It was a fingerprint.** A near-unique per-build value combined with a stable
+  install id picks out individual machines, which is precisely the correlated-
+  attribute hazard the rest of the allowlist is designed to avoid.
+
+The channel is genuinely wanted ("is nightly adoption growing?"), so it moves to
+its own three-value `chan` field rather than being discarded.
+
+**`chan` must recognize BOTH nightly stamps.** `nightly.yml` emits two spellings
+from a single run — `<base>-nightly.<date>t<time>` (semver) for the desktop app
+and `<base>.dev<date><time>` (PEP 440) for the pip wheel — and both are published
+nightlies (`publish-cli.yml` writes `feed/nightly/latest-cli.json`).
+`auto-update.js::channelForVersion` only ever reads the semver form, so mirroring
+it literally reported `stable` for every nightly *wheel* install, folding the
+nightly CLI lane into stable and undercounting exactly what the field was added
+to measure. `channel()` therefore treats a `.dev` segment as nightly too. A
+`+local` build tag is stripped first: it is metadata and carries no channel
+meaning.
+
+**Normalized on both sides.** `release()`/`channel()` clamp at the client, but a
+client only stops sending raw stamps once it **upgrades**, and rows already in S3
+keep them forever. So the aggregator derives `v` and `chan` from the raw `v`
+param in SQL (`_VERSION_EXPR` / `_CHANNEL_EXPR`) as well. That makes the metric
+correct for pre-clamp clients, backfills `chan` for clients that never sent it,
+and means re-aggregating a historical day yields the clean value. An unparseable
+stamp becomes the single bounded bucket `unknown`, never a new metric.
 
 **Anti-fingerprinting is a design constraint, not a side effect.** Every value
 is a low-cardinality constant or coarse bucket, because the id is stable and
@@ -421,6 +532,83 @@ always matches and the suppression would never fire (a real bug caught by
 payload and never materializes an id (`install_id(create=False)`); `disable`
 persists to `config.json` so the choice survives a new shell.
 
+`beacon.is_env_opted_out()` is the public probe for "the env var pins this off".
+It exists so the dashboard can distinguish *off because the stored flag is false*
+(a toggle can flip it) from *off because the environment says so* (a config write
+would be accepted and then have no effect).
+
+### In-product opt-out (Settings → Privacy toggle)
+
+The GUI twin of `kirocrew telemetry disable`. It writes the **same** key —
+`telemetry.beacon_enabled` via `PATCH /api/config/kirocrew` — so the two controls
+cannot disagree and the choice survives restarts and upgrades.
+
+- Only the **boolean** is dashboard-editable. `telemetry.beacon_endpoint` is
+  deliberately absent from `_EDITABLE_CONFIG`: exposing it would let a dashboard
+  caller redirect the heartbeat to an arbitrary host.
+- `GET /api/telemetry/beacon` (`handlers/telemetry.py::api_beacon_status`) feeds
+  the control. It returns the **stored** flag (`enabled`) *and* the **effective**
+  verdict (`would_send` + `reason`), because the env var, a CI host, a
+  non-default data home, or a `config.local.json` overlay each suppress sending
+  independently of the flag. A privacy control that reads "on" while something
+  else silences the beacon — or "off" while it still sends — is a false promise,
+  so the panel states which one is in force.
+- `env_override` reports specifically whether `KIROCREW_TELEMETRY_DISABLED` pins
+  the state; when it does, the toggle is **disabled** rather than offering a
+  write that cannot take effect.
+- `overlay_override` does the same for a `config.local.json` entry.
+  `config.local.json` deep-merges **over** `config.json` — the file the toggle
+  writes — so an entry there would let the switch snap back to the overlay's
+  value after a successful save. The endpoint reports it and the panel disables
+  the toggle and names the file (the same case `kirocrew telemetry disable`
+  detects and reports; see `cli_commands._telemetry`). The probe is best-effort:
+  a missing, unreadable, or malformed overlay reports "not pinned", since
+  `enabled` already carries the authoritative effective value.
+- The handler routes `KiroCrewConfig.load()` and the overlay probe through
+  `asyncio.to_thread` — both stat/read files, and this runs on the aiohttp event
+  loop, where a synchronous read stalls every other request behind it.
+- The endpoint is read-only, never materializes an install id
+  (`status(create=False)`), does not return the id itself, and fails **toward
+  off** on an unreadable config — a diagnostic must not 500, and must never claim
+  telemetry is on when that cannot be proven.
+
+### In-product privacy disclosure
+
+The dashboard discloses the default-on beacon without turning disclosure into a
+consent flow:
+
+- On first use, it renders a labelled, passive region in normal document flow
+  above the routed main content. It is never a modal or dialog, never traps or
+  moves focus, and never pauses, gates, or blocks the application. Its dismiss
+  button and the link to the durable privacy details are keyboard-operable.
+- Dismissal is remembered with the local-storage marker
+  `mc-privacy-notice-v1`. Storage access is fail-open: a failed read shows the
+  notice, and dismissal hides it for the current session even when persisting
+  the marker fails.
+- **Settings → Privacy** remains available after dismissal. It explains the
+  default-on, at-most-daily beacon and its exact nine fields: random
+  installation id, app version, release channel, operating system, CPU
+  architecture, Python minor version, installation channel, governance posture,
+  and first-run flag.
+  It also states the excluded data, carries the **opt-out toggle** (above), and
+  keeps the status/disable commands beneath it — the CLI remains documented
+  because it is the only way to override a `config.local.json` overlay and the
+  only control on a headless host.
+- **Onboarding step 6 (final)** shows the same disclosure and the same toggle in
+  the `OnboardingChapterShell` layout, so a new user sees what is sent and can
+  opt out before finishing setup. It is **passive**: no consent gate and no
+  required choice — Done always completes onboarding, and Skip/Escape still work.
+- The disclosure copy and the control are single-sourced in
+  `components/PrivacyDisclosure.tsx` (`PrivacyDisclosureSections`,
+  `TelemetryToggle`, `PrivacyCommandList`) and consumed by both surfaces, so the
+  first-run explanation and the durable panel cannot drift.
+- The durable surface distinguishes local usage/context records from optional
+  performance metrics. Performance metrics are off by default and remain local
+  when enabled, with one explicit exception: they egress only when the operator
+  configures an OTLP endpoint.
+- These surfaces add no tracking and do not alter, enable, or delay any telemetry
+  path. They only explain behavior and controls that already exist.
+
 ### Cross-machine identity hazard
 
 A snapshot restored onto a second machine must not clone the id — two hosts
@@ -468,7 +656,7 @@ absent/corrupt — so the id regenerates rather than merely not crashing. The
 Zero application code — the access log **is** the data product:
 
 ```
-client ──GET /b/1/<id>?v&os&arch&py&dist&gov&first_seen──> CloudFront E1YM983XX3ASBM
+client ─GET /b/1/<id>?v&chan&os&arch&py&dist&gov&first_seen─> CloudFront E1YM983XX3ASBM
                                      │ CloudFront Function returns 204 at the edge
                                      ▼
         standard logging v2 → s3://kirocrew-beacon-logs (PERMANENT, tiered)
@@ -508,6 +696,22 @@ It runs **last** in the handler, after the CloudWatch puts, because CloudWatch i
 best-effort presentation while the rollup is the durable store: a rollup failure
 must surface as a Lambda invocation error (visible on the dashboard's error
 widget) rather than being masked by an otherwise-successful metric write.
+
+**Destructive-rewrite guard (do not remove).** That same idempotent delete makes
+an empty query result *destructive*: it rewrites a day to nothing. A `if not
+facts` check is **not** sufficient, because `DailyActiveInstances`, `BeaconPings`
+and `NewInstallations` are appended **unconditionally** — as zeros — so an empty
+day still reaches the delete with three all-zero rows.
+
+This is not hypothetical: on **2026-07-31** the scheduled 00:20 UTC run queried
+`day=30`, a partition whose logs did not exist (the feature shipped at 02:36 UTC
+that morning, and the first delivered log object was `2026-07-31-04`). The run
+reported `SUCCEEDED` with no error, published zeros, and **wiped the rollup to
+zero rows** — the durable record was destroyed by a "successful" invocation. The
+guard now skips the rewrite unless at least one fact is non-zero (an all-zero day
+carries no information, so skipping is lossless), and an empty partition logs an
+explicit `WARNING` naming the partition, because a silent success was what made
+the failure hard to see.
 
 **Object Lock is deliberately NOT enabled.** It would make the logs literally
 undeletable, which sounds like "permanent" but is the wrong trade for a

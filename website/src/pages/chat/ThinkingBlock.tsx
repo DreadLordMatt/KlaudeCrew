@@ -1,6 +1,7 @@
-import { useState, memo } from 'react'
+import { memo } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { ChevronRight } from 'lucide-react'
+import { useRowDisclosure } from './rowDisclosure'
 
 import { i18nT } from '../../i18n/t'
 /**
@@ -16,8 +17,10 @@ import { i18nT } from '../../i18n/t'
  * is rendered as dim pre-wrapped text rather than markdown -- thought streams
  * are often partial/ill-formed and shouldn't run through the markdown renderer.
  */
-function ThinkingBlock({ content }: { content: string }) {
-  const [expanded, setExpanded] = useState(false)
+function ThinkingBlock({ content, disclosureKey }: { content: string; disclosureKey?: string }) {
+  // Held outside the row: the transcript is virtualised, so this block is
+  // unmounted whenever its row leaves the mounted window.
+  const [expanded, setExpanded] = useRowDisclosure(disclosureKey, false)
   if (!content) return null
 
   return (
@@ -27,8 +30,8 @@ function ThinkingBlock({ content }: { content: string }) {
         onClick={() => setExpanded(v => !v)}
         className="inline-flex items-center gap-1.5 text-[12px] text-muted hover:text-text transition-colors cursor-pointer bg-transparent border-none p-0 focus:outline-none focus-visible:ring-1 focus-visible:ring-accent rounded-sm"
         aria-expanded={expanded}
-        aria-label={`${expanded ? 'Collapse' : 'Expand'} model reasoning`}
-        title={expanded ? 'Hide reasoning' : 'Show reasoning'}
+        aria-label={expanded ? i18nT('pages.chat.thinkingBlock.collapse_model_reasoning') : i18nT('pages.chat.thinkingBlock.expand_model_reasoning')}
+        title={expanded ? i18nT('pages.chat.thinkingBlock.hide_reasoning') : i18nT('pages.chat.thinkingBlock.show_reasoning')}
       >
         <span>{i18nT('pages.chat.thinkingBlock.thinking')}</span>
         <ChevronRight

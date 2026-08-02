@@ -53,7 +53,9 @@ export default function SessionArchive() {
       const r = await fetch(`/api/session/archive/${encodeURIComponent(name)}`, { signal: controller.signal })
       if (!r.ok) throw new Error(await r.text())
       const text = await r.text()
-      setContent(text.length > 200_000 ? text.slice(0, 200_000) + '\n... truncated (showing first 200KB) ...' : text)
+      setContent(text.length > 200_000
+        ? text.slice(0, 200_000) + '\n' + i18nT('pages.sessionArchive.truncated_showing_first_200kb')
+        : text)
     } catch (e) {
       if (!controller.signal.aborted) setContentError(String(e))
     } finally {
@@ -77,7 +79,7 @@ export default function SessionArchive() {
         {error && <div className="text-red-500 text-[13px]">{error}</div>}
         <div className="overflow-auto flex-1">
           {archives.length === 0 && !loading && !error && <div className="text-muted text-[13px] p-2">{i18nT('pages.sessionArchive.no_archives_archives_are_created_when_session_fi')}</div>}
-          {archives.length > 0 && visible.length === 0 && !error && <div className="text-muted text-[13px] p-2">{i18nT('pages.sessionArchive.no_matches_for')}{filterKey}".</div>}
+          {archives.length > 0 && visible.length === 0 && !error && <div className="text-muted text-[13px] p-2">{i18nT('pages.sessionArchive.no_matches_for_query', { query: filterKey })}</div>}
           {visible.map(a => (
             <div
               key={a.name}

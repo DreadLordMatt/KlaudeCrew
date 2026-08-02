@@ -1,8 +1,9 @@
-import { useState, useMemo, useCallback, memo } from 'react'
+import { useMemo, useCallback, memo } from 'react'
 import { ListTodo, ChevronDown, ChevronRight, CheckCircle2, Circle } from 'lucide-react'
 import { useAppSelector } from '../../store'
 import { sanitizeLlmOutput } from '../../utils/sanitize'
 import type { TodoList } from '../../types'
+import { useRowDisclosure } from './rowDisclosure'
 
 import { i18nT } from '../../i18n/t'
 /** Rows rendered before the list scrolls internally — bounds DOM on long plans. */
@@ -19,8 +20,8 @@ const MAX_VISIBLE_ROWS = 12
  * present list is also hidden (there is nothing to show), but is distinct from
  * absent at the data layer.
  */
-const TaskProgressBar = memo(function TaskProgressBar({ slot }: { slot: string | null }) {
-  const [expanded, setExpanded] = useState(false)
+const TaskProgressBar = memo(function TaskProgressBar({ slot, disclosureKey }: { slot: string | null; disclosureKey?: string }) {
+  const [expanded, setExpanded] = useRowDisclosure(disclosureKey, false)
   // Select the primitive-bearing todo object for this slot only, so unrelated
   // slot churn in the slots array doesn't re-render the pill.
   const todo = useAppSelector(s =>
@@ -28,7 +29,7 @@ const TaskProgressBar = memo(function TaskProgressBar({ slot }: { slot: string |
   ) as TodoList | null
 
   const tasks = useMemo(() => todo?.tasks ?? [], [todo])
-  const toggle = useCallback(() => setExpanded(v => !v), [])
+  const toggle = useCallback(() => setExpanded(v => !v), [setExpanded])
 
   if (!slot || !todo || tasks.length === 0) return null
 
@@ -38,7 +39,7 @@ const TaskProgressBar = memo(function TaskProgressBar({ slot }: { slot: string |
   // `current` is the first not-completed task (server-derived). When everything
   // is done there is no current task, so the label reports completion instead.
   const current = sanitizeLlmOutput(todo.current || '')
-  const label = allDone ? 'All tasks complete' : current || 'Current task'
+  const label = allDone ? i18nT('pages.chat.taskProgressBar.all_tasks_complete') : current || i18nT('pages.chat.taskProgressBar.current_task')
   const pct = total > 0 ? Math.round((done / total) * 100) : 0
 
   return (
@@ -56,7 +57,9 @@ const TaskProgressBar = memo(function TaskProgressBar({ slot }: { slot: string |
           data-testid="todo-pill"
           onClick={toggle}
           aria-expanded={expanded}
-          aria-label={`${done} of ${total} tasks complete. ${expanded ? 'Collapse' : 'Expand'} task list`}
+          aria-label={expanded
+            ? i18nT('pages.chat.taskProgressBar.aria_collapse_task_list', { done, total })
+            : i18nT('pages.chat.taskProgressBar.aria_expand_task_list', { done, total })}
           className={`flex items-center gap-2 py-1.5 text-[13px] font-mono bg-transparent border-none cursor-pointer hover:bg-accent/5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent ${
             expanded ? 'w-full px-3' : 'px-3 min-w-0'
           }`}

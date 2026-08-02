@@ -38,6 +38,20 @@ from kiro_crew.weixin.transport import WeixinTransport
 
 
 # ── protocol headers ──────────────────────────────────────────────────────────
+def test_declared_capabilities_do_not_promise_files_without_a_media_path():
+    """``files`` must stay False while the transport has no media path.
+
+    The flag is a contract read by capability-aware callers (and, per the
+    channel-plugin RFC, eventually by the agent's own tool surface). iLink's
+    send path carries text only and inbound media is never decrypted or cached,
+    so declaring files=True advertises a capability the transport cannot
+    perform. Flip this together with the media implementation, not before.
+    """
+    from kiro_crew.weixin.transport import WEIXIN_CAPABILITIES
+
+    assert WEIXIN_CAPABILITIES.files is False
+
+
 def test_headers_carry_required_ilink_fields():
     h = _headers("abc123", '{"k":1}')
     assert h["AuthorizationType"] == "ilink_bot_token"
@@ -115,9 +129,7 @@ def test_account_credentials_persist_and_round_trip(tmp_path):
 def test_account_credentials_are_owner_only(tmp_path):
     """NTFS reports synthetic mode bits, so this guarantee is POSIX-checked;
     cross-platform enforcement comes from platform_compat.restrict_to_owner."""
-    save_weixin_account(
-        str(tmp_path), account_id="acct1", token="s3cr3t", base_url="https://x"
-    )
+    save_weixin_account(str(tmp_path), account_id="acct1", token="s3cr3t", base_url="https://x")
     path = tmp_path / "weixin" / "accounts" / "acct1.json"
     assert path.stat().st_mode & 0o077 == 0
 
@@ -321,6 +333,22 @@ def test_receive_drops_unauthorized_senders_before_dispatch(tmp_path):
         )
     )
     assert got == []
+
+
+def test_open_policy_exposes_an_authorized_peer_as_a_dashboard_target(tmp_path):
+    t, _, _ = _make(tmp_path, dm_policy="open")
+    asyncio.run(
+        t.receive(
+            {
+                "from_user_id": "friend",
+                "msg_id": "m-target",
+                "item_list": [{"type": ITEM_TEXT, "text_item": {"text": "hello"}}],
+            }
+        )
+    )
+
+    assert [target.target_id for target in t.configured_targets()] == ["user:friend"]
+    assert asyncio.run(t.resolve_configured_target("user:friend")) == ("friend", None)
 
 
 def test_send_message_echoes_the_stored_context(tmp_path):

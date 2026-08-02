@@ -83,11 +83,16 @@ _WEBSITE = "website"
 # a real run reported `executed=234, skipped=0, unexpected=0` — the arithmetic was wrong
 # because the previous floor already trailed the suite. `grep -c '^\s*test('` across
 # playwright/*.spec.ts independently agrees at 234. Take the measurement over the sum.
-MIN_EXECUTED_SPECS = 234
+#
+# 234 -> 235 on merging `main`. Both sides of the merge had moved this constant — this
+# branch to 234 (its own specs) and `main` to 210 — so neither side's number describes the
+# MERGED suite, and taking either would have re-introduced exactly the slack the floor
+# exists to remove. Re-counted on the merged tree instead of picking a side.
+MIN_EXECUTED_SPECS = 235
 
 # Skips are silent passes. A spec should seed its preconditions rather than skip
 # when they are absent, so the intended steady state is zero. Specs excluded by
-# tag (@needs-live-agent) are never collected, so they do not count here.
+# tag are never collected, so they do not count here.
 MAX_SKIPPED_SPECS = 0
 
 

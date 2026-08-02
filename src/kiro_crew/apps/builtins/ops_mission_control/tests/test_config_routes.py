@@ -736,12 +736,22 @@ class TestSkillDelivery(unittest.TestCase):
 
     def test_readme_exists_and_is_packaged(self):
         """A public app with no README leaves a stranger — and a companion author —
-        with nowhere to start. Siblings ship one; the packaging glob already exists."""
+        with nowhere to start. Siblings ship one; the packaging glob already exists.
+
+        Asserts that SOME glob covers the README rather than one literal pattern. The
+        literal form broke on a merge that replaced ``apps/builtins/*/README.md`` with the
+        broader ``apps/builtins/*/*.md`` — packaging was still correct, but the test failed
+        because it pinned the spelling instead of the property it cares about.
+        """
         readme = Path(__file__).resolve().parents[1] / "README.md"
         self.assertTrue(readme.is_file(), "the app must ship a README")
         repo_root = Path(__file__).resolve().parents[6]
         cfg = (repo_root / "setup.cfg").read_text(encoding="utf-8")
-        self.assertIn("apps/builtins/*/README.md", cfg)
+        covering = ("apps/builtins/*/README.md", "apps/builtins/*/*.md")
+        self.assertTrue(
+            any(glob in cfg for glob in covering),
+            f"no package_data glob covers the app README; looked for {covering}",
+        )
 
     def test_readme_companion_contract_names_the_real_symbols(self):
         """The README documents the companion entry point and the four Protocols.

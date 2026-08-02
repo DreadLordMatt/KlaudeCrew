@@ -23,7 +23,7 @@
         "sandbox": "off",
         "sandbox_allow_no_isolation": false,
         "sandbox_allow_unsandboxed_exec": false,
-        "apps_allow_third_party": true,
+        "apps_allow_third_party": false,
         "jail": "auto",
         "yolo": false,
         "notify_override_expiry": true,
@@ -207,10 +207,10 @@
       "sensitive": false,
       "tags": [],
       "label": "Allow Third-Party Apps",
-      "help": "Allow running third-party (non-builtin) app Python. App code runs with FULL gateway privileges (filesystem, network, in-memory credentials) and is NOT sandboxed — the permission system gates only the SDK tool surface. Defaults to true (apps are operator-installed). Set false to refuse both in-process module loads AND out-of-process backend spawns for any app outside apps/builtins/ until out-of-process isolation ships (CSE SEC-012).",
+      "help": "Explicitly allow executable code from third-party (non-builtin) apps. Defaults to false. Only the JSON boolean true admits in-process Python hooks, backend processes, lifecycle/install scripts, and openCommand. App code can access the filesystem, network, and in-memory credentials; enable this only for apps you trust (CSE SEC-012).",
       "hasChildren": false,
       "enumValues": null,
-      "defaultValue": true
+      "defaultValue": false
     },
     {
       "path": "agent.jail",
@@ -1000,6 +1000,8 @@
         "embedding_provider": "llama_cpp",
         "embedding_dim": 1024,
         "embed_model_url": "",
+        "embed_model_path": "",
+        "embed_model_id": "",
         "semantic_confidence_threshold": 0.8,
         "episodic_dedup_threshold": 0.88,
         "episodic_max_results": 8,
@@ -1050,6 +1052,34 @@
       "tags": [],
       "label": "Embedding Model URL",
       "help": "Override HTTPS URL for the embedding model GGUF download (mirrored/airgapped deployments). Empty uses the public KiroCrew CDN default; the KIROCREW_EMBED_MODEL_URL env var wins over both. The download is sha256-verified regardless of source.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": ""
+    },
+    {
+      "path": "memory.embed_model_path",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Embedding Model Path",
+      "help": "Absolute path to a local GGUF embedding model to use INSTEAD of the bundled Qwen3-Embedding-0.6B. When set, the default model is never downloaded or installed, so a custom model survives a default-model version change. Set embedding_dim to the model's output width. Changing the model changes the vector space, so stored embeddings are regenerated automatically. The KIROCREW_EMBED_MODEL_PATH env var wins over this.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": ""
+    },
+    {
+      "path": "memory.embed_model_id",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Embedding Model ID",
+      "help": "Optional stable identifier for a custom model's vector space. Defaults to 'custom:<filename>:<size>', which changes when a different model file is used. Set this explicitly if you swap between models of identical byte size, which the default derivation cannot distinguish.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": ""
@@ -1738,7 +1768,7 @@
       "sensitive": false,
       "tags": [],
       "label": "Anonymous Usage Beacon",
-      "help": "Anonymous daily heartbeat so maintainers can see how many copies are actively running, which versions are in use, and which platforms and distribution channels they run on. Sends EXACTLY seven fields, at most once per day: a random installation id, app version, OS, CPU architecture, Python minor version, distribution channel, and a first-run bit. NEVER sends prompts, model output, file contents, paths, repo names, credentials, hostname, username, or IP address. Automatically suppressed in CI and for a non-default KIROCREW_HOME. Opt out with KIROCREW_TELEMETRY_DISABLED=1 or by turning this off. Independent of the 'enabled' switch above, which is local-only metrics collection and still never egresses.",
+      "help": "Anonymous daily heartbeat so maintainers can see how many copies are actively running, which versions are in use, and which platforms and distribution channels they run on. Sends EXACTLY nine fields, at most once per day: a random installation id, app release (major.minor.patch only — build stamps are stripped), release channel, OS, CPU architecture, Python minor version, distribution channel, governance posture, and a first-run bit. NEVER sends prompts, model output, file contents, paths, repo names, credentials, hostname, username, or IP address. Automatically suppressed in CI and for a non-default KIROCREW_HOME. Opt out with KIROCREW_TELEMETRY_DISABLED=1 or by turning this off. Independent of the 'enabled' switch above, which is local-only metrics collection and still never egresses.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": true
@@ -1780,7 +1810,8 @@
         "transcribe_region": "us-east-1",
         "transcribe_profile": "",
         "language_code": "en-US",
-        "streaming": false
+        "streaming": false,
+        "dictation_panel": true
       }
     },
     {
@@ -1945,6 +1976,20 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": false
+    },
+    {
+      "path": "stt.dictation_panel",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Dictation Panel",
+      "help": "Show the animated dictation panel while recording instead of the thin status bar. Ignored when the browser lacks WebGL2 or the OS requests reduced motion — both fall back to the status bar.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": true
     },
     {
       "path": "computer_use",
@@ -2113,7 +2158,7 @@
       "sensitive": false,
       "tags": [],
       "label": "Socket Path",
-      "help": "Unix socket for the broker. Empty -> $KIROCREW_HOME/mcp-gateway/gateway.sock.",
+      "help": "Local endpoint for the broker. Empty -> $KIROCREW_HOME/mcp-gateway/gateway.sock. A unix socket at this path on POSIX; on Windows the path is not created, it only derives the named-pipe name and locates the lock file beside it.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": ""

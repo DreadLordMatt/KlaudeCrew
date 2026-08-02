@@ -18,7 +18,8 @@ import { PINNED_VIEWS } from '../../hooks/usePanelTabs'
 import { usePersistedBool } from '../../hooks/usePersistedBool'
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard'
 import { safeSetItem } from '../../utils/safeStorage'
-import type { SubagentActivity, ToolActivity } from '../../types'
+import { useAppSelector } from '../../store'
+import { selectSlotSubagents, selectSlotToolLog } from '../../store/chatSlice'
 import type { TouchedFile } from '../../hooks/useTouchedFiles'
 import type { ExtractedLink } from '../../utils/extractChatLinks'
 import type { PullRequestLink } from '../../utils/pullRequestLinks'
@@ -48,8 +49,6 @@ const VIEW_KINDS = new Set<TabKind>(['changes', 'issues', 'files', 'artifacts', 
 
 interface SidePanelProps {
   tabsCtl: ReturnType<typeof usePanelTabs>
-  subagents: Record<string, SubagentActivity>
-  toolLog: ToolActivity[]
   slot: string
   files?: TouchedFile[]
   onFileOpen?: (path: string, opts?: { replaceId?: string }) => void
@@ -182,13 +181,20 @@ export function measureSidePanelReservedW(): number {
 }
 
 export default function SidePanel({
-  tabsCtl, subagents, toolLog, slot, files, onFileOpen, onArtifactOpen, onFileRemove, onFilesClear,
+  tabsCtl, slot, files, onFileOpen, onArtifactOpen, onFileRemove, onFilesClear,
   projectDir, navLinks, navResolving, sources, selectedSourceUrl, onSelectSource,
   issues, selectedIssueUrl, onSelectIssue,
   onAddSourceToChat, onSubmitComments, onFileSave, onClose,
   inlinePreviewPath, onInlinePreviewChange, expanded, fillWidth,
 }: SidePanelProps) {
   const { tabs, activeId, openView, openTerminal, setActive, closeTab, patchTab, setOrder, syncPinned } = tabsCtl
+  // Subscribed HERE rather than passed down from ChatPage. Both maps are
+  // mutated per streamed sub-agent / tool chunk, and this panel is closed by
+  // default — holding the subscription in ChatPage re-rendered the whole page
+  // for data nothing was displaying. This component only mounts while the
+  // panel is open, so the subscription now costs nothing when it is closed.
+  const subagents = useAppSelector(s => selectSlotSubagents(s, slot))
+  const toolLog = useAppSelector(s => selectSlotToolLog(s, slot))
   const terminalEnabled = useTerminalEnabled()
   // The + menu / empty-state launcher hide Terminal when the feature is
   // disabled server-side, and never list the auto-managed pinned views
@@ -600,8 +606,8 @@ function TabBody({ tab, active, slot, onClose, onContentChange, onDiffModeChange
             {(added > 0 || removed > 0) && <span className="text-[11px] font-mono font-semibold shrink-0">{added > 0 && <span className="text-ok">+{added}</span>}{removed > 0 && <span className="text-danger ml-1.5">-{removed}</span>}</span>}
             <span className="flex-1" />
             <button onClick={() => onFileOpen?.(tab.path || '')} className="flex items-center justify-center w-[26px] h-[26px] rounded-md cursor-pointer transition-colors text-muted hover:text-text hover:bg-bg-hover bg-transparent border-none" title={i18nT('pages.chat.sidePanel.open_in_editor')} aria-label={i18nT('pages.chat.sidePanel.open_in_editor')}><Pen size={14} /></button>
-            <button onClick={() => setDiffSideBySide(v => !v)} className={`flex items-center justify-center w-[26px] h-[26px] rounded-md cursor-pointer transition-colors border-none ${!diffSideBySide ? 'text-accent bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover bg-transparent'}`} title={diffSideBySide ? 'Switch to unified view' : 'Switch to split view'} aria-label={diffSideBySide ? 'Switch to unified view' : 'Switch to split view'}><Columns2 size={14} /></button>
-            <button onClick={() => setDiffLineNumbers(v => !v)} className={`flex items-center justify-center w-[26px] h-[26px] rounded-md cursor-pointer transition-colors border-none ${diffLineNumbers ? 'text-accent bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover bg-transparent'}`} title={diffLineNumbers ? 'Hide line numbers' : 'Show line numbers'} aria-label={diffLineNumbers ? 'Hide line numbers' : 'Show line numbers'}><Hash size={14} /></button>
+            <button onClick={() => setDiffSideBySide(v => !v)} className={`flex items-center justify-center w-[26px] h-[26px] rounded-md cursor-pointer transition-colors border-none ${!diffSideBySide ? 'text-accent bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover bg-transparent'}`} title={diffSideBySide ? i18nT('pages.chat.sidePanel.switch_to_unified_view') : i18nT('pages.chat.sidePanel.switch_to_split_view')} aria-label={diffSideBySide ? i18nT('pages.chat.sidePanel.switch_to_unified_view') : i18nT('pages.chat.sidePanel.switch_to_split_view')}><Columns2 size={14} /></button>
+            <button onClick={() => setDiffLineNumbers(v => !v)} className={`flex items-center justify-center w-[26px] h-[26px] rounded-md cursor-pointer transition-colors border-none ${diffLineNumbers ? 'text-accent bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover bg-transparent'}`} title={diffLineNumbers ? i18nT('pages.chat.sidePanel.hide_line_numbers') : i18nT('pages.chat.sidePanel.show_line_numbers')} aria-label={diffLineNumbers ? i18nT('pages.chat.sidePanel.hide_line_numbers') : i18nT('pages.chat.sidePanel.show_line_numbers')}><Hash size={14} /></button>
           </div>
         }
       >

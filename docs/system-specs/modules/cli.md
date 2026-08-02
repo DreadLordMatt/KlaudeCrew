@@ -1,14 +1,52 @@
 # CLI Module
 
-Last Updated: 2026-07-27 (the Kiro CLI is now always launched IN PLACE — the
-resolve-to-exec integrity snapshot is REMOVED; it broke Kiro CLI 2.15+, a
-multi-call binary that exec's a sibling `kiro-cli-chat` resolved relative to its
-own path. Prior: trust simplified to "runs + valid login" — install
-source/owner/path do not gate setup or ACP launch)
+Last Updated: 2026-08-01 (standalone wheel installation now requires a
+pinned-key RSA-signed artifact manifest and a matching signed SHA-256 digest;
+the repository deliberately fails closed until its operational KMS public key
+is pinned. The Kiro CLI remains always launched IN PLACE — the resolve-to-exec
+integrity snapshot is REMOVED; it broke Kiro CLI 2.15+, a multi-call binary that
+exec's a sibling `kiro-cli-chat` resolved relative to its own path. Prior: trust
+simplified to "runs + valid login" — install source/owner/path do not gate setup
+or ACP launch)
 
 ## Overview
 
 The CLI module (`kiro_crew/cli.py`) provides the `kirocrew` command using stdlib `argparse`.
+
+## Standalone Wheel Installer Trust Contract
+
+`cli.sh` installs channel or pinned-version wheels only from an authenticated
+manifest. This distribution trust boundary is independent of the runtime CLI
+and of macOS signing/notarization.
+
+- Schema: `kirocrew-cli-artifact-manifest-v1`.
+- Algorithm: `RSASSA_PKCS1_V1_5_SHA_256`.
+- Key identity: `sha256:` plus the lowercase SHA-256 digest of the public
+  SubjectPublicKeyInfo DER bytes.
+- Signed fields: `algorithm`, `channel`, `key_id`, `pub_date`,
+  `python_requires`, `schema`, `sha256`, `version`, and `wheel_url`.
+- Signature field: base64 RSA signature over sorted, compact UTF-8 JSON of all
+  signed fields; `signature` itself is excluded.
+- Channel source: `feed/<channel>/latest-cli.json`. Pinned-version source:
+  `cli/<channel>/<version>/cli-manifest.json`; pinned installs do not resolve
+  through the mutable channel feed.
+
+The installer embeds the public key and expected key id. Before any network
+request, it requires OpenSSL, rejects an unconfigured pin, materializes the key,
+and verifies its DER fingerprint. It then applies bounded input/object sizes,
+duplicate-key and exact-field-set rejection, printable-ASCII/string checks,
+canonical URL and digest validation, requested channel/version matching, and
+pinned-key signature verification. Artifact fields are not consumed and wheel
+bytes are not fetched until the signature succeeds. The downloaded wheel must
+then match the authenticated SHA-256 digest before `pipx install` runs.
+
+Any unavailable trust root, malformed or unsigned legacy feed, unknown field,
+wrong schema/algorithm/key id, signature failure, metadata mismatch, network
+failure, or wheel digest mismatch terminates installation. There is no unsigned,
+`SHA256SUMS`, or trust-on-first-use fallback. Until the operational public key is
+pinned, the repository's explicit `UNCONFIGURED` state therefore makes stock
+`cli.sh` non-installing by design. Provisioning and rollout are specified in
+`packaging/signing/README.md`.
 
 ## Project Directory Detection
 
@@ -35,7 +73,8 @@ This allows `kirocrew` to find project-level agent config and skills from any di
 | `kirocrew doctor` | Verify kiro-cli is installed and config is valid |
 | `kirocrew cron add/list/remove` | Manage cron jobs |
 | `kirocrew spawn run/list` | Manage background subagents |
-| `kirocrew app install/list/enable/disable/uninstall` | Manage App Kit apps |
+| `kirocrew app install/list/enable/disable/uninstall` | Manage App Kit apps. Uninstall preserves `apps/<name>/data/` by default. |
+| `kirocrew app uninstall NAME --purge-data` | Explicitly uninstall an app and permanently delete its app data. |
 | `kirocrew app dev <name> [--off]` | Toggle an installed app into/out of dev mode (no-store UI serving + live reload on file change). See [App Dev Mode](#app-dev-mode). |
 | `kirocrew learn add/list/remove` | Manage learned corrections |
 | `kirocrew run TASK.md` | Run an autonomous task from a spec file |
@@ -361,6 +400,33 @@ CLI compaction is blocking (single-user, acceptable).
 ## Entry Point
 
 `console_scripts` in `setup.cfg` maps `kirocrew` → `kiro_crew.cli:main`.
+
+### Gateway asyncio child watcher
+
+`_install_child_watcher()` runs once on the **`gateway` command path only** (not
+`chat`, `doctor`, or any other subcommand) and must be called before
+`asyncio.run`, on the main thread. It replaces CPython's default
+thread-per-child `ThreadedChildWatcher` — whose `os.waitpid` reaper threads can
+starve the event loop when many `kiro-cli`/MCP children die at once — with a
+single-descriptor alternative:
+
+| Runtime | Installed watcher |
+|---------|-------------------|
+| Linux, `os.pidfd_open` probe succeeds (kernel ≥ 5.3) | `PidfdChildWatcher` |
+| Linux, probe raises `OSError`/`AttributeError` | `SafeChildWatcher` (SIGCHLD) |
+| macOS / other non-Linux Unix | `SafeChildWatcher` (SIGCHLD) |
+| **Python ≥ 3.14** (child-watcher API removed) | **none — no-op** |
+| `SafeChildWatcher` unavailable (e.g. Windows) | none — default retained |
+
+**Python 3.14+ is a deliberate no-op.** CPython 3.14 removed
+`set_child_watcher`, `PidfdChildWatcher`, `SafeChildWatcher`, and
+`ThreadedChildWatcher`; the Unix event loop reaps children itself with a single
+non-thread reaper, so the loop-starvation wedge this installer exists to prevent
+cannot occur. The function short-circuits on `hasattr(asyncio,
+"set_child_watcher")` — probed by capability, not `sys.version_info`, so a
+runtime that still ships the API keeps the mitigation. Without that guard the
+Linux pidfd branch raised `AttributeError` and `kirocrew gateway` died before
+binding its port, while every other subcommand kept working.
 
 ## Environment Variables
 

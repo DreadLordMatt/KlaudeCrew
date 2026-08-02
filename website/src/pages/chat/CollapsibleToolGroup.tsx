@@ -2,11 +2,13 @@ import { useState, useEffect, useRef, memo, type ReactNode } from 'react'
 import { CheckCircle, Handshake, Ban, Wrench, AlertTriangle } from 'lucide-react'
 import { sanitizeLlmOutput } from '../../utils/sanitize'
 import { ToolInputText } from '../../components/ToolInputText'
+import { useRowDisclosure } from './rowDisclosure'
 
 import { i18nT } from '../../i18n/t'
 interface CollapsibleToolGroupProps {
   count: number
   autoExpand?: boolean
+  disclosureKey?: string
   hasPermission?: boolean
   isRunning?: boolean
   children: ReactNode
@@ -40,14 +42,14 @@ function extractPreview(meta?: Record<string, unknown>): string {
 }
 
 /** Collapsible row that wraps tool/thinking/permission messages — always collapsed unless autoExpand. */
-const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, autoExpand, hasPermission, isRunning, children, permissionMeta, pendingPermCount, onApprove, onViewActivity, activityOpen }: CollapsibleToolGroupProps) {
-  const [expanded, setExpanded] = useState(!!autoExpand)
+const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, autoExpand, disclosureKey, hasPermission, isRunning, children, permissionMeta, pendingPermCount, onApprove, onViewActivity, activityOpen }: CollapsibleToolGroupProps) {
+  const [expanded, setExpanded] = useRowDisclosure(disclosureKey, !!autoExpand)
   const userToggled = useRef(false)
   const [submitting, setSubmitting] = useState(false)
   const [localResolved, setLocalResolved] = useState<string | null>(null)
   const needsAttention = !!hasPermission && !localResolved
 
-  useEffect(() => { if (!userToggled.current) setExpanded(!!autoExpand) }, [autoExpand])
+  useEffect(() => { if (!userToggled.current) setExpanded(!!autoExpand) }, [autoExpand, setExpanded])
 
   // Reset approval state when permission props change (new approval arrives)
   useEffect(() => { setLocalResolved(null); setSubmitting(false) }, [hasPermission, pendingPermCount])
@@ -57,7 +59,7 @@ const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, autoExp
   useEffect(() => {
     if (wasRunning.current && !isRunning && !userToggled.current) setExpanded(false)
     wasRunning.current = !!isRunning
-  }, [isRunning])
+  }, [isRunning, setExpanded])
 
   const decisionLabel: Record<string, ReactNode> = { approved: <><CheckCircle className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.approved')}</>, trust: <><Handshake className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.trusted')}</>, rejected: <><Ban className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.rejected')}</> }
   const labelNode = localResolved
@@ -68,8 +70,8 @@ const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, autoExp
         ? <><Wrench className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.running_tools')}</>
         : <><Wrench className="lucide-inline" /> {i18nT('pages.chat.collapsibleToolGroup.tool_call', { count: count })}</>
   const labelText = localResolved
-    ? (localResolved === 'approved' ? 'Approved' : localResolved === 'trust' ? 'Trusted' : 'Rejected')
-    : needsAttention ? 'Approval needed' : isRunning ? 'running tools' : `${count} tool call${count === 1 ? '' : 's'}`
+    ? (localResolved === 'approved' ? i18nT('pages.chat.collapsibleToolGroup.approved') : localResolved === 'trust' ? i18nT('pages.chat.collapsibleToolGroup.trusted') : i18nT('pages.chat.collapsibleToolGroup.rejected'))
+    : needsAttention ? i18nT('pages.chat.collapsibleToolGroup.approval_needed') : isRunning ? i18nT('pages.chat.collapsibleToolGroup.running_tools') : i18nT('pages.chat.collapsibleToolGroup.tool_call', { count: count })
 
   const preview = needsAttention ? sanitizeLlmOutput(extractPreview(permissionMeta)) : ''
   const truncated = preview.length > 150 ? preview.slice(0, 150) + '…' : preview
@@ -96,7 +98,7 @@ const CollapsibleToolGroup = memo(function CollapsibleToolGroup({ count, autoExp
         className={`flex items-center gap-2 px-3.5 py-2 rounded-md text-[13px] font-mono text-muted bg-card border cursor-pointer transition-all w-full text-left ${needsAttention && !expanded ? 'border-amber-400 hover:border-amber-300' : localResolved ? 'border-ok/60 hover:border-ok/80' : 'border-border hover:border-border-strong'} hover:text-text`}
         onClick={() => { userToggled.current = true; setExpanded(e => !e) }}
         aria-expanded={expanded}
-        aria-label={`${expanded ? 'Collapse' : 'Expand'} ${labelText}`}
+        aria-label={`${expanded ? i18nT('pages.chat.collapsibleToolGroup.collapse') : i18nT('pages.chat.collapsibleToolGroup.expand')} ${labelText}`}
       >
         {needsAttention ? (
           <span className="relative w-2.5 h-2.5 flex-shrink-0" aria-label={i18nT('pages.chat.collapsibleToolGroup.approval_needed')}>

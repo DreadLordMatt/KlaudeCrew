@@ -10,8 +10,10 @@ import os
 import tempfile
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from aiohttp import web
 from aiohttp.client_exceptions import ClientConnectionResetError
@@ -29,12 +31,10 @@ from kiro_crew.dashboard.chat_folders import _unhide_folder
 from kiro_crew.dashboard.chat_orchestrator import _stage_loop
 from kiro_crew.dashboard.chat_persistence import (
     _attach_variants,
-    _redact_meta,
-    _redact_meta_for_role,
     get_reasoning_effort_values,
     save_slot_off_loop,
 )
-from kiro_crew.dashboard.chat_runner import _run_chat
+from kiro_crew.dashboard.chat_runner import _context_usage_payload, _run_chat
 from kiro_crew.dashboard.chat_title import _maybe_auto_title
 from kiro_crew.dashboard.chat_utils import (
     _build_stream_chunk,
@@ -44,6 +44,8 @@ from kiro_crew.dashboard.chat_utils import (
     _normalize_model,
     _prepare_messages,
     _redact_for_display,
+    _redact_meta,
+    _redact_meta_for_role,
     _remove_queued_by_id,
     _sync_dashboard_slots,
 )
@@ -659,7 +661,10 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "key": slot.key,
-            "title": slot.display_title,
+            # Redacted at emit like every sibling path (_ChatSlot.to_dict does the
+            # same for the sidebar payload). Titles can be LLM-generated or set by
+            # a rename, so they are content, not configuration.
+            "title": _redact_for_display(slot.display_title),
             "running": slot.running,
             "stopping": slot._stopping,
             "messages": prepared,
@@ -682,6 +687,16 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
     name = body.get("name")
     agent = body.get("agent", "")
     model = body.get("model", "")
+    # Folder membership at BIRTH. Assigning it afterwards (client PATCH) is
+    # visibly too late: get_or_create_slot broadcasts the new slot before this
+    # handler returns, so the dashboard renders it at the top level for a frame
+    # or two and it then jumps into the folder. Validated exactly as
+    # PATCH /api/chat/slots/{slot}/folder validates it.
+    folder_id = str(body.get("folder_id") or "")
+    if folder_id and not any(f["id"] == folder_id for f in state._folders):
+        return web.json_response(
+            {"error": "folder not found", "code": "folder_not_found"}, status=400
+        )
 
     # Resolve workspace from agent bindings
     workspace = "default"
@@ -694,52 +709,117 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
     except Exception:
         logger.warning("Failed to resolve bindings for slot create", exc_info=True)
 
-    try:
-        memory_mode = body.get("memory_mode", "persistent")
-        if memory_mode not in ("persistent", "incognito", "temporary"):
-            return web.json_response({"error": "invalid memory_mode"}, status=400)
-        slot = state.get_or_create_slot(
-            name,
-            agent=agent,
-            workspace=workspace,
-            model=model,
-            mode=body.get("mode", ""),
-            memory_mode=memory_mode,
-            ephemeral=body.get("ephemeral"),
-            app=request.get("app", ""),
-        )
-    except ValueError as exc:
-        return web.json_response({"error": str(exc)}, status=409)
-    if slot.is_restricted:
-        logger.info("Slot %s created with memory_mode=%s", slot.key, slot.memory_mode)
-    # Pin title if explicitly provided (prevents auto-title from overwriting)
-    title = (body.get("title") or "").strip()[:200] if isinstance(body, dict) else ""
-    if title:
-        title, _ = redact_exfiltration_urls(title)
-        title, _ = redact_credentials(title)
-        slot.title = title
-        slot._titled = True
-    # Bind to an artifact if provided (companion chat). Validate
-    # against the artifact slug grammar so an injection-shaped value can never
-    # land on the slot; anything invalid is silently dropped. Uniqueness (≤1
-    # active bound session per slug) is a frontend-flow convention, not
-    # enforced here.
-    artifact_slug = body.get("artifact") if isinstance(body, dict) else None
-    if isinstance(artifact_slug, str) and ARTIFACT_SLUG_RE.match(artifact_slug):
-        slot._artifact = artifact_slug
-    # Default project to workspace directory so file search works out of the box
-    if not slot.project:
-        cfg_proj = cfg.dashboard.default_project if cfg else ""
-        if isinstance(cfg_proj, str) and cfg_proj:
-            resolved = os.path.realpath(os.path.expanduser(cfg_proj))
-            if os.path.isdir(resolved) and not is_sensitive_path(resolved):
-                cfg_proj = resolved
+    # Coalesce every push inside into ONE broadcast at exit, so the first frame
+    # any client sees already carries the folder, title, artifact binding and
+    # project. Otherwise each of those is a separate post-create correction the
+    # UI renders as a jump.
+    with state.suspend_slots_push():
+        try:
+            memory_mode = body.get("memory_mode", "persistent")
+            if memory_mode not in ("persistent", "incognito", "temporary"):
+                return web.json_response({"error": "invalid memory_mode"}, status=400)
+            slot = state.get_or_create_slot(
+                name,
+                agent=agent,
+                workspace=workspace,
+                model=model,
+                mode=body.get("mode", ""),
+                memory_mode=memory_mode,
+                ephemeral=body.get("ephemeral"),
+                app=request.get("app", ""),
+            )
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
+        if slot.is_restricted:
+            logger.info("Slot %s created with memory_mode=%s", slot.key, slot.memory_mode)
+        # App ownership check (App Kit §5.2), same deny-by-default rule as
+        # api_chat_send. It matters HERE because `name` can address an
+        # ALREADY-EXISTING slot: get_or_create_slot returns that slot without
+        # consulting ownership, and everything below mutates it (folder, title,
+        # artifact binding). Without this an app token could refile or retitle
+        # another app's — or the dashboard's — session. A slot this request just
+        # created carries `_app == request_app`, so the new-slot path is
+        # unaffected; a dashboard caller (empty app) keeps full access.
+        request_app = request.get("app", "")
+        if request_app and slot._app != request_app:
+            sel().log_api_access(
+                caller=request_app,
+                operation="chat_slot_create",
+                outcome="denied",
+                source="app_isolation",
+                resources=f"slot={slot.key}",
+                error=(
+                    "app cannot access unscoped slots"
+                    if not slot._app
+                    else "app does not own this slot"
+                ),
+            )
+            # One code for BOTH reasons on purpose: a distinct code per reason
+            # would turn this 404 into an existence oracle for slots the caller
+            # may not know about. The prose stays in `error` for logs.
+            return web.json_response(
+                {"error": "not found", "code": "slot_not_found"}, status=404
+            )
+        # Pin title if explicitly provided (prevents auto-title from overwriting)
+        title = (body.get("title") or "").strip()[:200] if isinstance(body, dict) else ""
+        if title:
+            title, _ = redact_exfiltration_urls(title)
+            title, _ = redact_credentials(title)
+            slot.title = title
+            slot._titled = True
+        # Bind to an artifact if provided (companion chat). Validate
+        # against the artifact slug grammar so an injection-shaped value can never
+        # land on the slot; anything invalid is silently dropped. Uniqueness (≤1
+        # active bound session per slug) is a frontend-flow convention, not
+        # enforced here.
+        artifact_slug = body.get("artifact") if isinstance(body, dict) else None
+        if isinstance(artifact_slug, str) and ARTIFACT_SLUG_RE.match(artifact_slug):
+            slot._artifact = artifact_slug
+        # Default project to workspace directory so file search works out of the box
+        if not slot.project:
+            cfg_proj = cfg.dashboard.default_project if cfg else ""
+            if isinstance(cfg_proj, str) and cfg_proj:
+                resolved = os.path.realpath(os.path.expanduser(cfg_proj))
+                if os.path.isdir(resolved) and not is_sensitive_path(resolved):
+                    cfg_proj = resolved
+                else:
+                    cfg_proj = ""
             else:
                 cfg_proj = ""
-        else:
-            cfg_proj = ""
-        slot.project = cfg_proj or default_project_dir(workspace)
-    _sync_dashboard_slots(state)
+            slot.project = cfg_proj or default_project_dir(workspace)
+        # File the slot before the coalesced broadcast, so its first appearance
+        # in every client is already inside the folder.
+        if folder_id:
+            # Mirror PATCH /api/chat/slots/{slot}/folder: a CHANGED folder must
+            # re-inject the [FOLDER] breadcrumb on the next turn. `is_new` alone
+            # is not enough — `name` can address an already-used slot, whose
+            # turn is `is_new=False`, so moving it would otherwise leave the
+            # model believing the session is still in its old folder.
+            # Harmless on the new-slot path: that turn is `is_new`, so the
+            # breadcrumb fires regardless and the flag is consumed there.
+            if folder_id != slot.folder_id:
+                slot._folder_changed = True
+            slot.folder_id = folder_id
+            _unhide_folder(state, folder_id)
+        _sync_dashboard_slots(state)
+        # Guarantee a frame. get_or_create_slot pushes for a NEW slot, but
+        # returns an existing named slot without pushing — and this handler is
+        # now the only thing that files a slot (the client's follow-up PATCH,
+        # which used to supply that push, is gone). Without this, re-creating an
+        # existing slot name with a different folder_id would move it for the
+        # requester while every other connected client kept the stale
+        # placement. Inside the suspension this only marks a push owed, so the
+        # new-slot path still emits exactly ONE coalesced frame.
+        state.push_slots_update()
+    # Persist OUTSIDE the suspension. save_slot_off_loop deliberately takes the
+    # patient cross-process history lock, which another holder (a workflow or
+    # cron appending to the same session) can hold for a while — and the
+    # suspension is process-wide, so awaiting it inside would stall every
+    # client's slot updates behind one session's file lock. The in-memory slot
+    # is the source of truth and was already broadcast at block exit; a failed
+    # write re-arms the periodic flush (best_effort).
+    if folder_id:
+        await save_slot_off_loop(state, slot, force=True)
     return web.json_response(state.serialize_slot(slot))
 
 
@@ -862,6 +942,91 @@ def _resolve_stop_event(slot: _ChatSlot, outcome: str) -> None:
     slot._stop_event_id = None
 
 
+def _make_stop_resolver(
+    state: DashboardState, slot: _ChatSlot, outcome: str, card_id: str | None
+) -> Callable[[], Awaitable[None]]:
+    """Build the stop_turn on_soft/on_hard callback that settles the stop card.
+
+    Key the guard on `_stop_event_id`, not on `_stop_state`. The card id is
+    already the idempotency token: `_resolve_stop_event` no-ops when it is None
+    and clears it once it has settled the card, so a state gate buys nothing
+    there. What the state gate did buy was a bug. A turn tearing down
+    concurrently drives `_stop_state` back to "idle" (`_finish_queue_cycle` in
+    chat_runner.py, through the `_stopping` setter in state.py), and that
+    teardown races the escalation. When teardown won, the hard callback bailed,
+    `_resolve_stop_event` never ran, and the card pulsed at "stopping" for the
+    rest of the session instead of settling to "stop_failed_reset". Reproduced
+    against a live gateway on 2026-07-31: the gateway logged
+    `stop_turn outcome=hard-done` and then `_on_hard: state not
+    soft_pending/killing, bail` 30ms later.
+
+    Precedence needs its own non-racy marker. A cooperative ack that arrives
+    after the user escalated must not relabel a hard kill as a clean stop, and
+    `_stop_state` cannot carry that fact because the same teardown resets it to
+    "idle" from `killing` just as readily as from `soft_pending`. Reading it
+    here would reproduce the bug one dimension over: teardown erases the
+    escalation, the late soft callback sees a neutral state, and the card
+    settles as "stopped" for a session that was killed. So the escalation path
+    sets `slot._stop_escalated_card_id`, which teardown never touches, and only
+    the soft callback defers on it. `hard` is terminal and nothing outranks it.
+    The marker holds an id rather than a flag so it cannot leak onto a later
+    card: a bare boolean left set would make the NEXT card's cooperative ack
+    defer to a hard callback that never fires, stranding that card at
+    "stopping", which is the failure this change exists to remove.
+
+    Bind to `card_id`, the specific card this callback was created for, and not
+    to whatever card happens to be in flight when it fires. `stop_turn` awaits
+    these callbacks, so one can still be pending when teardown resets the stop
+    posture, a new turn starts, and a second stop opens a NEW card. Reading
+    `slot._stop_event_id` at call time would then settle that newer card with
+    this older outcome and clear its posture, so the newer stop's own callback
+    would find nothing left to settle. Callers pass the id they just assigned.
+
+    `card_id` may be None, for a stop that escalated before any card existed.
+    Such a callback still releases the stop posture; it simply has no card to
+    label. Only a mismatching non-None current id means "someone else owns
+    this", so only that case returns without touching the slot.
+    """
+
+    async def _resolve() -> None:
+        logger.debug(
+            "stop resolver (%s): card_id=%r current=%r stop_state=%r escalated=%r",
+            outcome,
+            card_id,
+            slot._stop_event_id,
+            slot._stop_state,
+            slot._stop_escalated_card_id,
+        )
+        # Bail only when a DIFFERENT card is genuinely in flight, because that
+        # card belongs to a later stop that owns the posture. Do not bail merely
+        # because this attempt has no card: settling a card and releasing the
+        # stop posture are separate jobs, and the posture must be released even
+        # when there was never a card to settle. A stop can reach a callback
+        # with `card_id` None: `api_chat_slot_interrupt` claims
+        # `_stop_state = "soft_pending"` before it awaits the request body and
+        # only then opens its card, so a concurrent `/stop` escalates against a
+        # slot that has none yet. Skipping the reset there strands `_stop_state`
+        # at "killing", which permanently suppresses re-queue
+        # (`_should_suppress_requeue`) and rejects every later interrupt. That
+        # wedges the slot, which is worse than the mislabel this guard prevents.
+        if slot._stop_event_id is not None and slot._stop_event_id != card_id:
+            return
+        # `card_id is None` cannot mean "escalated": the marker holds a real
+        # card id, so comparing None to None would defer a callback that no
+        # hard kill will ever follow, and the posture would never be released.
+        if outcome == "soft" and card_id is not None and slot._stop_escalated_card_id == card_id:
+            logger.debug("stop resolver (soft): escalated to hard kill, deferring to hard")
+            return
+        # No-ops when there is no card, which is exactly the case above.
+        _resolve_stop_event(slot, outcome)
+        slot._stop_state = "idle"
+        if card_id is not None and slot._stop_escalated_card_id == card_id:
+            slot._stop_escalated_card_id = None
+        state.push_slots_update()
+
+    return _resolve
+
+
 async def api_chat_slot_stop(request: web.Request) -> web.Response:
     """POST /api/chat/slots/{slot}/stop — cooperative stop with kill fallback.
 
@@ -883,6 +1048,11 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
     # "already soft_pending" signal, so a second press always means "kill it".
     if slot._stop_state == "soft_pending":
         slot._stop_state = "killing"
+        # Survives turn teardown, which resets _stop_state to "idle". Without
+        # it a cooperative ack from the first press could still land and label
+        # this hard kill a clean stop. Scoped to this card so it cannot defer
+        # a later card's ack.
+        slot._stop_escalated_card_id = slot._stop_event_id
         slot._queue.clear()
         # Hard kill = "discard everything": drop unconsumed steers too, so the
         # end-of-turn requeue (chat_runner finally) has nothing to resurrect.
@@ -891,12 +1061,8 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
         state.push_slots_update()
         logger.info("Stop (force): hard-killing session for slot %s", name)
 
-        async def _on_hard_force() -> None:
-            if slot._stop_state != "killing":
-                return
-            _resolve_stop_event(slot, "hard")
-            slot._stop_state = "idle"
-            state.push_slots_update()
+        # Escalation reuses the card the first press opened, so bind to it.
+        _on_hard_force = _make_stop_resolver(state, slot, "hard", slot._stop_event_id)
 
         # Unblock chat runner if it's suspended waiting for tool approval or on
         # a pending ask_question card.
@@ -978,25 +1144,8 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
     state.push_slots_update()
     logger.info("Stop: cooperative cancel for slot %s (queue=%d)", name, len(slot._queue))
 
-    async def _on_soft() -> None:
-        logger.debug(
-            "_on_soft called: stop_state=%r stop_event_id=%r", slot._stop_state, slot._stop_event_id
-        )
-        if slot._stop_state != "soft_pending":
-            logger.debug("_on_soft: state not soft_pending, bail")
-            return
-        _resolve_stop_event(slot, "soft")
-        slot._stop_state = "idle"
-        state.push_slots_update()
-
-    async def _on_hard() -> None:
-        logger.debug("_on_hard called: stop_state=%r", slot._stop_state)
-        if slot._stop_state not in ("soft_pending", "killing"):
-            logger.debug("_on_hard: state not soft_pending/killing, bail")
-            return
-        _resolve_stop_event(slot, "hard")
-        slot._stop_state = "idle"
-        state.push_slots_update()
+    _on_soft = _make_stop_resolver(state, slot, "soft", stop_id)
+    _on_hard = _make_stop_resolver(state, slot, "hard", stop_id)
 
     # Unblock chat runner if it's suspended waiting for tool approval or on a
     # pending ask_question card.
@@ -1079,20 +1228,6 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
                 break
 
     # Stop current turn but preserve the queue so dequeue loop fires
-    async def _on_soft() -> None:
-        if slot._stop_state != "soft_pending":
-            return
-        _resolve_stop_event(slot, "soft")
-        slot._stop_state = "idle"
-        state.push_slots_update()
-
-    async def _on_hard() -> None:
-        if slot._stop_state not in ("soft_pending", "killing"):
-            return
-        _resolve_stop_event(slot, "hard")
-        slot._stop_state = "idle"
-        state.push_slots_update()
-
     # (soft_pending already claimed above, before the request-body await)
 
     # Defensive stale-card sweep
@@ -1113,6 +1248,10 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
     stop_msg = json.dumps(stop_data)
     slot.append("system", stop_msg, stop_msg)
     state.push_slots_update()
+
+    # Built after the card exists so each resolver is bound to this card.
+    _on_soft = _make_stop_resolver(state, slot, "soft", stop_id)
+    _on_hard = _make_stop_resolver(state, slot, "hard", stop_id)
 
     # Unblock chat runner if it's suspended waiting for tool approval or on a
     # pending ask_question card.
@@ -1672,6 +1811,30 @@ async def _try_live_model_switch(
     return True
 
 
+def _broadcast_context_reset(state: "DashboardState", slot_key: str, provider: Any) -> None:
+    """Push one ``context_usage`` event so the meter updates on a model switch.
+
+    Without this the frontend keeps the previous model's stored ``{used,
+    window}`` until the next turn emits an event. ``reset: true`` tells the
+    ``sseContextUsage`` reducer it may REPLACE or DELETE the stored token entry
+    (per-turn events deliberately never delete, so a pct-only event cannot wipe
+    good counts). With a live provider the payload carries the freshly rebased
+    stats from ``set_model``; without one (the session-reset path) it carries no
+    tokens, so the reducer deletes the entry and the UI falls back to its own
+    model-derived window for the slot's new model. Best-effort: a broadcast
+    failure must not fail the switch.
+    """
+    try:
+        if provider is not None:
+            payload = _context_usage_payload(slot_key, provider)
+        else:
+            payload = {"slot": slot_key, "pct": 0.0}
+        payload["reset"] = True
+        state.broadcast_ws("context_usage", payload)
+    except Exception:
+        logger.exception("Failed to broadcast context_usage reset for slot %s", slot_key)
+
+
 async def api_chat_slot_model(request: web.Request) -> web.Response:
     """POST /api/chat/slots/{slot}/model — set model for a chat slot.
 
@@ -1698,9 +1861,12 @@ async def api_chat_slot_model(request: web.Request) -> web.Response:
     slot.model = model_name
     session_key = _history_key_for(name)
     provider = state.sessions.get_provider(session_key)
-    if not await _try_live_model_switch(name, slot, provider, model_name):
+    if await _try_live_model_switch(name, slot, provider, model_name):
+        _broadcast_context_reset(state, slot.key, provider)
+    else:
         logger.info("Slot %s model switched to %r, resetting session", name, model_name or "auto")
         await _reset_slot_session(state, slot, session_key)
+        _broadcast_context_reset(state, slot.key, None)
     state.push_slots_update()
     return web.json_response({"ok": True, "model": model_name})
 
@@ -1771,6 +1937,7 @@ async def api_chat_slots_model(request: web.Request) -> web.Response:
             failed.append(name)
             continue
         slot.model = model_name
+        _broadcast_context_reset(state, slot.key, None)
         switched.append(name)
 
     if switched:

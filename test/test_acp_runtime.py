@@ -24,7 +24,7 @@ import json
 import os
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from spawn_test_helpers import strip_spawn_shim
@@ -784,6 +784,52 @@ async def test_prompt_resets_turn_done_when_send_request_fails():
         await gen.__anext__()  # send_request fires on first iteration
 
     # Recovered: turn no longer active, so the handle is reusable.
+    assert handle.is_turn_active is False
+
+
+@pytest.mark.asyncio
+async def test_prompt_resets_turn_done_when_cancelled():
+    """Same guard, but for cancellation — which is NOT an ``Exception``.
+
+    ``asyncio.CancelledError`` derives from ``BaseException``, so an
+    ``except Exception`` guard lets it through and leaves ``_turn_done`` cleared
+    forever: ``is_turn_active`` reports True permanently and every later
+    ``prompt()`` on the handle is rejected as already active. A turn timing out
+    or being cancelled is routine, so this must recover.
+    """
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    rt.send_request = AsyncMock(side_effect=asyncio.CancelledError())
+
+    gen = handle.prompt("hi", timeout=3.0)
+    with pytest.raises(asyncio.CancelledError):
+        await gen.__anext__()
+
+    assert handle.is_turn_active is False
+
+
+@pytest.mark.asyncio
+async def test_prompt_resets_turn_done_when_cancelled_while_building_blocks():
+    """Cancellation at the prompt-ASSEMBLY await, not the send await.
+
+    Image reads are offloaded with ``asyncio.to_thread``, which adds a second
+    cancellation point inside the turn-state guard — and a longer-lived one,
+    since it does file I/O. Cancelling there must not wedge the handle either.
+    """
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    rt.send_request = AsyncMock(return_value=1)
+
+    with patch(
+        "kiro_crew.acp.session_handle.build_prompt_blocks",
+        side_effect=asyncio.CancelledError(),
+    ):
+        gen = handle.prompt("hi", timeout=3.0)
+        with pytest.raises(asyncio.CancelledError):
+            await gen.__anext__()
+
     assert handle.is_turn_active is False
 
 
@@ -3338,6 +3384,35 @@ async def test_set_model_syncs_resolved_model_id():
     await h.set_model("new-model")
     assert h._model == "new-model"
     assert h._resolved_model_id == "new-model"
+
+
+@pytest.mark.asyncio
+async def test_set_model_rebases_context_stats(monkeypatch):
+    """Contract parity with AcpClient.set_model: a mid-session switch re-anchors
+    last_prompt_stats to the new model's window and clears the authoritative
+    usage flag, so the next metadata pct backfills against the NEW model
+    instead of being gated forever by the old model's usage_update."""
+    from kiro_crew import model_registry
+
+    monkeypatch.setattr(model_registry, "has_known_window", lambda mid: True)
+    monkeypatch.setattr(model_registry, "model_window", lambda mid, **kw: 272_000)
+    rt = MagicMock()
+    rt.is_alive.return_value = True
+    rt.send_request = AsyncMock()
+    h = AcpSessionHandle("sA", asyncio.Queue(), rt)
+    h._turn_done.set()
+    h.last_prompt_stats.context_used_tokens = 100_000
+    h.last_prompt_stats.context_window_tokens = 1_000_000
+    h.last_prompt_stats.context_pct = 10.0
+    h.last_prompt_stats.context_tokens_from_usage = True
+
+    await h.set_model("new-model")
+
+    stats = h.last_prompt_stats
+    assert stats.context_window_tokens == 272_000
+    assert stats.context_used_tokens == 100_000
+    assert stats.context_pct == round(100_000 / 272_000 * 100, 1)
+    assert stats.context_tokens_from_usage is False
 
 
 def test_normalize_models_shape():

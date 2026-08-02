@@ -13,7 +13,7 @@
  * based (not the WS `kind`, which is dropped when the message is persisted), so
  * it works live and when a conversation is reloaded from history.
  */
-import { memo, useState } from 'react'
+import { memo } from 'react'
 import { Workflow, CheckCircle2, AlertCircle, ChevronDown, PanelRight } from 'lucide-react'
 import { useAppDispatch } from '../../store'
 import { openActivityToTab } from '../../store/chatSlice'
@@ -22,6 +22,7 @@ import MarkdownRenderer from '../../components/MarkdownRenderer'
 import type { ChatMessage } from '../../types'
 
 import { i18nT } from '../../i18n/t'
+import { useRowDisclosure } from './rowDisclosure'
 const WF_COMPLETION_PREFIX = '[Workflow completion event]'
 // Name is backtick-delimited; allow any char except a backtick (including
 // newlines) so an unusual name doesn't make the header fail to parse. If it
@@ -66,12 +67,14 @@ export function parseWorkflowCompletion(content: string): ParsedCompletion | nul
 const WorkflowCompletionCard = memo(function WorkflowCompletionCard({
   message,
   onFileOpen,
+  disclosureKey,
 }: {
   message: ChatMessage
   onFileOpen?: (path: string) => void
+  disclosureKey?: string
 }) {
   const dispatch = useAppDispatch()
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useRowDisclosure(disclosureKey, false)
   const parsed = parseWorkflowCompletion(message.content || '')
   if (!parsed) return null
 
@@ -118,10 +121,10 @@ const WorkflowCompletionCard = memo(function WorkflowCompletionCard({
                 type="button"
                 onClick={() => setExpanded(e => !e)}
                 aria-expanded={expanded}
-                title={expanded ? 'Hide result' : 'Show result'}
+                title={expanded ? i18nT('pages.chat.workflowCompletionCard.hide_result') : i18nT('pages.chat.workflowCompletionCard.show_result')}
                 className="flex items-center gap-1 text-[11px] text-muted hover:text-text bg-transparent border-none cursor-pointer px-1.5 py-1 rounded hover:bg-bg-hover transition-colors"
               >
-                {expanded ? 'Hide result' : 'Show result'}
+                {expanded ? i18nT('pages.chat.workflowCompletionCard.hide_result') : i18nT('pages.chat.workflowCompletionCard.show_result')}
                 <ChevronDown size={13} className={`transition-transform ${expanded ? 'rotate-180' : ''}`} />
               </button>
             )}

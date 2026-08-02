@@ -242,11 +242,14 @@ from kiro_crew.dashboard.handlers.messaging import (  # noqa: E402, F401
     api_slack_reactions,
     api_spawn,
     api_spawn_clear,
+    api_spawn_continue,
     api_spawn_delete,
     api_spawn_list,
     api_spawn_lost,
+    api_spawn_release,
     api_spawn_retry,
     api_spawn_status,
+    api_spawn_steer,
     api_teams_activity,
     api_teams_config_get,
     api_teams_config_save,
@@ -345,6 +348,7 @@ from kiro_crew.dashboard.handlers.taskrunner import (  # noqa: E402, F401
     api_taskrunner_update_task,
 )
 from kiro_crew.dashboard.handlers.telemetry import (  # noqa: E402, F401
+    api_beacon_status,
     api_telemetry_startup,
 )
 from kiro_crew.dashboard.handlers.terminal import (  # noqa: E402, F401

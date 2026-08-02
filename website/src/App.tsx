@@ -26,7 +26,7 @@ import { ZoomProvider } from './hooks/ZoomProvider'
 import { api, isAuthBannerShown } from './api/client'
 import { safeSetItem } from './utils/safeStorage'
 import { gcOrphanedStorage } from './utils/storageGc'
-import { Rocket, Menu, Bell, Code, RefreshCw, Package, Loader2, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, X, AudioWaveform, ChevronUp, MoreHorizontal, Coins, PanelLeftClose, Globe, LayoutGrid, Lightbulb, ExternalLink, SquareTerminal, Bot } from 'lucide-react'
+import { Rocket, Menu, Bell, Code, RefreshCw, Package, Loader2, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, X, AudioWaveform, ChevronUp, MoreHorizontal, Coins, PanelLeftClose, LayoutGrid, Lightbulb, ExternalLink, SquareTerminal, Bot } from 'lucide-react'
 import { GithubIcon, DiscordIcon } from './components/BrandIcon'
 import { Toggle } from './components/ui'
 import OnboardingFlow from './components/OnboardingFlow'
@@ -80,6 +80,7 @@ import AppPage from './pages/AppPage'
 import AppDetailPage from './pages/AppDetailPage'
 import MigrationPage from './pages/MigrationPage'
 import MigrationCheck from './components/MigrationCheck'
+import PrivacyNotice from './components/PrivacyNotice'
 import BuiltinAppRoute from './apps/BuiltinAppRoute'
 import { getBuiltinIcon } from './apps/builtinIcons'
 import { getThemeBranding } from './themeBranding'
@@ -226,7 +227,7 @@ function UpdateOverlay({ onCancel }: { onCancel: () => void }) {
       <div className="bg-card border border-border rounded-xl p-8 max-w-md w-full mx-4 shadow-xl text-center">
         <div className="text-4xl mb-4 animate-pulse">{info?.icon || <RefreshCw className="lucide-inline" />}</div>
         <div className="text-lg font-bold text-text-strong mb-2">{i18nT('app.updating_kirocrew')}</div>
-        <div className="text-sm text-muted mb-5">{detail || 'Starting update…'}</div>
+        <div className="text-sm text-muted mb-5">{detail || i18nT('app.starting_update')}</div>
         {/* Step progress */}
         <div className="flex flex-col gap-2 text-left mb-5">
           {STEP_ORDER.map((s, i) => {
@@ -244,7 +245,7 @@ function UpdateOverlay({ onCancel }: { onCancel: () => void }) {
         </div>
         {isFailed ? (
           <div className="flex flex-col gap-3 items-center">
-            <div className="text-sm text-danger">{detail || 'Check logs for details.'}</div>
+            <div className="text-sm text-danger">{detail || i18nT('app.check_logs_for_details')}</div>
             <button className="px-4 py-1.5 rounded-lg text-[13px] font-medium cursor-pointer bg-card border border-border text-text hover:border-border-strong transition-colors" onClick={handleCancel}>
               {i18nT('app.dismiss')}
             </button>
@@ -308,7 +309,7 @@ function NavBadge({ navId, collapsed, appBadges }: { navId: string; collapsed: b
   const surfaceHasBadgeSource = surface !== undefined && (surface.unreadSelector !== undefined || surface.slotMode !== undefined)
   const appName = navId.startsWith('app-') ? navId.slice(4) : navId
   const dynamicCount = surfaceHasBadgeSource ? 0 : (appBadges[appName] || 0)
-  const builtinLabel = surface?.badgeLabel ?? 'updates'
+  const builtinLabel = surface?.badgeLabel ?? i18nT('app.updates')
   const activityCount = useAppSelector(selectSurfaceActivityCount(navId))
   const activityLabel = surface?.activityLabel ?? 'in flight'
   return (
@@ -495,8 +496,8 @@ function NavToggle({ collapsed, expanded, hiddenCount, onClick }: {
   // offers to re-collapse rather than reveal "0 more".
   const showsCollapse = expanded || hiddenCount === 0
   const Icon = showsCollapse ? ChevronUp : MoreHorizontal
-  const labelText = showsCollapse ? 'Show less' : `${hiddenCount} more`
-  const titleText = showsCollapse ? 'Show fewer apps' : `Show ${hiddenCount} more app${hiddenCount === 1 ? '' : 's'}`
+  const labelText = showsCollapse ? i18nT('app.show_less') : `${hiddenCount} more`
+  const titleText = showsCollapse ? i18nT('app.show_fewer_apps') : `Show ${hiddenCount} more app${hiddenCount === 1 ? '' : 's'}`
   return (
     <button ref={rowRef}
       className="group/nav relative flex items-center rounded-md cursor-pointer text-sm font-medium whitespace-nowrap gap-2.5 py-2 pl-3 pr-3 transition-colors duration-200 text-muted hover:text-text hover:bg-bg-hover bg-transparent border-none w-full"
@@ -616,7 +617,7 @@ function NotificationsBellButton() {
           })
           setSelectedTs(null)
         }}
-        title={unacked.length > 0 ? `${unacked.length} notification${unacked.length === 1 ? '' : 's'}` : 'Notifications'}
+        title={unacked.length > 0 ? `${unacked.length} notification${unacked.length === 1 ? '' : 's'}` : i18nT('app.notifications')}
         aria-label={i18nT('app.notifications')}
         aria-expanded={open}
       >
@@ -1187,7 +1188,7 @@ export default function App() {
           ? {
               used: Number.isFinite(u.bonus_used) ? Math.round(u.bonus_used) : 0,
               limit: Math.round(u.bonus_limit),
-              label: (typeof u.bonus_label === 'string' && u.bonus_label) ? u.bonus_label : 'Bonus credits',
+              label: (typeof u.bonus_label === 'string' && u.bonus_label) ? u.bonus_label : i18nT('app.bonus_credits'),
               expiresLabel: typeof u.bonus_expires_label === 'string' ? u.bonus_expires_label : undefined,
             }
           : undefined
@@ -1342,7 +1343,7 @@ export default function App() {
       await api.applyUpdate()
     } catch (err: unknown) {
       setUpdating(false)
-      let msg = 'Update failed'
+      let msg = i18nT('app.update_failed_2')
       const errMessage = err instanceof Error ? err.message : ''
       try {
         const parsed = JSON.parse(errMessage || '')
@@ -1357,7 +1358,7 @@ export default function App() {
     const slot = result.key
     navigate('/chat')
     const msg = FEATURE_REQUEST_PROMPT
-    dispatch(appendMessage({ role: 'user', content: '\u{1F4A1} I\u2019d like to request a feature!', cls: '', ts: new Date().toISOString() }))
+    dispatch(appendMessage({ role: 'user', content: i18nT('app.i_d_like_to_request_a_feature'), cls: '', ts: new Date().toISOString() }))
     dispatch(setSlotRunning(true))
     try {
       await api.sendChat(msg, slot, colorTheme)
@@ -1569,15 +1570,15 @@ export default function App() {
                 key="conn"
                 className="flex items-center justify-center p-1.5 -m-1.5 rounded-full bg-transparent border-none cursor-pointer shrink-0"
                 onClick={() => { pulseCapsuleLayout(); setCapsuleCollapsed(c => !c) }}
-                title={`${connected ? 'Gateway connected' : authRequired ? 'Gateway offline — session expired, see banner above' : 'Gateway offline — reconnecting'} · click to ${capsuleCollapsed ? 'expand' : 'collapse'} readouts`}
-                aria-label={connected ? 'Gateway connected' : 'Gateway offline'}
+                title={`${connected ? i18nT('app.gateway_connected') : authRequired ? i18nT('app.gateway_offline_session_expired_see_banner_above') : i18nT('app.gateway_offline_reconnecting')} · ${capsuleCollapsed ? i18nT('app.click_to_expand_readouts') : i18nT('app.click_to_collapse_readouts')}`}
+                aria-label={connected ? i18nT('app.gateway_connected') : i18nT('app.gateway_offline')}
                 aria-expanded={!capsuleCollapsed}
               >
                 <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full transition-colors duration-300 ${offline ? 'bg-danger animate-pulse motion-reduce:animate-none' : 'bg-ok shadow-[0_0_8px_rgba(34,197,94,.4)]'}`} />
                 {/* Live-region announcement lives in its own hidden span:
                     role="status" on the button itself would override its
                     implicit button role for screen readers. */}
-                <span role="status" className="sr-only">{connected ? 'Gateway connected' : 'Gateway offline'}</span>
+                <span role="status" className="sr-only">{connected ? i18nT('app.gateway_connected') : i18nT('app.gateway_offline')}</span>
               </button>
             )
             if (!capsuleCollapsed) {
@@ -1595,10 +1596,10 @@ export default function App() {
                 const dskValid = m.diskTotal > 0
                 const cpuValid = typeof m.cpuPct === 'number' && Number.isFinite(m.cpuPct)
                 const staleTitle = sysMetricsStale ? ' (stale: fetch failing)' : ''
-                segments.push(<button key="metrics" className={`${seg} gap-2 text-[11px] font-mono ${sysMetricsStale ? 'opacity-60' : ''}`} title={sysMetricsStale ? 'Metrics are stale, latest fetch failed' : 'Click to hide'} onClick={() => { setMetricsOpen(false); safeSetItem('mc-topbar-metrics', '0') }}>
-                  <span className={cpuValid ? metricColor(m.cpuPct / 100) : 'text-muted'} title={cpuValid ? `CPU: ${m.cpuPct.toFixed(0)}%${staleTitle}` : 'CPU: unavailable'}>{i18nT('app.cpu')} {cpuValid ? `${m.cpuPct.toFixed(0)}%` : '—'}</span>
-                  <span className={memValid ? metricColor(memPct) : 'text-muted'} title={memValid ? `Memory: ${m.memUsed.toFixed(1)}/${m.memTotal.toFixed(1)} GB${staleTitle}` : 'Memory: unavailable'}>{i18nT('app.mem')} {memValid ? `${(memPct * 100).toFixed(0)}%` : '—'}</span>
-                  <span className={dskValid ? metricColor(dskPct) : 'text-muted'} title={dskValid ? `Disk: ${dskUsed.toFixed(0)}/${m.diskTotal.toFixed(0)} GB${staleTitle}` : 'Disk: unavailable'}>{i18nT('app.dsk')} {dskValid ? `${(dskPct * 100).toFixed(0)}%` : '—'}</span>
+                segments.push(<button key="metrics" className={`${seg} gap-2 text-[11px] font-mono ${sysMetricsStale ? 'opacity-60' : ''}`} title={sysMetricsStale ? i18nT('app.metrics_are_stale_latest_fetch_failed') : i18nT('app.click_to_hide')} onClick={() => { setMetricsOpen(false); safeSetItem('mc-topbar-metrics', '0') }}>
+                  <span className={cpuValid ? metricColor(m.cpuPct / 100) : 'text-muted'} title={cpuValid ? `CPU: ${m.cpuPct.toFixed(0)}%${staleTitle}` : i18nT('app.cpu_unavailable')}>{i18nT('app.cpu')} {cpuValid ? `${m.cpuPct.toFixed(0)}%` : '—'}</span>
+                  <span className={memValid ? metricColor(memPct) : 'text-muted'} title={memValid ? `Memory: ${m.memUsed.toFixed(1)}/${m.memTotal.toFixed(1)} GB${staleTitle}` : i18nT('app.memory_unavailable')}>{i18nT('app.mem')} {memValid ? `${(memPct * 100).toFixed(0)}%` : '—'}</span>
+                  <span className={dskValid ? metricColor(dskPct) : 'text-muted'} title={dskValid ? `Disk: ${dskUsed.toFixed(0)}/${m.diskTotal.toFixed(0)} GB${staleTitle}` : i18nT('app.disk_unavailable')}>{i18nT('app.dsk')} {dskValid ? `${(dskPct * 100).toFixed(0)}%` : '—'}</span>
                 </button>)
               }
             }
@@ -1742,7 +1743,7 @@ export default function App() {
             <div className="mt-3 pt-3 border-t border-border">
               <button className="text-[13px] text-muted cursor-pointer hover:text-text transition-colors bg-transparent border-none p-0 font-body" onClick={async () => {
                 if (!showFull) { if (!fullChangelog) { const d = await api.changelog(); setFullChangelog(d.content || '') }; setShowFull(true) } else { setShowFull(false) }
-              }}>{showFull ? '▾ Hide Full Changelog' : '▸ View Full Changelog'}</button>
+              }}>{showFull ? i18nT('app.hide_full_changelog') : i18nT('app.view_full_changelog')}</button>
               {showFull && fullChangelog && (
                 <div className="mt-2 p-3 bg-bg rounded-lg border border-border max-h-72 overflow-y-auto">
                   <div className="text-[13px] text-text leading-relaxed"><MarkdownRenderer content={fullChangelog} /></div>
@@ -1845,8 +1846,8 @@ export default function App() {
               type="button"
               className="group relative flex items-center gap-2 w-full p-0 bg-transparent border-none cursor-pointer text-left"
               onClick={toggleNav}
-              title={effectiveCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              aria-label={effectiveCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              title={effectiveCollapsed ? i18nT('app.expand_sidebar') : i18nT('app.collapse_sidebar')}
+              aria-label={effectiveCollapsed ? i18nT('app.expand_sidebar') : i18nT('app.collapse_sidebar')}
               aria-expanded={!effectiveCollapsed}
             >
               <span className="flex items-center gap-2.5 min-w-0">
@@ -1996,7 +1997,7 @@ export default function App() {
         </div>
 
         {/* Bottom-fixed: Agent Capabilities, Developer (only when dev mode is
-            enabled), Settings, and the Contact Us row. Pinned to the
+            enabled), Settings, and the community row. Pinned to the
             rail's bottom edge — the Apps frame above absorbs the scroll. */}
         {(() => {
           const s = NAV_ITEMS.find(n => n.id === 'settings')!
@@ -2041,15 +2042,70 @@ export default function App() {
                 onClick={closeMobileNav}
                 badge={updateAvailable ? <span title={i18nT('app.update_available')} role="status" aria-label={i18nT('app.update_available_2')} className={effectiveCollapsed ? 'absolute top-1 right-1 w-2 h-2 bg-accent rounded-full z-10' : 'absolute top-1/2 -translate-y-1/2 right-2 w-2 h-2 bg-accent rounded-full z-10'} /> : undefined}
               />
-              {/* Contact Us — icon links to kiro.dev, the GitHub repo,
-                  and the Discord community. Hidden while the rail is collapsed
-                  (folds away via max-height so the collapse stays smooth). */}
+              {/* Community row — a leading GitHub mark, then two links on ONE
+                  line separated by a middot, then the icon-only Discord link.
+
+                  This line is tight by construction, and the numbers are
+                  MEASURED against real font advance widths, not estimated.
+                  The rail is 236px, which leaves a 143px text group after the
+                  mark, the Discord icon and padding; the middot plus its gaps
+                  costs ~10-15px depending on family.
+
+                  CRITICAL: size this against the WIDEST font the user can pick,
+                  not the default. `useZoom` lets them set --font-body to sans
+                  (Space Grotesk), mono (JetBrains Mono) or system (-apple-system),
+                  and mono is ~20% wider. A 12px row measured only against Space
+                  Grotesk shipped and truncated for every mono user.
+
+                  "Star us · Report issue" at 12px, measured:
+                    Space Grotesk   114.0px against a 132.8px budget — 18.7 spare
+                    JetBrains Mono  136.8px against a 127.8px budget — 9.0 OVER
+                  Rather than shrink the type for everyone or drop the Discord
+                  link, mono alone is tightened to -0.05em, which brings it to
+                  125.4px (+3.0 spare). That rule lives in index.css keyed on
+                  html[data-font-family="mono"] via the `rail-community-links`
+                  class, and its measurement table is there. Mono's margin is only
+                  ~3px, so ANY copy growth here must be re-measured IN MONO first.
+
+                  The separator is a middot because " / " is wider, and the row's
+                  right padding is trimmed for the same budget reason.
+
+                  The mark sits 2px from the text (ml-0.5) while the middot keeps
+                  4px gaps. That asymmetry is an OPTICAL correction, not an
+                  oversight: github-mark.svg is a circle filling its whole 16x16
+                  viewBox (no internal padding), and a circle beside a capital "S"
+                  curves away from it, so an equal metric gap reads as a wider
+                  one. Matching the middot's 4px here looked detached. Font and
+                  letter-spacing are deliberately NOT overridden — the row
+                  inherits --font-body and letter-spacing:normal from body, so it
+                  follows the user's own font choice like everything else.
+
+                  Order of yielding under pressure is deliberate: "Star us" and
+                  the middot are shrink-0, so a longer locale (Spanish's "Informar
+                  de un problema") ellipsizes the TAIL of the second link rather
+                  than mangling both. Both links keep a title tooltip, so a
+                  clipped label is still readable on hover.
+
+                  One mark for two links is correct — both destinations ARE
+                  GitHub. It is decorative (BrandGlyph is aria-hidden) and each
+                  link carries its own descriptive aria-label, since "Star us"
+                  alone names no target. Hidden while the rail is collapsed (folds
+                  away via max-height so the collapse stays smooth). */}
               <div {...(effectiveCollapsed ? { inert: '' } : {})} className={`overflow-hidden transition-all duration-200 ${effectiveCollapsed ? 'max-h-0 opacity-0' : 'max-h-16 opacity-100 mt-1'}`}>
-                <div className="flex items-center gap-1 border-t border-border-strong pl-3 pr-1 pt-2.5 pb-0.5 whitespace-nowrap">
-                  <span className="text-[13px] text-muted flex-1 overflow-hidden">{i18nT('app.contact_us')}</span>
-                  <a href="https://kiro.dev" target="_blank" rel="noopener noreferrer" title={i18nT('app.kiro_website')} aria-label={i18nT('app.kiro_website_kiro_dev')} className="flex items-center justify-center w-6 h-6 rounded-md text-muted hover:text-text hover:bg-bg-hover transition-colors shrink-0"><Globe size={15} /></a>
-                  <a href="https://github.com/kirodotdev/KiroCrew" target="_blank" rel="noopener noreferrer" title={i18nT('app.github_repository')} aria-label={i18nT('app.kirocrew_github_repository')} className="flex items-center justify-center w-6 h-6 rounded-md text-muted hover:text-text hover:bg-bg-hover transition-colors shrink-0"><GithubIcon size={15} /></a>
-                  <a href="https://kiro.dev/discord/" target="_blank" rel="noopener noreferrer" title={i18nT('app.discord_community')} aria-label={i18nT('app.kiro_discord_community')} className="flex items-center justify-center w-6 h-6 rounded-md text-muted hover:text-text hover:bg-bg-hover transition-colors shrink-0"><DiscordIcon size={15} /></a>
+                <div className="flex items-center border-t border-border-strong pl-3 pr-0.5 pt-2.5 pb-0.5 whitespace-nowrap">
+                  {/* pl-3 puts the mark on the same 12px x-offset as the
+                      nav-item icons above. No `gap` on this row ON PURPOSE: a row
+                      gap applies between ALL THREE children (mark, links,
+                      Discord), so pairing it with ml-0.5 silently doubled the
+                      mark-to-text distance to 6px and cost 4px the budget below
+                      never accounted for. Spacing is explicit per child instead. */}
+                  <span className="flex items-center shrink-0 text-muted"><GithubIcon size={15} /></span>
+                  <div className="rail-community-links flex items-center gap-[5px] flex-1 min-w-0 ml-1.5 text-[12px]">
+                    <a href="https://github.com/kirodotdev/KiroCrew" target="_blank" rel="noopener noreferrer" title={i18nT('app.star_kirocrew_on_github')} aria-label={i18nT('app.star_kirocrew_on_github')} className="shrink-0 rounded text-muted hover:text-text transition-colors">{i18nT('app.star_us')}</a>
+                    <span aria-hidden="true" className="shrink-0 opacity-40">·</span>
+                    <a href="https://github.com/kirodotdev/KiroCrew/issues" target="_blank" rel="noopener noreferrer" title={i18nT('app.report_an_issue_on_github')} aria-label={i18nT('app.report_an_issue_on_github')} className="min-w-0 overflow-hidden text-ellipsis rounded text-muted hover:text-text transition-colors">{i18nT('app.report_issue')}</a>
+                  </div>
+                  <a href="https://kiro.dev/discord/" target="_blank" rel="noopener noreferrer" title={i18nT('app.discord_community')} aria-label={i18nT('app.kiro_discord_community')} className="flex items-center justify-center ml-1 w-6 h-6 rounded-md text-muted hover:text-text hover:bg-bg-hover transition-colors shrink-0"><DiscordIcon size={15} /></a>
                 </div>
               </div>
             </div>
@@ -2061,6 +2117,7 @@ export default function App() {
 
       {/* Content */}
       <div className="flex flex-col min-h-0 min-w-0" style={{ gridArea: 'content' }}>
+        <PrivacyNotice />
         <main id="main-content" tabIndex={-1} className={`flex flex-col min-h-0 min-w-0 flex-1 overflow-x-hidden ${needsFixedHeight ? 'overflow-hidden p-0' : 'overflow-y-auto'}`}>
           <MigrationCheck />
           <Routes>
@@ -2162,9 +2219,9 @@ export default function App() {
         // external_idp); social login covers Google/GitHub and reports
         // accountType "Social". Unmapped values pass through verbatim rather
         // than being hidden, so a new kind still says something truthful.
-        const acctKind = kiroUsage.accountType === 'IamIdentityCenter' ? 'IAM Identity Center'
-          : kiroUsage.accountType === 'BuilderId' ? 'Builder ID'
-          : kiroUsage.accountType === 'Social' ? 'Social login'
+        const acctKind = kiroUsage.accountType === 'IamIdentityCenter' ? i18nT('app.iam_identity_center')
+          : kiroUsage.accountType === 'BuilderId' ? i18nT('app.builder_id')
+          : kiroUsage.accountType === 'Social' ? i18nT('app.social_login')
           : kiroUsage.accountType
         let issuerHost: string | undefined
         if (kiroUsage.startUrl) { try { issuerHost = new URL(kiroUsage.startUrl).host } catch { issuerHost = undefined } }
@@ -2185,7 +2242,7 @@ export default function App() {
                 </div>
                 <div className="min-w-0">
                   <div className="text-[15px] font-medium text-text truncate" title={who}>{who}</div>
-                  {signedInWith && <div className="text-[12px] text-muted truncate">Signed in with {signedInWith}</div>}
+                  {signedInWith && <div className="text-[12px] text-muted truncate">{i18nT('app.signed_in_with', { provider: signedInWith })}</div>}
                 </div>
               </div>
             )}

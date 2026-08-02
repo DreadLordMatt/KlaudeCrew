@@ -35,7 +35,7 @@ import secrets
 import time
 from typing import TYPE_CHECKING, Any
 
-from kiro_crew.constants import OPTIONS_RE_TRAILER
+from kiro_crew.constants import OPTIONS_RE_TRAILER, split_trailing_protocol_suffix
 from kiro_crew.messaging.renderer import Renderer
 from kiro_crew.messaging.transport import TransportCapabilities
 
@@ -329,33 +329,44 @@ class DiscordRenderer(Renderer):
             self._buf = [f"{self._pending_chip}\n\n{body}"]
             self._pending_chip = ""
 
+    async def on_steer_consumed(self, summary: str = "") -> None:
+        """Seal the pre-steer segment at the driver's structured boundary."""
+        self._materialize_chip()
+        await self._rotate_on_length()
+        # A trailing [OPTIONS:] block belongs to the visible PRE-STEER answer,
+        # but the steering marker sits after it in the raw buffer, so the
+        # end-of-buffer anchor no longer sees it. Extract it here -- BEFORE the
+        # seal -- so the choices ship as buttons on the sealed message instead of
+        # being frozen as literal protocol text the user cannot act on.
+        body_raw, opts = _extract_options("".join(self._buf))
+        self._buf = [body_raw]
+        components = build_option_components(opts) if opts else None
+        sealed = bool(self._segment_text().strip()) or components is not None
+        await self._seal_current(components=components)
+        clean_summary = _neutralize_md(summary)
+        if clean_summary:
+            chip: str | None = "> ↪️ " + clean_summary
+        else:
+            chip = self._chip_for_seal(self._seal_count)
+        self._seal_count += 1
+        self._pending_chip = chip or ""
+        self._buf = []
+        if sealed:
+            self._open_new_message()
+
     async def _rotate_at_markers(self) -> None:
+        """Defence for callers that bypass TurnDriver and pass raw markers."""
         while True:
             self._materialize_chip()
             raw = "".join(self._buf)
-            m = _STEER_MARKER_RE.search(raw)  # first COMPLETE marker only
-            if m is None:
+            marker = _STEER_MARKER_RE.search(raw)
+            if marker is None:
                 return
-            self._buf = [raw[: m.start()]]
-            # Length-rotate the pre-marker segment BEFORE sealing (a chunk can
-            # deliver oversized text and the marker together).
-            await self._rotate_on_length()
-            sealed = bool(self._segment_text().strip())
-            await self._seal_current()  # freeze the pre-steer message as-is
-            sm = _STEER_SUMMARY_RE.match(raw, m.start())
-            summary = _neutralize_md(sm.group(1)) if sm else ""
-            if summary:
-                chip: str | None = f"> ↪️ {summary}"
-            else:
-                chip = self._chip_for_seal(self._seal_count)
-            self._seal_count += 1
-            self._pending_chip = chip or ""
-            self._buf = [raw[m.end() :]]  # new segment: steered continuation
-            if sealed:
-                self._open_new_message()
-            # else: the pre-marker segment was empty (e.g. a tool-only live
-            # "🔧 …" message) — keep _stream_mid so the steered continuation
-            # replaces the transient footer in place.
+            self._buf = [raw[: marker.start()]]
+            summary_match = _STEER_SUMMARY_RE.match(raw, marker.start())
+            summary = _neutralize_md(summary_match.group(1)) if summary_match else ""
+            await self.on_steer_consumed(summary)
+            self._buf = [raw[marker.end() :]]
 
     async def _rotate_on_length(self) -> None:
         """Rotate when the segment exceeds one Discord message, keeping fenced
@@ -366,20 +377,13 @@ class DiscordRenderer(Renderer):
         raw = "".join(self._buf)
         if len(raw) <= limit:
             return
-        partial = ""
-        cm = _OPTIONS_RE.search(raw)
-        if cm:
-            raw, partial = raw[: cm.start()], raw[cm.start() :]
-        else:
-            idx = max(raw.rfind("[STEERING"), raw.rfind("[OPTIONS"))
-            if idx != -1 and "]" not in raw[idx:]:
-                raw, partial = raw[:idx], raw[idx:]
+        raw, protocol_suffix = split_trailing_protocol_suffix(raw)
         chunks = _split_markdown(raw, limit)
         for ch in chunks[:-1]:
             self._buf = [ch]
             await self._seal_current()
             self._open_new_message()
-        self._buf = [(chunks[-1] if chunks else "") + partial]
+        self._buf = [(chunks[-1] if chunks else "") + protocol_suffix]
 
     def _open_new_message(self) -> None:
         """Next render creates a fresh message instead of editing the old one."""
@@ -426,7 +430,9 @@ class DiscordRenderer(Renderer):
         are skipped so a bare steer doesn't post a blank bubble."""
         text = self._segment_text().strip()
         if not text:
-            return
+            if components is None:
+                return
+            text = "…"
         if self._stream_mid is not None:
             ok = await self._client.edit_message(
                 self._channel_id, self._stream_mid, text, components=components

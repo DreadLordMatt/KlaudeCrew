@@ -9,6 +9,7 @@ import { SortableContext, verticalListSortingStrategy, useSortable, sortableKeyb
 import { CSS } from '@dnd-kit/utilities'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { modelListRefetchInterval } from '../providers/modelListHealth'
+import { shallowEqual } from 'react-redux'
 import { useAppDispatch, useAppSelector } from '../store'
 import { useConnected } from '../hooks/useConnected'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from '../components/ui/dropdown-menu'
@@ -39,7 +40,7 @@ import { resolveFolderAgent, resolveFolderProjectDir } from '../utils/folderAgen
 import ProjectPicker from '../components/ProjectPicker'
 import FolderMoveSubmenu from '../components/FolderMoveSubmenu'
 import SessionActionsMenu from '../components/SessionActionsMenu'
-import { ChannelBrandIcon } from '../components/ChannelBrandIcon'
+import { ChannelBrandIcon, hasChannelBrandIcon } from '../components/ChannelBrandIcon'
 import TagManagerList from '../components/TagManagerList'
 import { DndDraggable, DndDroppable } from '../components/dnd'
 import { collectFolderSubtreeIds } from '../utils/folderTree'
@@ -61,6 +62,17 @@ import {
 import { loadChatConfig, saveChatConfig } from './chat/ChatSettings'
 
 import { i18nT } from '../i18n/t'
+
+/** Translate a slot's running-status line. The status `text` is stored as a raw
+ *  English literal by the websocket layer (a plain `.ts` module the i18n codemod
+ *  never scans), so it must be localized at render time. The two fixed phases
+ *  (`thinking`/`streaming`) map to catalog keys; a `tool` phase or a
+ *  server-supplied status carries its own dynamic text and is passed through. */
+function slotStatusText(detail?: { kind?: string; text?: string }): string {
+  if (detail?.kind === 'streaming') return i18nT('pages.chatSidebar.streaming')
+  if (detail?.kind === 'thinking' && detail.text === 'Thinking…') return i18nT('pages.chatSidebar.thinking')
+  return detail?.text || i18nT('pages.chatSidebar.thinking')
+}
 /** Telegram-style relative time: time today, "Yesterday hh:mm", weekday+time this week,
  *  short date this year, full date otherwise.
  *  Accepts ISO string (active slots) or Unix epoch seconds (history `modified`). */
@@ -206,7 +218,7 @@ function SortableColumnFolder({ folder, columnId, colSlotKeys, renderColumnFolde
 function FolderDragGhost({ folder }: { folder?: ChatFolder }) {
   return (
     <div className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text shadow-lg max-w-[240px] truncate pointer-events-none flex items-center gap-2">
-      <FolderGlyph icon={folder?.icon} size={14} />{folder?.name ?? 'Folder'}
+      <FolderGlyph icon={folder?.icon} size={14} />{folder?.name ?? i18nT('pages.chatSidebar.folder')}
     </div>
   )
 }
@@ -253,6 +265,34 @@ interface Slot {
     kind?: 'change' | 'issue'
   }>
   source_links_total?: number
+}
+
+type SourceLinkState = NonNullable<NonNullable<Slot['source_links']>[number]['state']>
+
+/** Lifecycle states after which a pull request can never merge, so its CI
+ * rollup carries no actionable information and the lifecycle glyph is the only
+ * meaningful signal. Named ONCE here because the vocabulary is shared by three
+ * sibling conditionals; an inline literal per glyph is how `closed` came to be
+ * covered by the badge but not by the CI gate.
+ *
+ * `closed` matters as much as `merged`: a closed pull request's check rollup can
+ * stay pending FOREVER (GitHub parks fork-PR checks in PENDING /
+ * ACTION_REQUIRED when the PR is closed before a maintainer approves the run),
+ * so a chip gated only on `merged` spins its "checks running" spinner
+ * indefinitely on a PR nobody is waiting for. Must stay in step with
+ * `PullRequestPanel.tsx::SourceTabState`, which applies the same rule to the
+ * source-strip tab — the chip and the tab describe one pull request and may not
+ * disagree about its lifecycle. */
+const TERMINAL_SOURCE_LINK_STATES: ReadonlySet<SourceLinkState> = new Set<SourceLinkState>([
+  'merged',
+  'closed',
+])
+
+/** Whether a chip should show its CI rollup. An ABSENT state means the provider
+ * status has not been read yet (or the payload predates the field), which is not
+ * terminal — such a chip keeps rendering CI exactly as it always did. */
+function showsChipCi(state: SourceLinkState | undefined): boolean {
+  return state === undefined || !TERMINAL_SOURCE_LINK_STATES.has(state)
 }
 
 interface HistoryItem {
@@ -382,18 +422,18 @@ function useDebouncedSessionSearch<T>(
 /** Compute a date segment label for a session timestamp. Mirrors ChatGPT/Claude.
  *  Accepts either a Unix epoch (seconds) from backend `modified` or an ISO `created` string. */
 function dateSegment(ts: number | string | undefined): string {
-  if (ts == null) return 'Older'
+  if (ts == null) return i18nT('pages.chatSidebar.older')
   const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts)
-  if (isNaN(d.getTime())) return 'Older'
+  if (isNaN(d.getTime())) return i18nT('pages.chatSidebar.older')
   const now = new Date()
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
   const startOfYesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
   const daysAgo7 = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7)
   const daysAgo30 = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30)
-  if (d >= startOfToday) return 'Today'
-  if (d >= startOfYesterday) return 'Yesterday'
-  if (d >= daysAgo7) return 'Last 7 Days'
-  if (d >= daysAgo30) return 'Last 30 Days'
+  if (d >= startOfToday) return i18nT('pages.chatSidebar.today')
+  if (d >= startOfYesterday) return i18nT('pages.chatSidebar.yesterday')
+  if (d >= daysAgo7) return i18nT('pages.chatSidebar.last_7_days')
+  if (d >= daysAgo30) return i18nT('pages.chatSidebar.last_30_days')
   if (d.getFullYear() === now.getFullYear()) return d.toLocaleDateString([], { month: 'long' })
   return d.toLocaleDateString([], { year: 'numeric', month: 'long' })
 }
@@ -707,7 +747,11 @@ function ChatSidebar({
   // has arrived. Used by the auto-drain effect to distinguish "data not yet
   // loaded" from "data loaded and genuinely empty".
   const slotsLoaded = useAppSelector(s => s.dashboard.slotsLoaded)
-  const slotStatusDetail = useAppSelector(s => s.chat.slotStatusDetail)
+  // shallowEqual: this is a whole-map subscription read only for each row's
+  // `.text`, so re-render when some slot's detail object actually changed —
+  // not merely because a reducer produced a new map wrapper. Without it, any
+  // write to one slot's detail re-renders the entire sidebar.
+  const slotStatusDetail = useAppSelector(s => s.chat.slotStatusDetail, shallowEqual)
   // Presence in this map means "this session is in an active goal loop".
   const goalLoops = useAppSelector(s => s.chat.goalLoops)
   // Live subagent activity per slot, for the sidebar row's "N agents running"
@@ -978,7 +1022,7 @@ function ChatSidebar({
       }
       queryClient.invalidateQueries({ queryKey: ['cleanup-preview'] })
     },
-    onError: (e) => setCleanupError(e instanceof Error ? e.message : 'Archive failed'),
+    onError: (e) => setCleanupError(e instanceof Error ? e.message : i18nT('pages.chatSidebar.archive_failed')),
   })
 
   // Bulk model switch — apply one model to every live session at once.
@@ -1023,7 +1067,7 @@ function ChatSidebar({
         setBulkModelError('')
       }
     },
-    onError: (e) => setBulkModelError(e instanceof Error ? e.message : 'Switch failed'),
+    onError: (e) => setBulkModelError(e instanceof Error ? e.message : i18nT('pages.chatSidebar.switch_failed')),
   })
   // Roving-focus keyboard nav for the model list (WAI-ARIA listbox). No filter
   // input here, so the hook moves focus into the list on open; Escape/Tab close.
@@ -1696,21 +1740,24 @@ function ChatSidebar({
     mutationFn: ({ folderId }: { folderId: string; columnId?: string }) => {
       const agent = resolveFolderAgent(folders, folderId, defaultAgent)
       const effectiveMode = loadChatConfig().defaultAutopilot ? 'orchestrator' : (mode || '')
+      // Carry folder membership in the create payload so createSlot publishes
+      // the new slot to Redux in its final location. Assigning it after create
+      // lets the sidebar render one frame at root before moving it.
+      //
       // Folder linked to a project directory (directly or via an ancestor):
       // carry it in the create payload so the slot starts on the linked
       // project — createSlot applies it before the slot activates, so the
       // first message can't race a late project switch.
       const project = resolveFolderProjectDir(folders, folderId)
-      return dispatch(createSlot({ agent, mode: effectiveMode, project })).unwrap()
+      return dispatch(createSlot({ agent, mode: effectiveMode, folder_id: folderId, project })).unwrap()
     },
-    onSuccess: (slot: Slot, { folderId, columnId }: { folderId: string; columnId?: string }) => {
-      if (slot?.key) {
-        assignToFolder(slot.key, folderId)
+    onSuccess: (slot: Slot, { columnId }: { folderId: string; columnId?: string }) => {
+      if (slot?.key && columnId) {
         // Board view: also drop the new session into the column it was created
         // from, so a status-lane column shows it immediately instead of the
         // untagged session vanishing from a tag-filtered column. Mirrors a
         // drag-drop and is a harmless no-op for filter-only / non-status columns.
-        if (columnId) dropSlotMutation.mutate({ slot: slot.key, columnId })
+        dropSlotMutation.mutate({ slot: slot.key, columnId })
       }
     },
     onError: (err: unknown) => {
@@ -1718,7 +1765,21 @@ function ChatSidebar({
       console.error('Failed to create chat in folder:', err)
     },
   })
-  const createChatInFolder = useCallback((folderId: string, columnId?: string) => { createChatInFolderMutation.mutate({ folderId, columnId }) }, [createChatInFolderMutation])
+  const createChatInFolder = useCallback((folderId: string, columnId?: string) => {
+    // A nested folder selected from the create menu may be hidden behind one
+    // or more collapsed ancestors. Expand the complete path optimistically so
+    // the destination and its new session are visible as creation begins.
+    const visited = new Set<string>()
+    let currentId: string | undefined = folderId
+    while (currentId && !visited.has(currentId)) {
+      visited.add(currentId)
+      const folder = folders.find(f => f.id === currentId)
+      if (!folder) break
+      if (folder.collapsed) updateFolderMutation.mutate({ id: folder.id, body: { collapsed: false } })
+      currentId = folder.parent_id || undefined
+    }
+    createChatInFolderMutation.mutate({ folderId, columnId })
+  }, [createChatInFolderMutation, folders, updateFolderMutation])
 
   // Create autopilot session mutation (consistent with useMutation pattern)
   const createAutopilotMutation = useMutation({
@@ -1853,7 +1914,7 @@ function ChatSidebar({
           role="button"
           tabIndex={0}
           aria-expanded={!folder.collapsed}
-          aria-label={`${folder.collapsed ? 'Expand' : 'Collapse'} folder ${folder.name}`}
+          aria-label={folder.collapsed ? i18nT('pages.chatSidebar.expand_folder_name', { name: folder.name }) : i18nT('pages.chatSidebar.collapse_folder_name', { name: folder.name })}
           {...(draggable ? dragHandleProps : {})}
           onClick={() => toggleCollapse(folder.id)}
           onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCollapse(folder.id) } }}
@@ -1893,13 +1954,13 @@ function ChatSidebar({
                   folders={reparentTargets}
                   currentFolderId={folder.parent_id || null}
                   onPick={pid => moveFolderTo(folder.id, pid)} />
-                <DropdownMenuItem onClick={() => { setLinking({ folderId: folder.id, scope: columnId }) }}><Link2 size={13} /> {folders.find(f => f.id === folder.id)?.project_dir ? 'Change project directory' : 'Link project directory'}</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setLinking({ folderId: folder.id, scope: columnId }) }}><Link2 size={13} /> {folders.find(f => f.id === folder.id)?.project_dir ? i18nT('pages.chatSidebar.change_project_directory') : i18nT('pages.chatSidebar.link_project_directory')}</DropdownMenuItem>
                 {renderFolderMenuConfigSections(folder)}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem className="text-danger focus:text-danger" onClick={() => { if (confirm(`Delete "${folder.name}"? Sessions will be ungrouped.`)) deleteFolderMutation.mutate(folder.id) }}><X size={13} /> {i18nT('pages.chatSidebar.delete_folder')}</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-            <button type="button" data-testid={`col-${columnId}-folder-${folder.id}-new-chat`} className="text-muted hover:text-accent bg-transparent border-none cursor-pointer p-[2px]" title="New chat in folder" aria-label={`New chat in folder ${folder.name}`} onClick={e => { e.stopPropagation(); createChatInFolder(folder.id, columnId) }} onMouseDown={e => { e.stopPropagation() }} onKeyDown={e => { e.stopPropagation() }}>
+            <button type="button" data-testid={`col-${columnId}-folder-${folder.id}-new-chat`} className="text-muted hover:text-accent bg-transparent border-none cursor-pointer p-[2px]" title={i18nT('pages.chatSidebar.new_chat_in_folder')} aria-label={`New chat in folder ${folder.name}`} onClick={e => { e.stopPropagation(); createChatInFolder(folder.id, columnId) }} onMouseDown={e => { e.stopPropagation() }} onKeyDown={e => { e.stopPropagation() }}>
               <MessageSquarePlus size={11} />
             </button>
           </span>
@@ -1913,7 +1974,7 @@ function ChatSidebar({
             <button key={`col-${columnId}-newchat-${folder.id}`} type="button"
               
               onClick={() => createChatInFolder(folder.id, columnId)}
-              title="New chat in folder" aria-label={`New chat in ${folder.name}`}
+              title={i18nT('pages.chatSidebar.new_chat_in_folder')} aria-label={`New chat in ${folder.name}`}
               className="w-full flex items-center gap-2.5 px-4 py-2 rounded-md text-[11px] text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none cursor-pointer text-left">
               {/* Trailing glyph — list-view parity (see renderFolderBlock). */}
               <span>{i18nT('pages.chatSidebar.new_chat_in_folder')}</span><MessageSquarePlus size={11} className="shrink-0 ml-auto" />
@@ -2013,7 +2074,7 @@ function ChatSidebar({
       : subagentCount > 0
         ? subagentLabel
         : s.running
-          ? (slotStatusDetail[s.key]?.text || 'Thinking…')
+          ? slotStatusText(slotStatusDetail[s.key])
           : (s.last_message || '')
     const ci = s.color_index != null && s.color_index >= 0 && s.color_index < paletteColors.length ? s.color_index : null
     const rowColor = ci != null ? paletteColors[ci] : null
@@ -2121,10 +2182,21 @@ function ChatSidebar({
                 // `unified` gets its own key rather than an interpolated label:
                 // it has no proper noun, and an English article fragment inside
                 // a translated sentence is not something a locale can repair.
-                const label = slotChannelNamespace(s.key) === 'unified'
+                const ns = slotChannelNamespace(s.key)
+                const label = ns === 'unified'
                   ? i18nT('pages.chatSidebar.copied_from_direct_message')
                   : i18nT('pages.chatSidebar.copied_from_channel', { channel: slotChannelLabel(s.key) })
-                return <span className="text-muted shrink-0" title={label} aria-label={label}><MessageSquare size={10} /></span>
+                // Brand mark rather than a generic bubble: the row already tells
+                // you a chat happened, so the only new information this glyph can
+                // carry is WHICH app it came from. Namespaces with no mark of
+                // their own keep the bubble — ChannelBrandIcon would fall through
+                // to its `Link2` default, which reads as live mirroring and would
+                // collide with the link glyphs rendered just below.
+                return (
+                  <span className="text-muted shrink-0 inline-flex items-center" title={label} aria-label={label}>
+                    {hasChannelBrandIcon(ns) ? <ChannelBrandIcon channel={ns} size={10} /> : <MessageSquare size={10} />}
+                  </span>
+                )
               })()}
               {/* Live mirroring, per channel. The origin glyph above is derived
                *  from the slot KEY (channelOrigin.ts) and already says where the
@@ -2229,7 +2301,7 @@ function ChatSidebar({
                 <span className="truncate">{subagentLabel}</span>
               </div>
             ) : s.running ? (
-              <div className="text-[12px] text-accent leading-snug truncate mt-0.5 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse shrink-0" />{slotStatusDetail[s.key]?.text || 'Thinking…'}</div>
+              <div className="text-[12px] text-accent leading-snug truncate mt-0.5 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse shrink-0" />{slotStatusText(slotStatusDetail[s.key])}</div>
             ) : s.last_message ? (
               <div className="text-[12px] text-muted leading-snug truncate mt-0.5">{s.last_message}</div>
             ) : null}
@@ -2242,9 +2314,9 @@ function ChatSidebar({
               const hidden = typeof s.source_links_total === 'number'
                 ? s.source_links_total - s.source_links.length
                 : 0
-              const overflowNoun = issueLinks.length
-                ? (hidden === 1 ? 'pull request or issue' : 'pull requests or issues')
-                : (hidden === 1 ? 'pull request' : 'pull requests')
+              const overflowTitle = issueLinks.length
+                ? i18nT('pages.chatSidebar.more_pull_request_or_issue_in_this_session', { count: hidden })
+                : i18nT('pages.chatSidebar.more_pull_request_in_this_session', { count: hidden })
               return (
                 <div className="flex flex-wrap gap-1.5 mt-1">
                   {changeLinks.map(link => (
@@ -2272,10 +2344,11 @@ function ChatSidebar({
                         </span>
                       )}
                       {link.state === 'closed' && <span className="capitalize text-danger">{link.state}</span>}
-                      {/* CI status is moot once the PR is merged — the merge icon is the terminal signal. */}
-                      {link.state !== 'merged' && link.ci === 'running' && <Loader2 className="lucide-inline shrink-0 animate-spin" aria-label={i18nT('pages.chatSidebar.checks_running')} />}
-                      {link.state !== 'merged' && link.ci === 'passed' && <Check className="lucide-inline shrink-0 text-ok" aria-label={i18nT('pages.chatSidebar.checks_passed')} />}
-                      {link.state !== 'merged' && link.ci === 'failed' && <X className="lucide-inline shrink-0 text-danger" aria-label={i18nT('pages.chatSidebar.checks_failed')} />}
+                      {/* CI status is moot once the PR is terminal (merged or closed) —
+                          the lifecycle glyph is the terminal signal. */}
+                      {showsChipCi(link.state) && link.ci === 'running' && <Loader2 className="lucide-inline shrink-0 animate-spin" aria-label={i18nT('pages.chatSidebar.checks_running')} />}
+                      {showsChipCi(link.state) && link.ci === 'passed' && <Check className="lucide-inline shrink-0 text-ok" aria-label={i18nT('pages.chatSidebar.checks_passed')} />}
+                      {showsChipCi(link.state) && link.ci === 'failed' && <X className="lucide-inline shrink-0 text-danger" aria-label={i18nT('pages.chatSidebar.checks_failed')} />}
                     </a>
                   ))}
                   {issueLinks.map(link => (
@@ -2297,7 +2370,7 @@ function ChatSidebar({
                     </a>
                   ))}
                   {hidden > 0 && (
-                    <span className="inline-flex items-center px-1.5 py-[1px] rounded-[4px] text-[10px] leading-none font-medium text-muted border border-border bg-bg-elevated/60" title={`${hidden} more ${overflowNoun} in this session`}>
+                    <span className="inline-flex items-center px-1.5 py-[1px] rounded-[4px] text-[10px] leading-none font-medium text-muted border border-border bg-bg-elevated/60" title={overflowTitle}>
                       +{hidden}
                     </span>
                   )}
@@ -2413,7 +2486,7 @@ function ChatSidebar({
             <button type="button"
               className="flex items-center gap-[5px] flex-1 min-w-0 bg-transparent border-none cursor-pointer text-left text-inherit p-0"
               aria-expanded={!folder.collapsed}
-              aria-label={`${folder.collapsed ? 'Expand' : 'Collapse'} folder ${folder.name}`}
+              aria-label={folder.collapsed ? i18nT('pages.chatSidebar.expand_folder_name', { name: folder.name }) : i18nT('pages.chatSidebar.collapse_folder_name', { name: folder.name })}
               onClick={() => toggleCollapse(folder.id)}>
               <FolderGlyph icon={folder.icon} size={14} open={!folder.collapsed} testId={`folder-collapse-${folder.id}`} />
               {/* Double-click rename is a mouse-only power shortcut; the accessible
@@ -2444,7 +2517,7 @@ function ChatSidebar({
                 folders={reparentTargets}
                 currentFolderId={folder.parent_id || null}
                 onPick={pid => moveFolderTo(folder.id, pid)} />
-              <DropdownMenuItem onClick={() => { setLinking({ folderId: folder.id, scope: 'list' }) }}><Link2 size={13} /> {folders.find(f => f.id === folder.id)?.project_dir ? 'Change project directory' : 'Link project directory'}</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => { setLinking({ folderId: folder.id, scope: 'list' }) }}><Link2 size={13} /> {folders.find(f => f.id === folder.id)?.project_dir ? i18nT('pages.chatSidebar.change_project_directory') : i18nT('pages.chatSidebar.link_project_directory')}</DropdownMenuItem>
               {renderFolderMenuConfigSections(folder)}
               {/* Hide this folder from the session lists (flat lane + tree).
                *  Same state the filter menu's checkboxes drive, reached from the
@@ -2463,7 +2536,7 @@ function ChatSidebar({
               <DropdownMenuItem className="text-danger focus:text-danger" data-testid={`folder-delete-${folder.id}`} onClick={() => { if (confirm(`Delete "${folder.name}"? Sessions will be ungrouped.`)) deleteFolderMutation.mutate(folder.id) }}><X size={13} /> {i18nT('pages.chatSidebar.delete_folder')}</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none" title="New chat in folder" aria-label={i18nT('pages.chatSidebar.new_chat_in_folder')} onClick={e => { e.stopPropagation(); createChatInFolder(folder.id) }}><MessageSquarePlus size={12} /></button>
+          <button type="button" className="cursor-pointer p-[4px] rounded text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none" title={i18nT('pages.chatSidebar.new_chat_in_folder')} aria-label={i18nT('pages.chatSidebar.new_chat_in_folder')} onClick={e => { e.stopPropagation(); createChatInFolder(folder.id) }}><MessageSquarePlus size={12} /></button>
         </div>
         )}
         {linking?.folderId === folder.id && linking.scope === 'list' && <ProjectPicker open={true} onOpenChange={open => { if (!open) setLinking(null) }} anchorRef={linkAnchorRef} onSelect={path => { updateFolderMutation.mutate({ id: folder.id, body: { project_dir: path } }); setLinking(null) }} />}
@@ -2486,7 +2559,7 @@ function ChatSidebar({
           type="button"
           onClick={() => toggleReveal(containerKey)}
           aria-expanded={open}
-          title={open ? 'Collapse hidden folders' : `Show ${n} hidden folder${n === 1 ? '' : 's'}`}
+          title={open ? i18nT('pages.chatSidebar.collapse_hidden_folders') : `Show ${n} hidden folder${n === 1 ? '' : 's'}`}
           className="w-full flex items-center gap-1.5 py-1 pr-2 text-left text-[11px] text-muted hover:text-fg hover:bg-accent-subtle rounded-md cursor-pointer bg-transparent border-none transition-colors"
           style={{ paddingLeft: `${8 + depth * 12}px` }}
         >
@@ -2571,7 +2644,7 @@ function ChatSidebar({
       <button key={`folder-newchat-${folder.id}`} type="button"
         
         onClick={() => createChatInFolder(folder.id)}
-        title="New chat in folder" aria-label={`New chat in ${folder.name}`}
+        title={i18nT('pages.chatSidebar.new_chat_in_folder')} aria-label={`New chat in ${folder.name}`}
         className="w-full flex items-center gap-2.5 px-4 py-2 rounded-md text-[12px] text-muted hover:text-accent hover:bg-bg-hover transition-all bg-transparent border-none cursor-pointer text-left">
         {/* Label first, glyph trailing: a leading icon pushed this row's text
          *  ~23px right of the session titles below it, breaking the single left
@@ -2664,7 +2737,7 @@ function ChatSidebar({
             <DropdownMenuContent align="end" className="min-w-[180px]">
               <DropdownMenuItem onClick={() => { const isActive = tagColumnsEnabled && rawColumns.length > 0; const next = !isActive; const cfg = loadChatConfig(); saveChatConfig({ ...cfg, tagColumnsEnabled: next }); if (next && rawColumns.length === 0) { createColumnMutation.mutate({ name: '', tag_ids: [], mode: 'any' }) } }}>
                 <Columns3 size={14} className={tagColumnsEnabled && rawColumns.length > 0 ? 'text-accent' : 'text-muted'} />
-                {tagColumnsEnabled && rawColumns.length > 0 ? 'Switch to list view' : 'Switch to board view'}
+                {tagColumnsEnabled && rawColumns.length > 0 ? i18nT('pages.chatSidebar.switch_to_list_view') : i18nT('pages.chatSidebar.switch_to_board_view')}
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => { setCleanupOpen(!cleanupOpen); setCleanupExpanded(false); setCleanupError('') }}>
                 <BrushCleaning size={14} className="text-muted" />
@@ -2690,10 +2763,10 @@ function ChatSidebar({
               disabled={creatingSlot}
               className={`flex items-center h-7 cursor-pointer bg-transparent border-none text-accent-fg hover:bg-accent-hover active:scale-95 transition-all disabled:opacity-70 disabled:cursor-wait disabled:active:scale-100 ${compactHeader ? 'justify-center w-7' : 'gap-1.5 pl-2 pr-2.5 text-[12px] font-semibold'}`}
               onClick={() => { createChatMutation.mutate() }}
-              title="New chat"
+              title={i18nT('pages.chatSidebar.new_chat')}
               aria-label={i18nT('pages.chatSidebar.new_chat_session')}
               aria-busy={creatingSlot}
-            >{creatingSlot ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}{!compactHeader && <span className="whitespace-nowrap">{creatingSlot ? 'Creating…' : 'New'}</span>}</button>
+            >{creatingSlot ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}{!compactHeader && <span className="whitespace-nowrap">{creatingSlot ? i18nT('pages.chatSidebar.creating') : i18nT('pages.chatSidebar.new')}</span>}</button>
             <span className="w-px h-4 bg-accent-fg opacity-30" aria-hidden="true" />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -2772,16 +2845,16 @@ function ChatSidebar({
             </div>
             <div className="text-[12px] text-muted mb-3">
               {cleanupPreviewLoading
-                ? 'Checking…'
+                ? i18nT('pages.chatSidebar.checking')
                 : cleanupPreviewError
                   ? <>{i18nT('pages.chatSidebar.failed_to_load_preview')} <button className="text-accent hover:underline cursor-pointer bg-transparent border-none p-0 text-[12px]" onClick={() => queryClient.invalidateQueries({ queryKey: ['cleanup-preview'] })}>{i18nT('pages.chatSidebar.retry')}</button></>
                   : noStale
-                    ? 'No inactive sessions to archive.'
+                    ? i18nT('pages.chatSidebar.no_inactive_sessions_to_archive')
                     : cleanupPreview != null && <>
-                      {i18nT('pages.chatSidebar.session', { count: archivable.length })} {i18nT('pages.chatSidebar.will_be_moved_to_older_sessions')}{activeIsStale ? ' (1 skipped — currently selected)' : ''} {i18nT('pages.chatSidebar.pinned_sessions_are_kept')}
+                      {i18nT('pages.chatSidebar.session', { count: archivable.length })} {i18nT('pages.chatSidebar.will_be_moved_to_older_sessions')}{activeIsStale ? ` ${i18nT('pages.chatSidebar.1_skipped_currently_selected')}` : ''} {i18nT('pages.chatSidebar.pinned_sessions_are_kept')}
                       {archivable.length > 0 && (
                         <button className="ml-1 text-accent hover:underline cursor-pointer bg-transparent border-none p-0 text-[12px]" onClick={() => setCleanupExpanded(!cleanupExpanded)}>
-                          {cleanupExpanded ? 'Hide' : 'Show'} {i18nT('pages.chatSidebar.session', { count: archivable.length })} ▸
+                          {cleanupExpanded ? i18nT('pages.chatSidebar.hide') : i18nT('pages.chatSidebar.show')} {i18nT('pages.chatSidebar.session', { count: archivable.length })} ▸
                         </button>
                       )}
                       {cleanupExpanded && archivable.length > 0 && (
@@ -2803,7 +2876,7 @@ function ChatSidebar({
               <Btn className="text-[12px] px-3 py-1 bg-accent text-accent-fg hover:bg-accent-hover" disabled={archivable.length === 0 || cleanupMutation.isPending || cleanupPreviewLoading} onClick={() => {
                 setCleanupError('')
                 cleanupMutation.mutate()
-              }}>{cleanupMutation.isPending ? 'Archiving…' : `Archive ${archivable.length} session${archivable.length !== 1 ? 's' : ''}`}</Btn>
+              }}>{cleanupMutation.isPending ? i18nT('pages.chatSidebar.archiving') : `Archive ${archivable.length} session${archivable.length !== 1 ? 's' : ''}`}</Btn>
             </div>
           </div>
         )
@@ -2828,7 +2901,7 @@ function ChatSidebar({
           <div className="flex items-center gap-2 justify-end">
             {bulkModelError && <span className="text-[11px] text-danger flex-1">{bulkModelError}</span>}
             <Btn className="text-[12px] px-3 py-1" onClick={() => { setBulkModelOpen(false); setBulkModel(''); setBulkModelError('') }}>{i18nT('pages.chatSidebar.cancel')}</Btn>
-            <Btn className="text-[12px] px-3 py-1 bg-accent text-accent-fg hover:bg-accent-hover" disabled={!bulkModel || bulkAffectedCount === 0 || bulkModelMutation.isPending} onClick={() => { setBulkModelError(''); bulkModelMutation.mutate({ model: bulkModel, skipRunning: bulkSkipRunning }) }}>{bulkModelMutation.isPending ? 'Switching…' : `Switch ${bulkAffectedCount} session${bulkAffectedCount !== 1 ? 's' : ''}`}</Btn>
+            <Btn className="text-[12px] px-3 py-1 bg-accent text-accent-fg hover:bg-accent-hover" disabled={!bulkModel || bulkAffectedCount === 0 || bulkModelMutation.isPending} onClick={() => { setBulkModelError(''); bulkModelMutation.mutate({ model: bulkModel, skipRunning: bulkSkipRunning }) }}>{bulkModelMutation.isPending ? i18nT('pages.chatSidebar.switching') : `Switch ${bulkAffectedCount} session${bulkAffectedCount !== 1 ? 's' : ''}`}</Btn>
           </div>
         </div>
       )}
@@ -2862,8 +2935,8 @@ function ChatSidebar({
               type="button"
               className={`relative w-6 h-6 rounded flex items-center justify-center cursor-pointer transition-colors border-none ${flatView ? 'text-accent bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover bg-transparent'}`}
               onClick={toggleFlatView}
-              title={flatView ? 'Back to folder view' : 'Flat view — all chats without folders'}
-              aria-label={flatView ? 'Switch to folder view' : 'Switch to flat view (all chats without folders)'}
+              title={flatView ? i18nT('pages.chatSidebar.back_to_folder_view') : i18nT('pages.chatSidebar.flat_view_all_chats_without_folders')}
+              aria-label={flatView ? i18nT('pages.chatSidebar.switch_to_folder_view') : i18nT('pages.chatSidebar.switch_to_flat_view_all_chats_without_folders')}
               aria-pressed={flatView}
               data-testid="flat-view-toggle"
             >
@@ -3309,7 +3382,7 @@ function ChatSidebar({
                     </span>
                     <div className="flex flex-wrap gap-1 items-center flex-1 min-w-0">
                       {colTags.length === 0 ? (
-                        <span className="text-[11px] text-muted font-semibold uppercase tracking-wider">{col.name || (col.include_untagged ? 'Untagged' : 'All sessions')}</span>
+                        <span className="text-[11px] text-muted font-semibold uppercase tracking-wider">{col.name || (col.include_untagged ? i18nT('pages.chatSidebar.untagged_2') : i18nT('pages.chatSidebar.all_sessions'))}</span>
                       ) : (
                         <>
                           {colTags.map(t => (
@@ -3565,6 +3638,10 @@ function ChatSidebar({
                   const agentName = s.agent || defaultAgent || ''
                   const agentColor = agentColorFor(agentName)
                   const isDashboard = s.key.startsWith('dashboard')
+                  const channel = slotChannelNamespace(s.key)
+                  const surfaceLabel = isDashboard
+                    ? i18nT('pages.chatSidebar.dashboard_source')
+                    : slotChannelLabel(s.key) || i18nT('pages.chatSidebar.session_source')
                   return (
                     <div className={`group relative flex items-start gap-2.5 pr-4 py-2 rounded-md text-sm transition-all select-none ${!connected ? 'text-muted opacity-50 cursor-not-allowed' : 'text-muted hover:text-text hover:bg-bg-hover cursor-pointer'}`} style={{ paddingLeft: '10px' }} title={s.title || s.key} {...offlineProps(connected, 'resume sessions')} role="button" tabIndex={0} aria-disabled={!connected} onKeyDown={e => {
                       // WCAG 2.1.1: history rows must be resumable via keyboard.
@@ -3588,10 +3665,12 @@ function ChatSidebar({
                       dispatch(resumeFromHistory({ key: s.key, title: s.title || s.key }))
                     }}>
                       {/* Platform glyph — fills the left column that session rows reserve for the unread dot */}
-                      <span role="img" className="shrink-0 flex items-center justify-center self-center text-muted" title={isDashboard ? 'Dashboard session' : 'Slack session'} aria-label={isDashboard ? 'Dashboard session' : 'Slack session'}>
+                      <span role="img" className="shrink-0 flex items-center justify-center self-center text-muted" title={surfaceLabel} aria-label={surfaceLabel}>
                         {isDashboard
                           ? <Monitor size={12} />
-                          : <MessageSquare size={12} />
+                          : channel === 'unified'
+                            ? <MessageSquare size={12} />
+                            : <ChannelBrandIcon channel={channel ?? ''} size={12} />
                         }
                       </span>
                       <div className="flex-1 min-w-0 overflow-hidden">
@@ -3620,12 +3699,13 @@ function ChatSidebar({
                 if (historyFilter.trim().length >= SEARCH_MIN_CHARS && historySearchResults) {
                   return groupHistoryByFolder(sortedHistory, folders).map(({ key: gid, folder, rows }) => {
                     const collapsed = collapsedHistoryGroups.has(gid)
+                    const groupName = folder ? folder.name : i18nT('pages.chatSidebar.unfiled')
                     return (
                       <Fragment key={gid}>
-                        <button type="button" aria-expanded={!collapsed} aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${folder ? folder.name : 'Unfiled'} results`} className="w-full flex items-center gap-1.5 px-2 pt-3 pb-1 text-[11px] font-semibold text-muted select-none bg-transparent border-none cursor-pointer hover:text-text first:pt-1" onClick={() => setCollapsedHistoryGroups(prev => { const next = new Set(prev); if (next.has(gid)) next.delete(gid); else next.add(gid); return next })}>
+                        <button type="button" aria-expanded={!collapsed} aria-label={collapsed ? i18nT('pages.chatSidebar.expand_group_results', { group: groupName }) : i18nT('pages.chatSidebar.collapse_group_results', { group: groupName })} className="w-full flex items-center gap-1.5 px-2 pt-3 pb-1 text-[11px] font-semibold text-muted select-none bg-transparent border-none cursor-pointer hover:text-text first:pt-1" onClick={() => setCollapsedHistoryGroups(prev => { const next = new Set(prev); if (next.has(gid)) next.delete(gid); else next.add(gid); return next })}>
                           {collapsed ? <ChevronRight size={12} className="shrink-0" /> : <ChevronDown size={12} className="shrink-0" />}
                           {folder ? <FolderGlyph icon={folder.icon} size={12} open={!collapsed} /> : <Folder size={12} className="text-muted shrink-0" />}
-                          <span className="truncate">{folder ? folder.name : 'Unfiled'}</span>
+                          <span className="truncate">{folder ? folder.name : i18nT('pages.chatSidebar.unfiled')}</span>
                           <span className="ml-0.5 text-muted font-normal tabular-nums">· {rows.length}</span>
                         </button>
                         {!collapsed && rows.map((s, i) => (

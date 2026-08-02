@@ -13,6 +13,7 @@ import { refreshOnce, __resetRefreshOnceForTests } from './refreshOnce'
 import { installApiTransport } from './apiTransport'
 import { queryClient } from './queryClient'
 import { getStoredConsent } from '../utils/themeConsent'
+import { i18nT } from '../i18n/t'
 
 /**
  * Resolve the theme-consent token to transmit for an installed pack's chat.
@@ -504,13 +505,13 @@ function showSessionExpiredBanner(): void {
     'position:fixed;top:0;left:0;right:0;z-index:99999;background:#b91c1c;color:#fff;' +
     'padding:12px 20px;text-align:center;font:14px/1.5 system-ui;'
   const b = document.createElement('b')
-  b.textContent = 'Session expired.'
+  b.textContent = i18nT('api.client.session_expired')
   const code = document.createElement('code')
   code.textContent = 'kirocrew token'
   code.style.cssText = 'background:#7f1d1d;padding:2px 6px;border-radius:4px'
   const input = document.createElement('input')
   input.type = 'text'
-  input.placeholder = 'Paste token URL or raw token…'
+  input.placeholder = i18nT('api.client.paste_token_url_or_raw_token')
   input.style.cssText =
     'margin-left:12px;padding:4px 8px;border-radius:4px;border:1px solid #fca5a5;' +
     'background:#7f1d1d;color:#fff;font-size:13px;width:280px;cursor:text;caret-color:#fff;' +
@@ -607,8 +608,7 @@ export class ApiError extends Error {
  */
 export const friendlyErrText = (status: number, body: string): string => {
   if (status === 429) {
-    return 'Rate limited by the tunnel edge (HTTP 429) — too many requests in a burst. '
-      + 'The dashboard retries automatically; if this persists, wait a few seconds and reload.'
+    return i18nT('api.client.rate_limited_by_the_tunnel_edge_http_429_too_man')
   }
   // Backends return errors as {"error": "…"} (or detail/message). Unwrap the
   // field so the UI shows the human message with its real newlines, not the
@@ -807,6 +807,7 @@ export const api = {
   tunnelStatus: () => fetch('/api/tunnel/status').then(j) as Promise<TunnelStatus>,
   system: () => fetch('/api/system').then(j),
   telemetryStartup: () => fetch('/api/telemetry/startup').then(j),
+  beaconStatus: () => fetch('/api/telemetry/beacon').then(j),
   // Background polls read the gateway's latched state (no kiro-cli subprocess).
   // `refresh` is the explicit user action (Refresh / Check again) that forces a
   // real host probe.
@@ -1144,7 +1145,7 @@ export const api = {
     if (before !== undefined) p.set('before', String(before))
     return fetch('/api/chat/slots/' + encodeURIComponent(slot) + '?' + p).then(j)
   },
-  createChatSlot: (name?: string, agent?: string, model?: string, mode?: string, memory_mode?: string, title?: string, clean_mode?: boolean, artifact?: string) => post('/api/chat/slots', { ...(name ? { name } : {}), ...(agent ? { agent } : {}), ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(memory_mode ? { memory_mode } : {}), ...(title ? { title } : {}), ...(clean_mode !== undefined ? { clean_mode } : {}), ...(artifact ? { artifact } : {}) }).then(j),
+  createChatSlot: (name?: string, agent?: string, model?: string, mode?: string, memory_mode?: string, title?: string, clean_mode?: boolean, artifact?: string, folder_id?: string) => post('/api/chat/slots', { ...(name ? { name } : {}), ...(agent ? { agent } : {}), ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(memory_mode ? { memory_mode } : {}), ...(title ? { title } : {}), ...(clean_mode !== undefined ? { clean_mode } : {}), ...(artifact ? { artifact } : {}), ...(folder_id ? { folder_id } : {}) }).then(j),
   /** Inject silent background context into a slot — consumed on the next user
    * message. Used by the artifact companion chat to name the bound artifact so
    * the user's first message needs no slug boilerplate. */
@@ -1173,6 +1174,11 @@ export const api = {
   rewind: (slot: string, ts: string, content: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/rewind', { ts, content }).then(j),
   slackLink: (slot: string, channel?: string, threadTs?: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/slack-link', (channel || threadTs) ? { ...(channel ? { channel } : {}), ...(threadTs ? { thread_ts: threadTs } : {}) } : undefined).then(j),
   unlinkSlack: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/slack-unlink').then(j),
+  channelTargets: () => fetch('/api/chat/channel-targets').then(j),
+  linkMirror: (slot: string, channelType: string, targetId: string) => post(
+    '/api/chat/slots/' + encodeURIComponent(slot) + '/mirror-link',
+    { channel_type: channelType, target_id: targetId },
+  ).then(j),
   remindMirror: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/mirror-link').then(j),
   unlinkMirror: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/mirror-unlink').then(j),
   slackChannels: () => fetch('/api/slack/channels').then(j),
@@ -1335,7 +1341,7 @@ export const api = {
     let body: { paths?: unknown; error?: string }
     try { body = await res.json() } catch { body = {} }
     if (!res.ok) return { paths: [] as string[], error: body.error || res.statusText, resized, resizedByPath: {} as Record<string, ResizeInfo> }
-    if (!Array.isArray(body.paths)) return { paths: [] as string[], error: 'Unexpected server response', resized, resizedByPath: {} as Record<string, ResizeInfo> }
+    if (!Array.isArray(body.paths)) return { paths: [] as string[], error: i18nT('api.client.unexpected_server_response'), resized, resizedByPath: {} as Record<string, ResizeInfo> }
     // The server appends one path per multipart 'file' part in order, so
     // paths[i] is prepared[i]'s stored location — zip them to key resize
     // details by the exact server path the attachment chip renders from.
@@ -1396,9 +1402,9 @@ export const api = {
   enableApp: (name: string) => post('/api/apps/' + encodeURIComponent(name) + '/enable').then(j),
   disableApp: (name: string) => post('/api/apps/' + encodeURIComponent(name) + '/disable').then(j),
   openApp: (name: string) => post('/api/apps/' + encodeURIComponent(name) + '/open').then(j),
-  uninstallApp: (name: string, keepData?: boolean, keepDependencies?: boolean, keepSpecific?: string[]) =>
+  uninstallApp: (name: string, keepData = true, keepDependencies?: boolean, keepSpecific?: string[]) =>
     post('/api/apps/' + encodeURIComponent(name) + '/uninstall', {
-      ...(keepData ? { keep_data: true } : {}),
+      ...(keepData === false ? { purge_data: true } : {}),
       ...(keepDependencies ? { keep_dependencies: true } : {}),
       ...(keepSpecific?.length ? { keep_specific: keepSpecific } : {}),
     }).then(j),
@@ -1470,7 +1476,7 @@ export const api = {
           }
         }
       }
-      return { ok: false, error: 'Stream ended without completion' }
+      return { ok: false, error: i18nT('api.client.stream_ended_without_completion') }
     } finally {
       reader.releaseLock()
     }

@@ -17,7 +17,13 @@ from aiohttp.client_exceptions import ClientConnectionResetError
 
 from kiro_crew import __version__ as _local_version
 from kiro_crew import shutdown_event
-from kiro_crew.config.loader import KiroCrewConfig, config_path
+from kiro_crew.config.loader import (
+    ConfigReadError,
+    KiroCrewConfig,
+    config_path,
+    read_config_for_update,
+    write_config_atomically,
+)
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.platform.update_governance import (
     min_version,
@@ -222,15 +228,19 @@ async def api_update_auto(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
     enabled = body.get("enabled", True)
-    # Read, modify, write config
+    # Read, modify, write config. The read fails CLOSED: treating an unreadable
+    # config as {} would write back a single-key file and wipe every other
+    # setting the user has (see read_config_for_update).
     path = config_path()
     try:
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except Exception:
-        data = {}
+        data = read_config_for_update(path)
+    except ConfigReadError:
+        logger.exception("Refusing to toggle auto-update: config is unreadable")
+        return web.json_response(
+            {"error": "failed to read config file", "code": "config_unreadable"}, status=500
+        )
     data["auto_update"] = enabled
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    write_config_atomically(path, data)
     return web.json_response({"ok": True, "auto_update": enabled})
 
 
@@ -256,16 +266,39 @@ def _changelog_path() -> Path | None:
     return None
 
 
+#: Cached CHANGELOG.md body, keyed on ``(path, st_mtime_ns, st_size)``.
+#: ``GET /api/changelog`` read and decoded the whole file on the event loop on
+#: every request (the About panel re-fetches on each open, and the file grows
+#: with every release). The stat signature keeps a dev-install edit visible
+#: immediately, so the endpoint stays as live as it was.
+_changelog_cache: tuple[tuple[str, int, int], str] | None = None
+
+
+def _read_changelog() -> str:
+    """Return CHANGELOG.md's contents, re-reading only when the file changes."""
+    global _changelog_cache
+    path = _changelog_path()
+    if path is None:
+        return ""
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return ""
+    cached = _changelog_cache
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    try:
+        content = path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+    _changelog_cache = (key, content)
+    return content
+
+
 async def api_changelog(request: web.Request) -> web.Response:
     """GET /api/changelog — read full CHANGELOG.md from project or bundle."""
-    path = _changelog_path()
-    content = ""
-    if path is not None:
-        try:
-            content = path.read_text(encoding="utf-8")
-        except Exception:
-            content = ""
-    return web.json_response({"content": content})
+    return web.json_response({"content": _read_changelog()})
 
 
 async def _build_frontend(proj: str, state: DashboardState) -> None:

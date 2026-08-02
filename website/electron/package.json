@@ -19,6 +19,10 @@
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8"
   },
+  "overrides": {
+    "fast-uri": "3.1.4",
+    "js-yaml": "4.3.0"
+  },
   "build": {
     "appId": "com.amazon.kiro.crew",
     "productName": "KiroCrew",
@@ -74,6 +78,7 @@
       "remote-token.js",
       "token-retry.js",
       "display-media.js",
+      "permission-handler.js",
       "external-scheme.js",
       "validation.js",
       "context-menu.js",

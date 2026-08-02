@@ -4,6 +4,7 @@ import { Hourglass, ChevronUp, X, Zap, Pencil, Check, Bot, Loader2 } from 'lucid
 import type { ChatMessage } from '../types'
 
 import { i18nT } from '../i18n/t'
+import { parseRecoveryMessage } from '../pages/chat/RecoveryCard'
 /** System-injected sub-agent completion deliveries waiting for the busy slot.
  *  These are NOT user messages: they must not be editable/cancellable (either
  *  would silently lose a finished agent's result) and rendering each as a
@@ -12,6 +13,49 @@ import { i18nT } from '../i18n/t'
 export function isSystemDelivery(m: ChatMessage): boolean {
   const c = m.content || ''
   return c.startsWith('[Subagent completion event]') || c.startsWith('[Subagent batch completion event]')
+}
+
+/** A queued entry that must NOT render as an interactive (edit/cancel) user
+ *  card. Two families qualify, both machine orchestration rather than user
+ *  speech:
+ *    - sub-agent completion deliveries (isSystemDelivery), and
+ *    - synthetic turn-recovery continuations (tool refusal / stalled turn /
+ *      stalled tool / interrupted / empty response), which the gateway
+ *      re-queues automatically and which surface as a compact RecoveryCard in
+ *      the transcript once dequeued.
+ *  Editing or cancelling either would corrupt an automatic effect, so they are
+ *  filtered out of the QueueStack (sub-agent deliveries are still counted for
+ *  the progress line via isSystemDelivery). */
+export function isNonInteractiveQueued(m: ChatMessage): boolean {
+  return isSystemDelivery(m) || parseRecoveryMessage(m.content || '') !== null
+}
+
+/** Split a slot's message list into the three things a pane surface needs:
+ *  the transcript (everything not queued), the INTERACTIVE queue cards, and a
+ *  count of held sub-agent deliveries for the collapsed progress line.
+ *
+ *  One pass, and one place. Callers own the composer's `input` state, so they
+ *  re-render on every keystroke; deriving these in a render body handed the
+ *  transcript array a fresh identity per character, which defeated the memo()
+ *  on ChatMessageList and re-ran its O(N) turn grouping while the user typed.
+ *  Callers must wrap this in a `useMemo` keyed on the input array. */
+export function splitPaneMessages(allMessages: ChatMessage[]): {
+  messages: ChatMessage[]
+  queuedMessages: ChatMessage[]
+  systemDeliveryCount: number
+} {
+  const messages: ChatMessage[] = []
+  const queuedMessages: ChatMessage[] = []
+  let systemDeliveryCount = 0
+  for (const m of allMessages) {
+    if (m.role !== 'queued') { messages.push(m); continue }
+    // Both queue predicates are independent, not mutually exclusive: a
+    // sub-agent delivery is excluded from the interactive stack AND counted
+    // for the progress line.
+    if (!isNonInteractiveQueued(m)) queuedMessages.push(m)
+    if (isSystemDelivery(m)) systemDeliveryCount++
+  }
+  return { messages, queuedMessages, systemDeliveryCount }
 }
 
 /** One quiet, non-interactive line summarizing held sub-agent deliveries —

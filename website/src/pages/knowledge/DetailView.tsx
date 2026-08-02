@@ -31,7 +31,7 @@ function RelatedItems({ itemId, entities }: { itemId: string; entities: Entity[]
 
   return (
     <Card className="!mb-3">
-      <div className="text-[13px] font-semibold text-text-strong mb-2">{i18nT('pages.knowledge.detailView.related_items')}{related.length})</div>
+      <div className="text-[13px] font-semibold text-text-strong mb-2">{i18nT('pages.knowledge.detailView.related_items_count', { count: related.length })}</div>
       <div className="space-y-1">
         {related.map(r => (
           <div key={r.id} className="text-[12px] text-text flex items-center gap-2">
@@ -183,7 +183,7 @@ export default function DetailView({ itemId, onBack, onEntityClick }: { itemId: 
 
       {!!item.entities?.length && (
         <Card className="!mb-3">
-          <div className="text-[13px] font-semibold text-text-strong mb-2">{i18nT('pages.knowledge.detailView.entities')}{item.entities.length})</div>
+          <div className="text-[13px] font-semibold text-text-strong mb-2">{i18nT('pages.knowledge.detailView.entities_count', { count: item.entities.length })}</div>
           <div className="flex flex-wrap gap-1.5">
             {item.entities.map(e => (
               <Clickable key={e.id} onClick={() => onEntityClick?.(e.name)}
@@ -197,7 +197,7 @@ export default function DetailView({ itemId, onBack, onEntityClick }: { itemId: 
 
       {!!item.relations?.length && (
         <Card className="!mb-3">
-          <div className="text-[13px] font-semibold text-text-strong mb-2">{i18nT('pages.knowledge.detailView.relations')}{item.relations.length})</div>
+          <div className="text-[13px] font-semibold text-text-strong mb-2">{i18nT('pages.knowledge.detailView.relations_count', { count: item.relations.length })}</div>
           <div className="space-y-1">
             {item.relations.map(r => (
               <div key={r.id} className="text-[12px] text-muted flex items-center gap-1">
@@ -240,12 +240,12 @@ export default function DetailView({ itemId, onBack, onEntityClick }: { itemId: 
 
       {item._score !== undefined && (
         <div className="text-[11px] text-muted mb-3">
-          {i18nT('pages.knowledge.detailView.match')} {item._match_type} {i18nT('pages.knowledge.detailView.score')} {item._score.toFixed(3)})
+          {i18nT('pages.knowledge.detailView.match_score', { type: item._match_type, score: item._score.toFixed(3) })}
         </div>
       )}
 
       <div className="flex gap-2 flex-wrap">
-        <Btn onClick={copyContent}><Copy size={12} /> {copied ? 'Copied!' : 'Copy Content'}</Btn>
+        <Btn onClick={copyContent}><Copy size={12} /> {copied ? i18nT('pages.knowledge.detailView.copied') : i18nT('pages.knowledge.detailView.copy_content')}</Btn>
         <Btn onClick={() => { const a = document.createElement('a'); a.href = `/api/knowledge/items/${item.id}/export`; a.download = `${item.title}.knowledge`; a.click() }}><Download size={12} /> {i18nT('pages.knowledge.detailView.export')}</Btn>
         {item.status === 'archived'
           ? <Btn disabled={archiveMutation.isPending} onClick={() => archiveMutation.mutate({ id: item.id, status: 'active' })}><RefreshCw size={12} /> {i18nT('pages.knowledge.detailView.unarchive')}</Btn>
@@ -254,7 +254,7 @@ export default function DetailView({ itemId, onBack, onEntityClick }: { itemId: 
       </div>
       {(archiveMutation.isError || deleteMutation.isError) && (
         <div className="mt-2 text-[12px] text-danger flex items-center gap-1">
-          <AlertCircle size={12} /> {(archiveMutation.error || deleteMutation.error)?.message || 'Action failed'}
+          <AlertCircle size={12} /> {(archiveMutation.error || deleteMutation.error)?.message || i18nT('pages.knowledge.detailView.action_failed')}
         </div>
       )}
     </div>

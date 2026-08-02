@@ -286,7 +286,7 @@ export default function MemoryGraphTab() {
 
   return (<>
     <Card>
-      <CardTitle><NetworkIcon className="lucide-inline" /> {i18nT('pages.overview.memoryGraphTab.memory_graph')} <InfoTip text="GPU-rendered visualization of all KiroCrew memory. Nodes are color-coded by type. Zoom in to reveal labels, click a node to inspect, use filters to focus." />
+      <CardTitle><NetworkIcon className="lucide-inline" /> {i18nT('pages.overview.memoryGraphTab.memory_graph')} <InfoTip text={i18nT('pages.overview.memoryGraphTab.gpu_rendered_visualization_of_all_kirocrew_memor')} />
         <Btn onClick={() => load()} className="ml-2"><RefreshCw className="lucide-inline" /> {i18nT('pages.overview.memoryGraphTab.refresh')}</Btn>
       </CardTitle>
       <div className="flex gap-2 flex-wrap mb-3 items-center">
@@ -295,7 +295,7 @@ export default function MemoryGraphTab() {
           className="bg-bg-elevated border border-border rounded-md px-3 py-1.5 text-text text-sm font-body outline-none transition-colors focus-ring flex-1 min-w-[200px]"
           placeholder={i18nT('pages.overview.memoryGraphTab.search_nodes')} value={searchImmediate} onChange={e => setSearchImmediate(e.target.value)}
         />
-        <Btn onClick={() => setFilter(null)} className={!filter ? '!border-accent !text-accent' : ''}>{i18nT('pages.overview.memoryGraphTab.all')}{nodes.length})</Btn>
+        <Btn onClick={() => setFilter(null)} className={!filter ? '!border-accent !text-accent' : ''}>{i18nT('pages.overview.memoryGraphTab.all_count', { count: nodes.length })}</Btn>
         {Object.entries(GROUP_LABELS).map(([key, label]) => counts[key] ? (
           <Btn key={key} onClick={() => setFilter(filter === key ? null : key)} className={filter === key ? '!border-accent !text-accent' : ''}>{label} ({counts[key]})</Btn>
         ) : null)}

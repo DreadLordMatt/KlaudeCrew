@@ -10,7 +10,6 @@
     "checking_usage_running": "Checking usage — running",
     "click_to_hide": "Click to hide",
     "close": "Close",
-    "contact_us": "Contact Us",
     "cpu": "CPU",
     "credits": "credits",
     "credits_total": "credits total",
@@ -21,16 +20,12 @@
     "est_overage_cost": "Est. overage cost",
     "explore": "Explore",
     "explore_apps": "Explore Apps",
-    "github_repository": "GitHub repository",
     "k_search_for_anything": "⌘K — Search for anything…",
     "kiro_cli_usage": "kiro-cli /usage",
     "kiro_credit_usage_checking": "Kiro credit usage — checking…",
     "kiro_credit_usage_checking_2": "Kiro credit usage — checking",
     "kiro_credits": "Kiro Credits",
     "kiro_discord_community": "Kiro Discord community",
-    "kiro_website": "Kiro website",
-    "kiro_website_kiro_dev": "Kiro website (kiro.dev)",
-    "kirocrew_github_repository": "KiroCrew GitHub repository",
     "main_navigation": "Main navigation",
     "manage_account": "Manage account",
     "mem": "MEM",
@@ -111,7 +106,6 @@
         "back": "← Back",
         "cancel": "Cancel",
         "challenge_findings": "Challenge Findings →",
-        "challenge_the_findings_from": "Challenge the findings from \"",
         "continue": "Continue",
         "continue_research": "Continue Research",
         "copy_this_section_s_markdown_to_paste_into_chat": "Copy this section's markdown to paste into chat or autopilot",
@@ -127,7 +121,6 @@
         "e_g_ai_code_review_finds_no_blocking_issues_and": "e.g. AI code review finds no blocking issues and the test build passes",
         "failed_to_export_as_artifact": "Failed to export as artifact",
         "findings": "findings",
-        "findings_2": "Findings (",
         "findings_so_far_are_preserved_below": "Findings so far are preserved below.",
         "first_cycle_in_progress": "First cycle in progress...",
         "focus_on": "Focus on...",
@@ -166,7 +159,6 @@
         "pre_flight_check": "Pre-flight Check:",
         "regenerate_the_report_updates_the_same_artifact": "Regenerate the report — updates the same artifact as a new version",
         "remove_sub_question": "Remove sub-question",
-        "research": "Research “",
         "research_lab": "Research Lab",
         "research_lab_investigates_and_reports_it_never_t": "Research Lab investigates and reports — it never takes actions on your systems (no writes, deployments, or code changes). Any next step that requires acting is handed off to the main agent for you to review and drive.",
         "research_only": "Research-only.",
@@ -186,11 +178,9 @@
         "strong": "Strong",
         "sub_questions": "Sub-questions",
         "sub_questions_2": "sub-questions",
-        "sub_questions_guidance": "Sub-questions & guidance (",
         "suggested_from": "suggested from",
         "the_ai_drives_every_round_itself_deciding_what_t": "The AI drives every round itself — deciding what to investigate, managing sub-agents, and following new leads from findings as they emerge.",
         "the_ai_writes_an_orchestration_script_up_front_a": "The AI writes an orchestration script up front; a deterministic runner manages sub-agent execution while the AI only plans, investigates, and synthesizes. Replayable, budget-capped.",
-        "then_fork_into_a_new_campaign": "…\", then fork into a new campaign.",
         "up_to": "Up to",
         "validating": "Validating...",
         "view_report": "View report",
@@ -218,7 +208,6 @@
         "each_pr_is_reviewed_in_its_own_clean_pooled_work": "Each PR is reviewed in its own clean pooled worker; comments are posted as drafts only.",
         "effort": "· effort:",
         "effort_2": "Effort",
-        "force_review_all": "Force review all (",
         "gh": "gh",
         "gh_auth_login_hostname_github_com": "gh auth login --hostname github.com",
         "github_pr_one_time_setup": "GitHub PR — one-time setup.",
@@ -267,6 +256,76 @@
         "unavailable_could_not_be_fetched": "“unavailable — could not be fetched”",
         "updated": "updated",
         "usually_means": "usually means"
+      }
+    },
+    "designCritique": {
+      "askLayer": {
+        "ask": "Ask",
+        "ask_about_this": "Ask about this",
+        "close": "Close",
+        "remove_this_annotation": "Remove this annotation",
+        "thinking": "Thinking…"
+      },
+      "composer": {
+        "add_screens": "Add screens",
+        "clear_all": "Clear all",
+        "drop_screenshots_or_click_to_browse": "Drop screenshots — or click to browse",
+        "fix_the_link": "Fix the link",
+        "move_earlier": "Move earlier",
+        "move_later": "Move later",
+        "one_screen_or_several_in_order_for_a_flow_png_jp": "one screen, or several in order for a flow · PNG, JPG, WebP",
+        "remove": "Remove",
+        "send_screenshots": "Send screenshots",
+        "try_again": "Try again",
+        "use_a_local_folder_instead": "Use a local folder instead"
+      },
+      "designCritiquePage": {
+        "a_critique_is_still_running_click_to_watch_it": "A critique is still running — click to watch it",
+        "across_the_flow": "Across the flow",
+        "close_esc": "Close (Esc)",
+        "couldn_t_see": "Couldn’t see",
+        "critique_ready": "critique ready",
+        "design_critique": "Design Critique",
+        "enlarge": "Enlarge",
+        "full_size": "full size",
+        "full_size_view": "Full size view",
+        "new": "New",
+        "no_screens_to_show_the_critic_couldn_t_get_pixel": "No screens to show — the critic couldn’t get pixels for this one. See \"Couldn’t see\" in the panel.",
+        "nothing_major": "nothing major",
+        "on_screen": "● on screen",
+        "point_me_at_a_running_url": "Point me at a running URL",
+        "point_me_at_a_screen_or_a_whole_flow_and_i_ll_re": "Point me at a screen — or a whole flow — and I’ll read it the way a designer friend would: what’s working, what to tighten, and why.",
+        "running": "running",
+        "see_an_example": "See an example",
+        "send_screenshots": "Send screenshots",
+        "show_this_screen": "Show this screen",
+        "start_a_new_critique_anything_already_running_ke": "Start a new critique — anything already running keeps going",
+        "switch_critique": "Switch critique",
+        "what_i_d_tighten": "What I'd tighten",
+        "what_s_working": "What’s working",
+        "what_you_ll_get": "What you’ll get",
+        "your_critiques": "Your critiques",
+        "your_question_click_to_see_the_answer": "Your question — click to see the answer"
+      },
+      "findingRow": {
+        "based_on": "Based on",
+        "what_i_saw": "What I saw",
+        "where": "Where"
+      },
+      "scopingPicker": {
+        "drag_to_reorder": "Drag to reorder",
+        "move_earlier": "Move earlier",
+        "move_later": "Move later",
+        "optional_brief_who_is_it_for_and_what_is_the_mai": "Optional brief: who is it for, and what is the main task?",
+        "optional_who_is_it_for_and_what_s_the_main_task": "Optional: who is it for, and what’s the main task?",
+        "screens": "Screens",
+        "start_over": "Start over",
+        "suggested_flows": "Suggested flows",
+        "what_should_i_audit": "What should I audit?"
+      },
+      "waitingScreen": {
+        "cancel_this_run": "Cancel this run",
+        "stop_this_run_and_discard_it": "Stop this run and discard it"
       }
     },
     "fileExplorer": {
@@ -411,7 +470,6 @@
           "close_label_search": "Close label search",
           "labels": "Labels",
           "loading_labels": "Loading labels…",
-          "no_labels_match": "No labels match “",
           "no_labels_on_this_repo": "No labels on this repo.",
           "search_labels": "Search labels",
           "search_labels_2": "Search labels…"
@@ -647,10 +705,8 @@
             "s_labels_mean_needs_triage_or_good_first_issue": "'s labels mean\n          “needs triage” or “good first issue”.",
             "saved": "Saved",
             "saving": "Saving…",
-            "sign_in_no_extra_credentials_no": "sign-in (no\n          extra credentials, no",
             "this_is_an_approximate_list_inferred_from_issue": ", this is an approximate list inferred from issue\n              authors. The full roster and member management live on",
             "triage_labels": "Triage labels",
-            "webhook": "webhook).",
             "without_push_access_to": "Without push access to",
             "your_edits_are_kept_here_but_won_t_persist_if_yo": "your edits are kept here but won't persist. If you just updated Issue Radar, restart the backend so the settings API is available."
           }
@@ -1114,7 +1170,6 @@
     },
     "discoverySearchBar": {
       "clear_search": "Clear search",
-      "found_for": "found for “",
       "no": "No",
       "result_one": "{{count}} result",
       "result_other": "{{count}} results",
@@ -1169,7 +1224,6 @@
       "type_2_chars_to_search_files": "Type 2+ chars to search files…"
     },
     "fileRenderers": {
-      "chars": "chars",
       "empty_file": "Empty file",
       "html_preview": "HTML Preview",
       "invalid_json": "Invalid JSON:",
@@ -1179,11 +1233,8 @@
       "null": "null",
       "open_in_new_tab": "Open in new tab",
       "pdf_preview": "PDF Preview",
-      "remaining": "remaining)",
       "rows": "rows",
-      "scroll_for_more": "Scroll for more… (",
-      "showing_500_of": "Showing 500 of",
-      "showing_raw_content": "Showing raw content ("
+      "showing_500_of": "Showing 500 of"
     },
     "followUpBar": {
       "scroll_left": "Scroll left",
@@ -1371,9 +1422,7 @@
       "table_of_contents": "Table of contents"
     },
     "mcpBrowserModal": {
-      "a_server_named": "A server named “",
       "add_server": "Add Server",
-      "already_exists_with_a_different_configuration_ma": "” already exists with a different configuration.\n          Manage it from the installed servers table.",
       "and_enable_it_there_to_start_using_it": "and enable it there to start using it.",
       "back_to_results": "Back to results",
       "deprecated": "deprecated",
@@ -1419,8 +1468,6 @@
       "message_failed_to_render": "Message failed to render"
     },
     "migrationBanner": {
-      "from_apps_before_the_next_kirocrew_update_to_kee": "\" from Apps before the next KiroCrew update to keep using it.",
-      "install": "Install \"",
       "install_from_apps": "Install from Apps",
       "this_feature_is_moving_to_a_standalone_app": "This feature is moving to a standalone app"
     },
@@ -1476,7 +1523,6 @@
         "keep_receiving_these": ". Keep receiving these?",
         "mark_all_as_read": "Mark all as read",
         "mute_channel": "Mute channel",
-        "muted": "Muted (",
         "muted_2": "muted",
         "no_notifications": "No notifications",
         "reject": "Reject",
@@ -1502,9 +1548,6 @@
       "skip": "Skip",
       "tell_kiro_about_you": "Tell Kiro about you",
       "your_role": "Your role"
-    },
-    "pastedChip": {
-      "paste": "[ Paste #"
     },
     "pixelCanvas": {
       "agent_activity_animation": "Agent activity animation"
@@ -1538,8 +1581,6 @@
       "confirm_publish": "Confirm & Publish",
       "credential_security_findings_cannot_be_overridde": "Credential/security findings cannot be overridden. Remove the detected secrets from\n                your artifact before publishing.",
       "done": "Done",
-      "finding_one": "{{count}} finding",
-      "finding_other": "{{count}} findings",
       "kb": "KB",
       "no_publish_providers_available_for_this_artifact": "No publish providers available for this artifact kind.",
       "publish": "Publish",
@@ -1547,7 +1588,6 @@
       "publishing": "Publishing",
       "publishing_is_blocked_until_scan_findings_are_re": "Publishing is blocked until scan findings are resolved. Override only if you have verified\n                the findings are acceptable.",
       "scan": "Scan:",
-      "scan_blocked": "Scan blocked (",
       "setup_required": "Setup required",
       "size": "Size:",
       "ttl_time_to_live": "TTL (time to live)",
@@ -1557,9 +1597,7 @@
       "add_to_chat": "Add to chat",
       "auto_merge_enabled": "Auto-merge enabled",
       "cancel": "Cancel",
-      "changed": "Changed",
       "could_not_resolve": "Could not resolve",
-      "for_the_complete_set": "for the complete set.",
       "kiro_crew_uses_your_local_provider_cli_to_load_p": "Kiro Crew uses your local provider CLI to load pull requests. Run this command in your terminal, then retry.",
       "loading_diff": "Loading diff…",
       "loading_source_provider": "Loading source provider…",
@@ -1571,8 +1609,6 @@
       "no_written_comment": "No written comment.",
       "open": "Open",
       "open_pull_request": "Open pull request",
-      "open_the": ". Open the",
-      "provider_results_may_be_partial_for": "Provider results may be partial for",
       "pull_request_sections": "Pull request sections",
       "pull_requests": "Pull requests",
       "ready_for_review": "Ready for review",
@@ -1580,7 +1616,6 @@
       "resolved": "Resolved",
       "retry": "Retry",
       "the_provider_did_not_return_a_patch_for_this_fil": "The provider did not return a patch for this file.",
-      "this_authorizes_the_merge": "This authorizes the merge",
       "updated": "Updated"
     },
     "questionCard": {
@@ -1734,12 +1769,10 @@
     "skillBrowserModal": {
       "add_skill": "Add Skill",
       "back_to_results": "Back to results",
-      "bundle_contents": "Bundle contents (",
       "by": "by",
       "exists": "Exists",
       "file_one": "{{count}} file",
       "file_other": "{{count}} files",
-      "files": "files)",
       "install": "Install",
       "installed": "Installed",
       "installing": "Installing...",
@@ -1833,9 +1866,7 @@
     },
     "themeExperienceLayer": {
       "adopt_a_themed_persona_in_the_assistant_security": "• Adopt a themed persona in the assistant (security and accuracy always take priority; you can ask it to drop the persona at any time).",
-      "enable": "Enable “",
       "enable_experience": "Enable experience",
-      "experience": "” experience?",
       "keep_colors_only": "Keep colors only",
       "persona_text": "Persona text",
       "persona_that_will_be_added_to_the_assistant_s_sy": "Persona that will be added to the assistant’s system prompt:",
@@ -1876,6 +1907,10 @@
       "the_app_will_stop_the_local_gateway_install_the": "The app will stop the local gateway, install the update, and relaunch.",
       "update_ready": "Update ready"
     },
+    "voiceDictationPanel": {
+      "esc_to_stop_enter_to_send": "Esc to stop, Enter to send",
+      "listening": "Listening"
+    },
     "voiceDisabledModal": {
       "enable_it_under": "Enable it under",
       "not_now": "Not now",
@@ -1883,7 +1918,10 @@
       "settings_voice": "Settings → Voice",
       "speech_to_text_is_not_enabled_yet_so_the_microph": "Speech-to-text is not enabled yet, so the microphone cannot turn your voice into text.",
       "then_click_the_mic_to_dictate_into_the_message_b": ", then click the mic to dictate into the message box.",
-      "turn_on_voice_input": "Turn on voice input"
+      "turn_on_voice_input": "Turn on voice input",
+      "voice_provider_not_installed": "Voice provider not installed",
+      "provider_is_not_installed_on_this_machine": "Speech-to-text is on, but the \"{{provider}}\" provider isn't installed on this machine, so recordings can't be transcribed.",
+      "pick_an_installed_provider_under_settings_voice": "Pick an installed provider under Settings → Voice, or install the current one."
     },
     "voiceStatusBar": {
       "dismiss_microphone_error": "Dismiss microphone error",
@@ -2112,7 +2150,6 @@
       "install": "Install",
       "install_on_your_mac": "Install on your Mac",
       "installed": "Installed:",
-      "installed_v": "Installed (v",
       "installing": "Installing…",
       "keep_app_data": "Keep app data",
       "lifecycle": "| Lifecycle:",
@@ -2170,7 +2207,6 @@
       "discover_install_and_manage_agentic_apps": "Discover, install, and manage agentic apps",
       "dismiss_error": "Dismiss error",
       "dismiss_message": "Dismiss message",
-      "installed_from_apps_kirocrew_metadata": "Installed from Apps — KiroCrew metadata",
       "keep_app_data": "Keep app data",
       "keep_this_dependency": "Keep this dependency",
       "kept": "Kept —",
@@ -2185,7 +2221,6 @@
       "skill_other": "{{count}} skills",
       "sort": "Sort:",
       "sort_apps": "Sort apps",
-      "the_downloaded_source_code_will_be_removed": "the downloaded source code will be removed.",
       "this_app_has_an_uninstall_script_that_will_run_b": "This app has an uninstall script that will run before removal. It may delete the app binary, agent configs, skills, and other resources it created during installation.",
       "this_is_a_self_managed_app_only_kirocrew_metadat": "This is a self-managed app — only KiroCrew metadata and the app secret will be removed.\n                    The app itself and its agent/skill registrations are managed externally and will not be affected.\n                    If the app is still running, it may re-register on next launch.",
       "this_will_remove_all_resources_provided_by_this": "This will remove all resources provided by this app:",
@@ -2214,7 +2249,6 @@
       "aws_cli_v2": "AWS CLI v2",
       "aws_configure_set": "aws configure set",
       "aws_iam": "aws iam",
-      "aws_profiles": "AWS Profiles (",
       "aws_sourcearn": "AWS:SourceArn",
       "back_to_artifacts": "Back to Artifacts",
       "before_any_upload": ", …) before any upload.",
@@ -2235,7 +2269,6 @@
       "deploy_opens_a_new_chat_session_that_runs_the_ar": "Deploy opens a new chat session that runs the artifact-deploy skill with the chosen profile.",
       "deploy_profile_for_slug": "Deploy profile for {{slug}}",
       "deploy_recall_destroy_each_require_explicit_conf": "Deploy / Recall / Destroy each require explicit confirmation\n              (never auto-approved) and emit a SEL audit event.",
-      "deployments": "Deployments (",
       "destroy": "Destroy",
       "details": "Details",
       "dismiss": "Dismiss",
@@ -2272,7 +2305,6 @@
       "only_the": "Only the",
       "ownership_and_sse_aes256_with": "ownership, and SSE-AES256 — with",
       "path": "PATH",
-      "pending_confirmations": "Pending confirmations (",
       "pins_your_specific_distribution_the_bucket_name": "pins your specific distribution. The bucket name is random/opaque\n              and hidden from the public URL.",
       "policy_tier": "Policy tier",
       "pre_publish_scan_sensitive_path_guard": "Pre-publish scan + sensitive-path guard.",
@@ -2283,7 +2315,6 @@
       "profiles": "Profiles",
       "publish_publish_to_public_web_your_aws": " Publish → Publish to public web (your AWS)",
       "ready_to_deploy": "Ready to Deploy",
-      "ready_to_deploy_2": "Ready to deploy (",
       "recall": "Recall",
       "refresh": "Refresh",
       "region": "Region",
@@ -2484,7 +2515,6 @@
       "new_channel_2": "New Channel",
       "no_channels_yet": "No channels yet",
       "ok": "OK",
-      "repl": "repl",
       "reply": "Reply",
       "role": "Role",
       "role_e_g_logs_agent": "Role (e.g. Logs Agent)",
@@ -2510,7 +2540,6 @@
         "cancel": "Cancel",
         "changed_files": "Changed files",
         "discard_unsaved_changes": "Discard unsaved changes?",
-        "dismiss_done": "Dismiss done (",
         "failed_click_to_retry": "Failed — click to retry",
         "files": "Files",
         "input": "Input",
@@ -2533,8 +2562,6 @@
         "resolving_2": "resolving...",
         "resources": "Resources",
         "retry": "Retry",
-        "retry_failed": "Retry failed (",
-        "show_all": "Show all (",
         "star": "Star",
         "trusted": "Trusted",
         "trusted_base": "Trusted base",
@@ -2554,9 +2581,7 @@
         "regenerate_response": "Regenerate response",
         "speak": "Speak",
         "speak_message": "Speak message",
-        "steered": "Steered",
-        "steps": "steps)",
-        "use_as_plan": "Use as Plan ("
+        "steered": "Steered"
       },
       "chatFooter": {
         "compacting": "Compacting…",
@@ -2635,15 +2660,11 @@
         "dismiss": "Dismiss",
         "dismiss_knowledge_results": "Dismiss knowledge results",
         "inject_context": "Inject Context",
-        "knowledge_results_for": "Knowledge results for “",
-        "no_knowledge_found_for": "No knowledge found for “",
-        "searching_knowledge_for": "Searching knowledge for “",
         "selected": "selected ·",
         "tokens": "tokens"
       },
       "mcpInfoButton": {
         "disabled": "disabled",
-        "mcp_servers": "MCP Servers (",
         "none_loaded": "None loaded",
         "session_mcp_servers": "Session MCP servers"
       },
@@ -2665,18 +2686,18 @@
         "jump_to_this_prompt": "Jump to this prompt"
       },
       "recoveryCard": {
-        "tool_call_blocked": "Tool call blocked",
-        "n_tool_calls_blocked": "{{count}} tool calls blocked",
-        "safety_policy_continuing": "safety policy · continuing automatically",
-        "n_patterns": "{{count}} patterns",
-        "turn_stalled": "Turn stalled",
-        "recovered_continuing": "recovered · continuing",
-        "tool_stopped_responding": "Tool stopped responding",
-        "cancelled_continuing": "cancelled · continuing",
-        "turn_interrupted": "Turn interrupted",
         "backend_error_continuing": "backend error · continuing automatically",
+        "cancelled_continuing": "cancelled · continuing",
+        "empty_output_continuing": "empty output · continuing automatically",
+        "n_patterns": "{{count}} patterns",
+        "n_tool_calls_blocked": "{{count}} tool calls blocked",
         "no_response_returned": "No response returned",
-        "empty_output_continuing": "empty output · continuing automatically"
+        "recovered_continuing": "recovered · continuing",
+        "safety_policy_continuing": "safety policy · continuing automatically",
+        "tool_call_blocked": "Tool call blocked",
+        "tool_stopped_responding": "Tool stopped responding",
+        "turn_interrupted": "Turn interrupted",
+        "turn_stalled": "Turn stalled"
       },
       "sessionColorPicker": {
         "change_your_color_palette_in_display_settings": "Change your color palette in Display settings",
@@ -2719,7 +2740,6 @@
         "more_running_normally": "more running normally…",
         "no_activity": "— no activity",
         "no_activity_possibly_stalled": "No activity — possibly stalled",
-        "retry_failed": "Retry failed (",
         "s": "s",
         "stalled": "stalled",
         "stop": "Stop",
@@ -2786,7 +2806,6 @@
       "focus_popped_out_window": "Focus popped-out window",
       "in_split": "In split",
       "incognito_memory_writes_disabled": "Incognito — memory writes disabled",
-      "knowledge": "knowledge",
       "loading": "Loading…",
       "mcp_servers": "MCP servers",
       "mcp_servers_2": "MCP Servers",
@@ -3015,7 +3034,6 @@
       "waiting_for_the_new_gateway_process_the_page_rel": "Waiting for the new gateway process. The page reloads automatically once it is up.",
       "worktree": "Worktree",
       "worktrees": "Worktrees",
-      "worktrees_2": "Worktrees (",
       "worktrees_created_under_a_previous_repository_na": "Worktrees created under a previous repository name. Hidden by default; still covered by Prune merged."
     },
     "developerPage": {
@@ -3098,24 +3116,18 @@
         "content": "Content",
         "delete": "Delete",
         "edit": "edit",
-        "entities": "Entities (",
         "entities_in_this_chunk": "Entities in this chunk:",
         "export": "Export",
         "item_not_found": "Item not found",
-        "match": "Match:",
         "no_tags": "No tags",
         "permanently_delete_this_item": "Permanently delete this item?",
-        "related_items": "Related Items (",
-        "relations": "Relations (",
         "save": "save",
-        "score": "(score:",
         "shared": "shared",
         "summary": "Summary",
         "tag1_tag2_tag3": "tag1, tag2, tag3",
         "unarchive": "Unarchive"
       },
       "embeddingStatus": {
-        "embedded": "embedded (",
         "embedding_engine_ready_knowledge_items_need_embe": "Embedding engine ready — knowledge items need embedding.",
         "smart_search_active": "Smart Search active",
         "smart_search_unavailable_embedding_model_is_down": "Smart Search unavailable — embedding model is downloading in the background."
@@ -3141,7 +3153,6 @@
         "focus_search": "Focus search",
         "go_to_sources_to_upload_files": "Go to Sources to upload files",
         "help": "Help",
-        "items": "items)",
         "items_2": "items",
         "items_mentioning": "Items mentioning:",
         "keyboard_shortcuts": "Keyboard Shortcuts",
@@ -3174,7 +3185,6 @@
         "recenter": "Recenter"
       },
       "sourceGroup": {
-        "items": "items)",
         "next": "Next →",
         "of": "of",
         "page": "Page",
@@ -3312,7 +3322,6 @@
     "overview": {
       "agentCfgTab": {
         "after_saving_use": "After saving, use",
-        "agent_config": "Agent Config (",
         "agent_config_json": "Agent config JSON",
         "apply_restart_sessions_at_the_top_to_apply_chang": "Apply & Restart Sessions at the top to apply changes.",
         "invalid_json": "Invalid JSON",
@@ -3404,7 +3413,6 @@
         "immediate_all_enforces_on_every_agent_kirocrew_o": "Immediate. 'all' enforces on every agent; 'kirocrew' only on kirocrew.json.",
         "immediate_auto_approves_all_tools_interactive_as": "Immediate. 'auto' approves all tools; 'interactive' asks before each.",
         "immediate_auto_enables_sandbox_for_untrusted_too": "Immediate. 'auto' enables sandbox for untrusted tools.",
-        "inherited": "inherited (",
         "kirocrew_agents": "KiroCrew Agents",
         "max_age_for_pooled_processes_0_disables_expiry_r": "Max age for pooled processes. 0 disables expiry. Restart required.",
         "max_channel_agents": "Max Channel Agents",
@@ -3450,11 +3458,9 @@
         "globals": "Globals",
         "kiro": "Kiro",
         "kirocrew": "KiroCrew",
-        "mcp_servers": "MCP Servers (",
         "name": "Name",
         "no_matching_servers": "No matching servers",
         "no_mcp_servers_configured": "No MCP servers configured",
-        "off": "off)",
         "pending_change_one": "{{count}} pending change",
         "pending_change_other": "{{count}} pending changes",
         "probe_mcp_servers": "Probe MCP servers",
@@ -3465,7 +3471,6 @@
         "uninstall": "Uninstall"
       },
       "memoryGraphTab": {
-        "all": "All (",
         "loading_graph_data": "Loading graph data…",
         "memory_graph": "Memory Graph",
         "no_memory_data_to_visualize_add_preferences_proj": "No memory data to visualize. Add preferences, projects, or lessons first.",
@@ -3481,7 +3486,6 @@
         "consolidation_idle_hours": "Consolidation idle (hours)",
         "daily_history": "Daily History",
         "delete": "Delete",
-        "failed": "failed)",
         "history_retention_days": "History retention (days)",
         "knowledge": "knowledge",
         "lessons": "Lessons",
@@ -3500,7 +3504,6 @@
         "semantic_memory_active_text_files_are_read_only": "Semantic memory active — text files are read-only",
         "session_one": "{{count}} session",
         "session_other": "{{count}} sessions",
-        "sessions": "sessions (",
         "summarize_now": "Summarize now",
         "tool": "tool",
         "when": "When"
@@ -3537,12 +3540,10 @@
         "or": "or",
         "package": "Package",
         "prompts": "Prompts",
-        "prompts_2": "Prompts (",
         "prompts_are_loaded_on_demand_they_don_t_consume": ".\n        Prompts are loaded on-demand — they don't consume context until invoked.",
         "prompts_get_name": "/prompts get name",
         "send_to": "Send to…",
         "use_in_chat": "Use in Chat",
-        "user_prompts": "User Prompts (",
         "with_prompts_or_create_prompts_in_kiro_prompts": "with prompts or create prompts in ~/.kiro/prompts/."
       },
       "skillsTab": {
@@ -3561,18 +3562,15 @@
         "filter_skills": "Filter skills…",
         "loaded_by": "Loaded by",
         "no_skills_installed": "No skills installed",
-        "no_skills_match": "No skills match “",
         "on_demand": "on-demand",
         "package": "Package",
-        "pending_review": "Pending review (",
         "refresh_skills": "Refresh skills",
         "save": "Save",
         "script": "script",
         "scripts": "scripts/",
         "select_a_skill_to_view_its_files": "Select a skill to view its files",
         "skill_md": "SKILL.md",
-        "skills": "Skills",
-        "skills_2": "Skills ("
+        "skills": "Skills"
       },
       "steeringTab": {
         "api_standards_md": "api-standards.md",
@@ -3588,13 +3586,11 @@
         "loading": "Loading…",
         "new_steering_file": "New steering file",
         "new_steering_file_2": "New Steering File",
-        "no_files_match": "No files match “",
         "no_steering_files_yet": "No steering files yet",
         "refresh_steering_files": "Refresh steering files",
         "save": "Save",
         "scope": "Scope",
         "select_a_steering_file_to_view_it": "Select a steering file to view it",
-        "steering": "Steering (",
         "steering_file_content": "Steering file content",
         "steering_file_name": "Steering file name",
         "steering_files": "Steering files",
@@ -3720,10 +3716,8 @@
       "generating_execution_plan": "Generating execution plan",
       "go_to_task": "Go to Task →",
       "idea": "Idea",
-      "is_waiting_for_your_decision": "\" is waiting for your decision",
       "no_idea_or_spec_content_available": "No idea or spec content available.",
       "phased": "Phased",
-      "task": "Task",
       "tasks": "Tasks",
       "the_dag_view_will_appear_once_the_plan_is_ready": "The DAG view will appear once the plan is ready"
     },
@@ -3802,7 +3796,6 @@
       "command_shell": "command · shell",
       "create_your_first_job": "Create your first job",
       "delete": "Delete",
-      "delete_3": "Delete \"",
       "error": "Error",
       "filter_jobs": "Filter jobs…",
       "id": "ID",
@@ -3851,7 +3844,6 @@
       "fuzzy_filter_substring_match": "Fuzzy filter (substring match)",
       "loading": "Loading…",
       "no_archives_archives_are_created_when_session_fi": "No archives. Archives are created when session files are rotated (>2MB) or compacted.",
-      "no_matches_for": "No matches for \"",
       "reload": "Reload",
       "select_an_archive_to_view_its_contents": "Select an archive to view its contents."
     },
@@ -4009,6 +4001,24 @@
         "widget_density": "Widget Density",
         "your_role": "Your Role"
       },
+      "computerUsePanel": {
+        "accessibility": "Accessibility",
+        "advisory_only": "Advisory only",
+        "also_capture_the_target_window_and_pass_its_file": "Also capture the target window and pass its file path. The accessibility tree stays the primary channel; windows containing a password field are never captured.",
+        "attach_screenshots": "Attach screenshots",
+        "computer_use": "Computer Use",
+        "could_not_load_computer_use_settings": "Could not load computer-use settings.",
+        "enable_computer_use": "Enable computer use",
+        "let_the_agent_read_desktop_app_windows_through_a": "Let the agent read desktop app windows through accessibility and act on their controls. Off until you turn it on here — an agent cannot enable it.",
+        "limits": "Limits",
+        "max_tree_nodes": "Max tree nodes",
+        "open_system_settings": "Open System Settings",
+        "permissions": "Permissions",
+        "retry": "Retry",
+        "screen_recording": "Screen Recording",
+        "screenshot_width": "Screenshot width",
+        "show_cursor_motion": "Show cursor motion"
+      },
       "developerPanel": {
         "developer_mode": "Developer Mode",
         "developer_tools": "Developer Tools",
@@ -4072,7 +4082,6 @@
         "dismiss_diagnosis": "Dismiss diagnosis",
         "dismiss_error": "Dismiss error",
         "distinct": "distinct",
-        "each_connected_instance_needs_a": "). Each connected instance\n            needs a",
         "enable_it_to_let_this_gateway_open_ssh_tunnels_t": "Enable it to let this gateway open SSH tunnels to your remote crews and switch\n          between them from the top tab bar.",
         "enabled": "enabled",
         "enabled_but_not_active_yet_restart_the_gateway": "Enabled, but not active yet. Restart the gateway (",
@@ -4138,7 +4147,6 @@
       },
       "postureDisclosure": {
         "more": "more",
-        "no_matches_for": "No matches for “",
         "show": "Show",
         "unavailable": "unavailable"
       },
@@ -4187,7 +4195,6 @@
         "security_posture_detail_is_temporarily_unavailab": "Security posture detail is temporarily unavailable. Enforcement is unaffected — this view could not resolve the control list for display.",
         "the_strictest_boundary_in_effect_for_each_govern": "The strictest boundary in effect for each governed scope on the",
         "tool_approval": "Tool Approval",
-        "turn_off_every_built_in_denied_command_rule_at_o": "Turn off every built-in denied-command rule at once. Independent defense-in-depth controls (sensitive paths, IMDS, git-publish) stay enforced",
         "your_custom_denies": "Your custom denies"
       },
       "sharedMcpGatewayToggle": {
@@ -4197,7 +4204,6 @@
         "not_available_on_windows": "Not available on Windows — the shared gateway needs Unix-domain sockets. Supported on macOS and Linux.",
         "roll_back_disable": "Roll back (disable)",
         "shared_mcp_gateway": "Shared MCP gateway",
-        "the_gateway_did_not_reach_the_expected_state": "The gateway did not reach the expected state.",
         "this_restarts_all_active_sessions_onto_the_new_m": "This restarts all active sessions onto the new MCP routing — in-flight work will be interrupted. Your dashboard stays signed in. Continue?"
       },
       "shortcutsPanel": {
@@ -4222,13 +4228,11 @@
         "cannot_load_slack_config_is_the_gateway_running": "Cannot load Slack config. Is the gateway running?",
         "copied": "Copied",
         "create_slack_app": "Create Slack app",
-        "create_the_slack_app_from_the_pre_filled_manifes": "Create the Slack app from the pre-filled manifest below (Socket Mode and permissions\n            included, named KiroCrew-",
         "e0123abc456": "E0123ABC456",
         "enterprise_grid_org_ids_to_allow_starts_with_e_o": "Enterprise Grid org IDs to allow (starts with E or T). Leave empty to allow all orgs.",
         "from_oauth_permissions_after_installing_your_sla": "From OAuth & Permissions after installing your Slack app (starts with xoxb-).",
         "get_your_credentials": "Get your credentials",
         "identity_access": "Identity & access",
-        "install_it_to_your_workspace_then_paste_the_bot": "). Install it to your\n            workspace, then paste the bot token and app-level token here.",
         "kirocrew": "kirocrew",
         "loading_slack_config": "Loading Slack config…",
         "none": "(none)",
@@ -4259,6 +4263,7 @@
         "aws_region_transcribe": "AWS Region (Transcribe)",
         "bcp_47_language_code_for_speech_recognition": "BCP-47 language code for speech recognition",
         "default": "default",
+        "dictation_panel": "Dictation panel",
         "dismiss_error": "Dismiss error",
         "enabled": "Enabled",
         "input_device_used_to_capture_your_voice": "Input device used to capture your voice",
@@ -4275,6 +4280,7 @@
         "ready": "ready",
         "run_these_commands_in_your_terminal_first": "Run these commands in your terminal first:",
         "runtime": "Runtime",
+        "show_an_animated_panel_while_recording_instead_of": "Show an animated panel while recording instead of the thin status bar. Falls back to the bar when the browser lacks WebGL2 or your system requests reduced motion.",
         "status": "Status",
         "stream_live_partial_transcripts_into_the_input_b": "Stream live partial transcripts into the input box as you speak (Transcribe only)",
         "streaming": "Streaming",

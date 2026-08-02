@@ -27,6 +27,7 @@ from kiro_crew.discord.client import (
     DiscordInbound,
 )
 from kiro_crew.messaging.transport import (
+    ConfiguredChannelTarget,
     InboundMessage,
     MessagingTransport,
     TransportCapabilities,
@@ -59,7 +60,7 @@ DISCORD_CAPABILITIES = TransportCapabilities(
     streaming=True,
     edit=True,
     reactions=True,  # add_reaction — used for the steer-ack receipt
-    files=False,
+    files=True,
     rich_blocks=False,
     threads=True,
     max_message_chars=DISCORD_CHUNK_LIMIT,
@@ -85,9 +86,7 @@ class DiscordTransport(MessagingTransport):
         # Deny-by-default: freeze both allow-lists as snowflake strings so they
         # cannot mutate under an in-flight authorization decision.
         self._allowed: frozenset[str] = frozenset(str(u) for u in allowed_user_ids)
-        self._allowed_threads: frozenset[str] = frozenset(
-            str(t) for t in allowed_thread_ids
-        )
+        self._allowed_threads: frozenset[str] = frozenset(str(t) for t in allowed_thread_ids)
         self._dispatch = dispatch
         self.capabilities = DISCORD_CAPABILITIES
 
@@ -129,6 +128,31 @@ class DiscordTransport(MessagingTransport):
         # Sessions persist via conversation_log instead (mirrors Telegram).
         return []
 
+    def configured_targets(self) -> list[ConfiguredChannelTarget]:
+        targets = [
+            ConfiguredChannelTarget(f"user:{user_id}", f"Discord DM · {user_id}")
+            for user_id in sorted(self._allowed)
+        ]
+        targets.extend(
+            ConfiguredChannelTarget(f"thread:{thread_id}", f"Discord thread · {thread_id}")
+            for thread_id in sorted(self._allowed_threads)
+        )
+        return targets
+
+    async def resolve_configured_target(self, target_id: str) -> tuple[str, str | None] | None:
+        kind, separator, value = target_id.partition(":")
+        if not separator or not value:
+            return None
+        if kind == "user" and value in self._allowed:
+            return await self.resolve_conversation(value), None
+        if kind == "thread" and value in self._allowed_threads:
+            # Keep outbound dashboard links on the same disclosure boundary as
+            # inbound guild traffic: an allow-listed snowflake is not enough
+            # if Discord reports that it is a normal shared channel.
+            if await self._client.is_thread_channel(value):
+                return value, None
+        return None
+
     # -- Lifecycle ----------------------------------------------------------
     async def connect(self) -> None:
         await self._client.start()
@@ -157,13 +181,13 @@ class DiscordTransport(MessagingTransport):
         The low-level client's Gateway loop normalizes MESSAGE_CREATE into
         ``DiscordInbound``; this adapter maps that onto the neutral
         ``InboundMessage``, enforces deny-by-default auth, and hands an
-        authorized message to the turn dispatcher. Non-text messages
-        (attachments/stickers only) are dropped.
+        authorized message to the turn dispatcher. Attachment-only messages
+        continue through the same authorized path; sticker-only messages do not.
         """
         if not isinstance(raw_envelope, DiscordInbound):
             return
         inbound = raw_envelope
-        if not inbound.text:
+        if not inbound.text and not inbound.attachments:
             return
         thread_id: str | None = None
         if inbound.guild_id:
@@ -189,6 +213,7 @@ class DiscordTransport(MessagingTransport):
             text=inbound.text,
             thread_id=thread_id,
             message_id=inbound.message_id,
+            attachments=list(inbound.attachments),
         )
         if not self.authorize(msg):
             return

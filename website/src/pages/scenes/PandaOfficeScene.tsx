@@ -4,6 +4,7 @@ import { isKnownAgent, markAgentsKnown, pruneAgents } from '../../hooks/sceneSta
 import { sceneFont, drawLabel, sceneLineHeight, drawSpeechBubble, SPEECH_BUBBLE_MS, TEXT_CANVAS_STYLE, SCENE_CONTAINER_STYLE, PIXEL_CANVAS_STYLE } from '../../hooks/sceneText'
 import { initSceneCanvases, runSceneLoop, useVisibleSync } from '../../hooks/sceneCanvas'
 import { useSceneInteraction, type SceneTooltipTheme } from '../../hooks/useSceneInteraction'
+import { i18nT } from '../../i18n/t'
 
 const OFFICE_THEME: SceneTooltipTheme = { active: 'Grinding PRs', idle: 'Waiting for CR approval' }
 const PANDA_WHITE = '#f5f5f5'
@@ -385,7 +386,7 @@ export default function PandaOfficeScene({ agents, visible = true }: { agents: A
 
     const drawLogo = () => {
       T.fillStyle = '#8fbc5f'; T.font = sceneFont('title', 'bold')
-      T.fillText('🐼 Panda Den', (W / 2 - 28) * S, 32 * S)
+      T.fillText(i18nT('pages.scenes.pandaOfficeScene.panda_den'), (W / 2 - 28) * S, 32 * S)
       d(W / 2 - 30, 34, 60, 1, '#6b8e23')
     }
 
@@ -783,8 +784,8 @@ export default function PandaOfficeScene({ agents, visible = true }: { agents: A
 
   return (
     <div style={SCENE_CONTAINER_STYLE(W, H)}>
-      <canvas ref={canvasRef} aria-label="Panda office scene" style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }} onMouseMove={canvasProps.onMouseMove} onMouseLeave={canvasProps.onMouseLeave} onClick={canvasProps.onClick} />
-      <canvas ref={textRef} aria-label="Panda office scene labels" style={TEXT_CANVAS_STYLE} />
+      <canvas ref={canvasRef} aria-label={i18nT('pages.scenes.pandaOfficeScene.panda_office_scene')} style={{ ...PIXEL_CANVAS_STYLE, ...canvasProps.style }} onMouseMove={canvasProps.onMouseMove} onMouseLeave={canvasProps.onMouseLeave} onClick={canvasProps.onClick} />
+      <canvas ref={textRef} aria-label={i18nT('pages.scenes.pandaOfficeScene.panda_office_scene_labels')} style={TEXT_CANVAS_STYLE} />
       {tooltipEl}
     </div>
   )

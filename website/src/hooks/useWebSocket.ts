@@ -12,6 +12,7 @@ import { api } from '../api/client'
 import { sanitizeLlmOutput } from '../utils/sanitize'
 import { applyStatusDelta, parseStatusDelta } from '../utils/pullRequestStatusDelta'
 import type { StatusData, ChatSlot, Notification, PullRequestStatusBatch, TodoList } from '../types'
+import { i18nT } from '../i18n/t'
 
 type LogCallback = ((data: { level: string; msg: string }) => void) | null
 
@@ -547,7 +548,7 @@ export function useWebSocket() {
             queryClient.invalidateQueries({ queryKey: ['global-approvals'] })
             // Browser notification when tab not focused (permission must be granted via UI interaction elsewhere)
             if (typeof Notification !== 'undefined' && document.hidden && Notification.permission === 'granted') {
-              new Notification('Approval Required', { body: data.tool || 'A task needs your decision', tag: 'kirocrew-approval' })
+              new Notification(i18nT('hooks.useWebSocket.approval_required'), { body: data.tool || i18nT('hooks.useWebSocket.a_task_needs_your_decision'), tag: 'kirocrew-approval' })
             }
             dispatch(addNotification({
               kind: 'approval',
@@ -584,7 +585,7 @@ export function useWebSocket() {
                   dispatch(sseSubagentPending({ slot: data.slot, id: agentId, task: (data.tool as string || '').replace('spawn_run(', '').replace(/\)$/, ''), approval_id: rid }))
                 }
               } else if (data.source !== 'subagent') {
-                dispatch(sseActivityEvent({ slot: targetSlot, kind: 'approval', text: data.tool || 'Unknown', approval_id: data.id, approval_type: 'chat' }))
+                dispatch(sseActivityEvent({ slot: targetSlot, kind: 'approval', text: data.tool || i18nT('hooks.useWebSocket.unknown'), approval_id: data.id, approval_type: 'chat' }))
               }
             }
             break
@@ -836,15 +837,27 @@ export function useWebSocket() {
             // Dispatching here would reset ts and break slow-warning detection.
             break
           case 'context_usage':
-            dispatch(sseContextUsage(data as { slot: string; pct: number; used_tokens?: number; window_tokens?: number }))
+            dispatch(sseContextUsage(data as { slot: string; pct: number; used_tokens?: number; window_tokens?: number; reset?: boolean }))
             break
-          case 'chat_thinking':
+          case 'chat_thinking': {
             // kiro-cli/ACP reasoning (agent_thought_chunk) -> collapsible block.
             dispatch(sseThinkingChunk({ slot: data.slot, content: (data as { content?: string }).content || '' }))
-            if (data.slot && store.getState().chat.slotStatusDetail[data.slot]?.kind !== 'streaming') {
+            // Dispatch the status detail only on a genuine kind TRANSITION into
+            // 'thinking'. The old guard tested `!== 'streaming'` and then wrote
+            // 'thinking', which is itself `!== 'streaming'` — so it never
+            // self-limited and re-dispatched on EVERY thought frame with a fresh
+            // `ts`. Because setSlotStatusDetail replaces slotStatusDetail[slot]
+            // wholesale, that bumped the map identity per frame and re-rendered
+            // every whole-map subscriber (ChatSidebar, CommandPalette) for the
+            // duration of the model's reasoning. The sibling chat_chunk guard
+            // above writes 'streaming' and so is naturally idempotent; this is
+            // the same shape, made explicit.
+            const detailKind = data.slot ? store.getState().chat.slotStatusDetail[data.slot]?.kind : undefined
+            if (data.slot && detailKind !== 'streaming' && detailKind !== 'thinking') {
               dispatch(setSlotStatusDetail({ slot: data.slot, kind: 'thinking', text: 'Thinking…', ts: Date.now() }))
             }
             break
+          }
           case 'chat_segment':
             flushChunks()
             dispatch(sseChatMessage({ ...data, role: '_segment' }))
