@@ -11,6 +11,7 @@
   "apps.issueRadar.components.prBulkBar.failed",
   "apps.issueRadar.components.prBulkBar.selected",
   "apps.issueRadar.components.prList.pr",
+  "apps.opsMissionControl.opsMissionControlPage.shift",
   "apps.papyrus.diagnostics.typesetting_hints",
   "apps.papyrus.workspace.error_count",
   "apps.papyrus.workspace.warning_count",
