@@ -37,6 +37,27 @@ class TestCatalog:
         ids = [r.id for r in BUILTIN_DENIED_RULES]
         assert len(set(ids)) == 137
 
+    def test_token_mint_is_blocked_in_both_the_cli_and_module_forms(self):
+        """`kirocrew token` mints a signed dashboard token that authenticates to EVERY gateway
+        route — including the ops-mission-control autonomy-ceiling PUT — so a prompt-injected
+        agent could shell out to it and raise its own ceiling. The `.*kirocrew.*token` pattern
+        blocked the console script but let the identical `python -m kiro_crew token` through.
+        Found in review."""
+        import re
+
+        rule = next(r for r in BUILTIN_DENIED_RULES if r.id == "credential-exfil-kirocrew-token")
+        for blocked in (
+            "kirocrew token",
+            "kirocrew token --port 6777",
+            "python -m kiro_crew token",
+            "python3 -m kiro_crew token --port 6777",
+            "kiro-crew token",
+        ):
+            assert re.search(rule.pattern, blocked), f"token mint not blocked: {blocked!r}"
+        # Benign commands that merely mention the substrings must still pass.
+        for allowed in ("ls kirocrew", "echo tokens", "grep token app.log"):
+            assert not re.search(rule.pattern, allowed), f"false positive on {allowed!r}"
+
     def test_rules_are_frozen_dataclass_with_four_fields(self):
         rule = BUILTIN_DENIED_RULES[0]
         assert isinstance(rule, DeniedCommandRule)

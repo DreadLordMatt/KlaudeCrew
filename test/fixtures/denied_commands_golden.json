@@ -43,9 +43,9 @@
   },
   {
     "id": "credential-exfil-kirocrew-token",
-    "pattern": ".*kirocrew.*token",
+    "pattern": ".*kiro[-_]?crew.*token",
     "category": "credential-exfil",
-    "description": "Blocks the `kirocrew ... token` CLI, which mints a signed dashboard access token an attacker could use to authenticate to the gateway."
+    "description": "Blocks the `kirocrew ... token` CLI and the `python -m kiro_crew ... token` module form, which mint a signed dashboard access token that authenticates to every gateway route \u2014 including the ops-mission-control autonomy-ceiling PUT."
   },
   {
     "id": "credential-exfil-env-grep-aws",

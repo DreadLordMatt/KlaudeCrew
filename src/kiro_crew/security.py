@@ -142,11 +142,20 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
     ),
     DeniedCommandRule(
         id="credential-exfil-kirocrew-token",
-        pattern=".*kirocrew.*token",
+        # Matches BOTH the console-script form (`kirocrew ... token`) and the module form
+        # (`python -m kiro_crew ... token`). The `kirocrew`-only pattern let the identical
+        # command through as `python -m kiro_crew token`, which mints the same signed token —
+        # and that token authenticates EVERY gateway route, including the ops-mission-control
+        # keystone PUT that sets `mode`/`autonomy_rules`. So the bypass was a way for a
+        # prompt-injected agent to raise its own security ceiling. `kiro[-_]crew` covers the
+        # module path (`kiro_crew`) and the console script (`kirocrew`/`kiro-crew`). Found in
+        # review.
+        pattern=r".*kiro[-_]?crew.*token",
         category="credential-exfil",
         description=(
-            "Blocks the `kirocrew ... token` CLI, which mints a signed dashboard access token "
-            "an attacker could use to authenticate to the gateway."
+            "Blocks the `kirocrew ... token` CLI and the `python -m kiro_crew ... token` module "
+            "form, which mint a signed dashboard access token that authenticates to every "
+            "gateway route — including the ops-mission-control autonomy-ceiling PUT."
         ),
     ),
     DeniedCommandRule(
@@ -2530,6 +2539,31 @@ _CREW_SECRET_LEAVES: list[str] = [
     # handler is the only writer and it opens the path directly, not through this
     # gate, so the operator's Settings toggle still works.
     "computer_use.json",
+    # Ops Mission Control's third-party provider tokens (PagerDuty / Datadog
+    # API + application keys). These are live credentials against a user's
+    # production incident tooling: a leaked one can acknowledge or resolve real
+    # pages. They are here rather than in ``config.json`` for two concrete
+    # reasons — an app's ``data/config.json`` is served over
+    # ``/api/apps/<name>/config`` WITHOUT session auth, and ``config.json``
+    # itself is writable by any auto-approved agent shell. The read+write
+    # keystone floor is the only placement where the agent can neither read the
+    # tokens nor overwrite them. The authenticated dashboard PUT handler is the
+    # sole writer and opens the path directly, so Settings still works.
+    "ops_mission_control_secrets.json",
+    # Ops Mission Control's AUTONOMY CEILING: the app mode (observe/propose/act) and
+    # the per-signal act-rules. This is the exact same class of control as
+    # ``computer_use.json`` above — flipping ``mode`` to ``act`` plus adding a matching
+    # rule is what authorizes a write against the user's production incident tooling —
+    # and it was living in the agent-writable ``data/config.json``. A prompt-injected
+    # agent could therefore mint the dashboard token, PUT ``mode=act`` with a rule
+    # matching a signal, and unlock provider actions the operator never granted, which
+    # defeats the app's central safety property (``effective = min(app_mode, rule_mode)``
+    # is only a ceiling if the agent cannot raise it). Found in review. Here for the same
+    # reasons as the secrets leaf directly above — served unauthenticated over
+    # ``/config`` and writable by any auto-approved shell in ``config.json`` — so it moves
+    # to the read+write keystone floor. Dashboard PUT is the sole writer and opens the
+    # path directly.
+    "ops_mission_control_policy.json",
     "token_signing.key",
     "refresh_chains.json",
     ".local_secret",
