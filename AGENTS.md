@@ -58,7 +58,7 @@ changing code, **never reintroduce** any of the following:
 **Keep** the generic security controls (not internal-specific): AKIA/ASIA
 credential redaction, destructive-command deny patterns, `~/.aws` / `~/.ssh`
 sensitive-path blocking, SEL audit log. The deny patterns are first-class
-`DeniedCommandRule` records (`BUILTIN_DENIED_RULES`, **137 rules**) enforced only
+`DeniedCommandRule` records (`BUILTIN_DENIED_RULES`, **139 rules**) enforced only
 at the `hooks.py` PreToolUse gate; default-ON but user-configurable from Settings
 → Security, with the governance `commands` scope as the un-opt-out-able enterprise
 force-pin. See `docs/system-specs/modules/security.md`.
@@ -459,7 +459,7 @@ change, never an evaluator edit.
 This single mechanism is what makes the ceiling un-disableable — do not weaken it.
 
 **Denied commands** are first-class `DeniedCommandRule` records
-(`BUILTIN_DENIED_RULES`, 137 rules) enforced **only** at the `hooks.py` PreToolUse
+(`BUILTIN_DENIED_RULES`, 139 rules) enforced **only** at the `hooks.py` PreToolUse
 gate — not injected into `~/.kiro/agents/*.json` (the `agent._enforce_denied_commands`
 path + `autoAllowReadonly` are retired; read-only auto-approve moved into
 `hooks.py` after the deny/governance checks). They are default-ON but
