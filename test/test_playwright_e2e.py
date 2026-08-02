@@ -52,7 +52,43 @@ _WEBSITE = "website"
 #
 # RAISE this when you add specs. Only LOWER it with a written reason in the
 # commit body: a drop means specs stopped running.
-MIN_EXECUTED_SPECS = 210
+#
+# 208 -> 230. Two separate corrections:
+#
+# 1. The ops-mission-control suite added 24 specs and the floor was never raised, so it
+#    carried ~11 specs of slack — most of that new suite could have been deleted or
+#    darkened with the gate still green, exactly what this constant exists to prevent.
+#
+# 2. Measured against a real run rather than `--list`: the collected count (220) is NOT
+#    the executed count (230). File-level `serial` describes and per-project setup
+#    specs change what actually runs, and one failing spec in a serial file previously
+#    aborted 14 others — the run reported executed=215/skipped=14 while `--list` still
+#    said 220. So this floor is set from an observed green-path run, not from
+#    collection.
+#
+# 230 -> 232. The ops-mission-control suite added one spec (the incident panel's ledger
+# detail) and, as in correction 1 above, the floor was not raised with it — the same slack
+# reappearing immediately after being removed, which is the argument for treating "raise
+# the floor" as part of adding a spec rather than a follow-up.
+#
+# 232 is measured, and cross-checked two ways so it is not an inference from a passing
+# run: a mid-investigation run reported `expected=229, flaky=1, skipped=1, unexpected=1`
+# (= 232 total), and `grep -c '^\s*test('` across `playwright/*.spec.ts` independently
+# counts 232.
+# 232 -> 234. One spec added: the on-call team panel renders (owner-requested display,
+# and under strict gating the only thing separating "a teammate has it" from "this instance
+# silently stopped working"). Raised WITH the spec, per the note above.
+#
+# 234 is MEASURED, not derived: I first wrote 233 by adding one to the previous floor, and
+# a real run reported `executed=234, skipped=0, unexpected=0` — the arithmetic was wrong
+# because the previous floor already trailed the suite. `grep -c '^\s*test('` across
+# playwright/*.spec.ts independently agrees at 234. Take the measurement over the sum.
+#
+# 234 -> 235 on merging `main`. Both sides of the merge had moved this constant — this
+# branch to 234 (its own specs) and `main` to 210 — so neither side's number describes the
+# MERGED suite, and taking either would have re-introduced exactly the slack the floor
+# exists to remove. Re-counted on the merged tree instead of picking a side.
+MIN_EXECUTED_SPECS = 235
 
 # Skips are silent passes. A spec should seed its preconditions rather than skip
 # when they are absent, so the intended steady state is zero. Specs excluded by
@@ -91,6 +127,60 @@ def _assert_suite_not_darkened(report: Path) -> None:
         "green while verifying nothing. Seed the precondition in a fixture instead "
         "of skipping on its absence."
     )
+
+
+def _newest_mtime(root: Path, patterns: tuple[str, ...]) -> float:
+    """Newest mtime among ``patterns`` under ``root``, or 0.0 if none match."""
+    newest = 0.0
+    for pattern in patterns:
+        for path in root.rglob(pattern):
+            try:
+                newest = max(newest, path.stat().st_mtime)
+            except OSError:  # pragma: no cover - racing a rebuild
+                continue
+    return newest
+
+
+def _assert_served_bundle_is_current(website: Path) -> None:
+    """Fail when the gateway would serve a bundle older than the frontend source.
+
+    The gateway serves ``src/kiro_crew/static/dist`` (``server.py`` ``_DIST_DIR``) and
+    this gate does NOT build. ``npm run build`` writes ``website/dist`` and does **not**
+    stage; the staging step is a separate ``cp -R`` documented in AGENTS.md. So a run
+    that skips staging silently exercises whatever bundle happens to be on disk.
+
+    That is not hypothetical: both repos were serving bundles ~2 and ~10 hours older
+    than the source, so every browser assertion about freshly-changed UI was verifying
+    the PREVIOUS build. The spec under test even rendered correctly in the DOM while its
+    ``data-testid`` was absent from the served JS — a failure that reads as a UI bug and
+    is actually a build-staging gap.
+
+    Compares newest source mtime against newest served-asset mtime. A skew this coarse
+    cannot catch every case (an edit inside the same second, a touched-but-unchanged
+    file), but it catches the multi-hour staleness that actually happens, and it fails
+    LOUD with the exact command to fix it.
+    """
+    dist = Path(__file__).resolve().parents[1] / "src/kiro_crew/static/dist"
+    if not dist.is_dir():
+        pytest.fail(
+            f"no staged frontend bundle at {dist}. The gateway serves this directory and "
+            "this gate does not build. Run:\n"
+            "  cd website && npm run build && "
+            "cp -R dist ../src/kiro_crew/static/dist"
+        )
+
+    src_mtime = _newest_mtime(website / "src", ("*.ts", "*.tsx", "*.css"))
+    dist_mtime = _newest_mtime(dist, ("*.js", "*.css"))
+    if src_mtime and dist_mtime and src_mtime > dist_mtime:
+        stale_secs = int(src_mtime - dist_mtime)
+        pytest.fail(
+            f"the served bundle is {stale_secs}s older than website/src — every browser "
+            "spec would verify the PREVIOUS build, which is how a rendered-but-untestable "
+            "element looks like a UI bug. `npm run build` alone is not enough; it writes "
+            "website/dist and does not stage. Run:\n"
+            "  cd website && npm run build && "
+            "cp -R dist ../src/kiro_crew/static/dist"
+        )
 
 
 def _node_major(node_bin: str) -> int | None:
@@ -170,6 +260,8 @@ def test_dashboard_playwright_suite() -> None:
     node_dir = _resolve_node18_dir()
     if node_dir is None:
         _unresolved("No Node.js >=18 found; Playwright 1.58 requires it")
+
+    _assert_served_bundle_is_current(website)
 
     # Point the gateway's ACP client at the packaged fake backend so the
     # agent-driven specs (chat, fork) run deterministic, credential-less turns
