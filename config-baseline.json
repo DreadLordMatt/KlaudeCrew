@@ -1811,6 +1811,7 @@
         "transcribe_profile": "",
         "language_code": "en-US",
         "streaming": false,
+        "endpointing": false,
         "dictation_panel": true
       }
     },
@@ -1973,6 +1974,20 @@
       "tags": [],
       "label": "Streaming",
       "help": "Stream partial transcripts live to the dashboard input (transcribe provider only).",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "stt.endpointing",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Semantic endpointing",
+      "help": "While streaming dictation, run a fast background model on each stable transcript segment to detect when you have finished a complete request, then auto-submit. Transcribe streaming only; off by default.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": false
