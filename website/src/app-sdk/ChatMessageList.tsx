@@ -28,6 +28,15 @@ export interface ChatMessageListProps {
   running: boolean
   contentWidth?: string
   onApprove?: (approvalId: string, decision: string) => void
+  /**
+   * Whether the host's approval resolver can PERSIST a trust grant. Defaults to true.
+   *
+   * Threaded rather than hardcoded because this list has several hosts (the embed, the
+   * dashboard's split-view ChatPane, TurnBlock) and only some of them lack a trust
+   * store. A host that cannot persist trust must not show a Trust button, or the label
+   * promises a standing grant the operator will not actually get.
+   */
+  canPersistTrust?: boolean
   onFileOpen?: (path: string) => void
   /** Optional host-injected renderer for tool messages (role 'tool'/'tool_call'/
    *  'tool_result'). Lets a Redux-connected host (e.g. the dashboard's split-view
@@ -124,6 +133,7 @@ const ChatMessageList = memo(function ChatMessageList({
   running,
   contentWidth = '900px',
   onApprove,
+  canPersistTrust = true,
   onFileOpen,
   renderTool,
 }: ChatMessageListProps) {
@@ -327,6 +337,7 @@ const ChatMessageList = memo(function ChatMessageList({
           permissionMeta={lastPerm?.meta}
           pendingPermCount={unresolvedPerms.length}
           onApprove={handleApprove}
+          canPersistTrust={canPersistTrust}
         >
           {/* Grouped messages (thinking, permission) return null from renderMessage
               intentionally — CollapsibleToolGroup handles their display via its
