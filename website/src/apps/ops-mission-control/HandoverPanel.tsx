@@ -14,8 +14,11 @@
  *   ordinary case) and this renders it prominently rather than re-deriving it.
  * - **Blind spots are shown, not just coverage.** An unconfigured source is silence
  *   that looks like health, and the incoming responder inherits it.
- * - **Unproven patterns are visibly unproven.** Flattening `observed/medium` into "the
- *   fix" is how a digest gets someone to apply the wrong thing confidently.
+ * - **Unproven patterns are visibly unproven, and refuted ones are visibly refuted.**
+ *   Flattening `observed/medium` into "the fix" is how a digest gets someone to apply the
+ *   wrong thing confidently — and a fix that was applied while the signal kept firing is
+ *   a third state, worse than unproven, on the entry this list ranks FIRST because the
+ *   failure keeps recurring.
  * - **Copy-as-text is first-class.** The backend also returns a rendered text form, so
  *   pasting into a handover thread and reading it here cannot word things differently.
  */
@@ -32,7 +35,12 @@ import {
   UserCheck,
 } from 'lucide-react'
 import { Badge, Btn, Card, CardTitle, EmptyState } from '../../components/ui'
-import { opsApi, type HandoverIncident } from './api'
+import {
+  describeSourceHealth,
+  opsApi,
+  SIGNALS_QUERY_KEY,
+  type HandoverIncident,
+} from './api'
 
 /** Module-level frozen empty so render-time fallbacks stay referentially stable. */
 const EMPTY_ROWS: readonly HandoverIncident[] = Object.freeze([])
@@ -74,7 +82,45 @@ export default function HandoverPanel() {
     queryFn: () => opsApi.handover(),
   })
 
+  // The digest's coverage is derived from `configured` alone (handover.coverage), which is
+  // the same look-deliberate-do-nothing shape this app exists to prevent: a source whose
+  // every poll fails is listed under "Watching". The last explicit poll is the only thing
+  // that knows better, so read its cached result — `enabled: false` and the SAME key the
+  // Signals tab owns, because a digest read at shift change must not fire a paid poll of
+  // every provider as a side effect of opening a tab.
+  const cachedSignalsQuery = useQuery({
+    queryKey: SIGNALS_QUERY_KEY,
+    queryFn: () => opsApi.signals(),
+    enabled: false,
+  })
+
+  // Cheap catalog read (a config check per adapter, no provider calls). Needed because
+  // coverage names sources by display_name while poll_health is keyed by id.
+  const providersQuery = useQuery({
+    queryKey: ['ops-mission-control', 'providers'],
+    queryFn: () => opsApi.providers(),
+  })
+
   const digest = query.data
+  const cachedSignals = cachedSignalsQuery.data
+
+  /** Display names of signal sources whose last poll failed or is throttled. */
+  const notAnswering = new Set(
+    cachedSignals
+      ? (providersQuery.data?.providers ?? [])
+          .filter((p) => p.roles.includes('signal'))
+          .filter((p) => {
+            const state = describeSourceHealth(
+              p.id,
+              cachedSignals.poll_health,
+              cachedSignals.errors,
+              p.configured,
+            ).state
+            return state === 'failed' || state === 'backing_off'
+          })
+          .map((p) => p.display_name)
+      : [],
+  )
   const work = digest?.open_work
   const waiting = work?.waiting_on_you ?? EMPTY_ROWS
   const stalled = work?.stalled_without_diagnosis ?? EMPTY_ROWS
@@ -186,12 +232,31 @@ export default function HandoverPanel() {
                     {pat.uses}×
                   </span>
                   <span className="flex-1">{pat.pattern}</span>
-                  {/* An unproven entry must not look like an answer. */}
-                  <Badge variant={pat.proven ? 'ok' : 'muted'}>
-                    {pat.proven ? 'proven' : `${pat.confidence}/${pat.trust}`}
-                  </Badge>
+                  {/* An unproven entry must not look like an answer, and a REFUTED one
+                      must not look merely unproven. Three states, worst first: this list
+                      is ranked by how often the failure recurs, so the entry most likely
+                      to be reached for is the one at the top — and "this fix has already
+                      failed twice" is precisely what the ranking would otherwise hide. */}
+                  {pat.demoted ? (
+                    <Badge
+                      variant="warn"
+                      title="Applied, and the signal kept firing afterwards"
+                    >
+                      failed {pat.misses}&times;
+                    </Badge>
+                  ) : (
+                    <Badge variant={pat.proven ? 'ok' : 'muted'}>
+                      {pat.proven ? 'proven' : `${pat.confidence}/${pat.trust}`}
+                    </Badge>
+                  )}
                 </div>
                 <p className="text-[12px] text-muted mt-1 pl-10">{pat.fix}</p>
+                {pat.demoted ? (
+                  <p className="text-[12px] text-warn mt-1 pl-10">
+                    This fix was applied and the signal was still firing afterwards. Do not
+                    hand it over as the answer — say what has already been tried.
+                  </p>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -200,8 +265,28 @@ export default function HandoverPanel() {
 
       <Card>
         <CardTitle>Coverage</CardTitle>
+        {/* Configured is not the same as working. Each name is marked when the last poll
+            says that source is not answering, because the incoming responder must not
+            inherit a blind spot dressed up as coverage — "Watching: cloudwatch" beside a
+            provider whose every poll 401s is the worst sentence this panel could hand over.
+            The backend-rendered digest.text is deliberately left alone: it is what gets
+            pasted into the handover thread, and editorialising here would let the paste and
+            the screen word things differently. */}
         <p className="text-[13px]">
-          Watching: {digest?.coverage?.watching?.join(', ') || 'nothing'}
+          Watching:{' '}
+          {digest?.coverage?.watching?.length ? (
+            digest.coverage.watching.map((name, i) => (
+              <span key={name}>
+                {i > 0 ? ', ' : ''}
+                <span className={notAnswering.has(name) ? 'text-warn' : undefined}>
+                  {name}
+                  {notAnswering.has(name) ? ' (not answering)' : ''}
+                </span>
+              </span>
+            ))
+          ) : (
+            <span>nothing</span>
+          )}
         </p>
         {digest?.coverage?.not_configured?.length ? (
           <p className="text-[13px] text-muted mt-1">
@@ -216,6 +301,30 @@ export default function HandoverPanel() {
               Settings.
             </span>
           </p>
+        ) : null}
+        {/* Say which question this list actually answered. Without a poll it is a config
+            listing, and presenting it plainly would imply it had been checked. */}
+        {digest?.coverage?.any_watching ? (
+          !cachedSignals ? (
+            <p className="text-[13px] text-muted mt-2">
+              Derived from configuration only — no source has been polled this session, so
+              this is not evidence that any of them answers. Poll from the Signals tab.
+            </p>
+          ) : !cachedSignals.all_sources_healthy ? (
+            <p className="text-[13px] text-warn mt-2 flex items-start gap-1.5">
+              <AlertTriangle className="lucide-inline" />
+              <span>
+                {notAnswering.size > 0
+                  ? `${[...notAnswering].join(', ')} did not answer the last poll.`
+                  : 'At least one source did not answer the last poll.'}{' '}
+                Until that is fixed, a quiet board is not evidence of recovery.
+              </span>
+            </p>
+          ) : (
+            <p className="text-[13px] text-ok mt-2">
+              Every configured source answered the last poll.
+            </p>
+          )
         ) : null}
       </Card>
     </div>

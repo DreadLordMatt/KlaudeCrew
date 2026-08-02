@@ -215,14 +215,23 @@ test.describe('Ops Mission Control — page load', () => {
     expect(errors.filter((e) => !BASELINE_CONSOLE_NOISE.test(e))).toEqual([])
   })
 
-  test('shows the four stat cards', async ({ page }) => {
+  test('shows the stat cards', async ({ page }) => {
     await page.goto(ROUTE, { waitUntil: 'domcontentloaded' })
     // 'Waiting on you', not 'Needs human': the card was renamed when blocked_reason
     // landed, because "Needs human" reads the same whether the agent wants one click
     // of approval or has run out of ideas. This assertion kept the old name and only
     // the packaged E2E gate caught it — my hand-run suite passed against a stale
     // bundle that still had the old label.
-    for (const label of ['Active', 'Waiting on you', 'Sources wired', 'Patterns known']) {
+    // 'Patterns proven' sits beside 'Patterns known' because "known" counts every entry
+    // including guesses nobody has applied, and only the second number answers what an
+    // agent would propose without checking.
+    for (const label of [
+      'Active',
+      'Waiting on you',
+      'Sources wired',
+      'Patterns known',
+      'Patterns proven',
+    ]) {
       await expect(page.getByText(label, { exact: true }).first()).toBeVisible({ timeout: 20000 })
     }
   })
@@ -430,9 +439,46 @@ test.describe('Ops Mission Control — modes', () => {
     // The per-source error map is what tells "ready but credentials expired" apart
     // from "genuinely healthy".
     expect(body).toHaveProperty('errors')
+    // The rest of the same contract, asserted here because the panel's five-state source
+    // row is derived from these and NOT from `configured` — a source in backoff used to
+    // render "ready / ok" while contributing nothing, which is this app's signature bug
+    // (machinery that looks deliberate while doing nothing) in the UI layer.
+    for (const key of ['firing', 'cleared', 'suppressed', 'poll_health', 'all_sources_healthy']) {
+      expect(body).toHaveProperty(key)
+    }
 
     // Summary line appears once a poll has happened.
     await expect(page.getByText(/not yet claimed/).first()).toBeVisible({ timeout: 20000 })
+
+    // No row may claim to be 'ready', which is the word `configured` alone produced and the
+    // one an operator read as "this source is watching". Asserted as an absence over the
+    // table rather than as the presence of a particular state, because which state each row
+    // shows depends on what earlier tests in this serial file have enabled — whereas "never
+    // 'ready' here" is true of every fixture, which is the actual contract.
+    //
+    // Settings' provider list still says 'ready', correctly: there it means "credentials are
+    // present", which is all that list claims. The conflation only ever mattered on THIS
+    // table, where the same word was read as a statement about the last poll.
+    const sourceTable = page.locator('table').first()
+    await expect(sourceTable).toBeVisible({ timeout: 20000 })
+    await expect(sourceTable.getByText('ready', { exact: true })).toHaveCount(0)
+  })
+
+  test('a quiet board is not presented as healthy until a source has answered', async ({
+    page,
+  }) => {
+    // The empty board is a CLAIM about the world, and it used to be made unconditionally:
+    // "Nothing is firing" rendered whenever the incident list was empty, with no reference to
+    // whether any source had answered — and a source failing every poll produces exactly that
+    // empty list.
+    //
+    // A fresh page load has no cached poll (the board reads `/signals` with `enabled: false`
+    // so that merely looking cannot fire a paid provider poll), so the board CANNOT be
+    // claiming verified quiet here. Asserted as the absence of the unearned claim rather than
+    // the presence of one wording, so it holds whatever earlier serial tests configured.
+    await page.goto(ROUTE, { waitUntil: 'domcontentloaded' })
+    await expect(page.getByText('Board', { exact: true }).first()).toBeVisible({ timeout: 20000 })
+    await expect(page.getByText('so this quiet is real', { exact: false })).toHaveCount(0)
   })
 
   test('Handover digest renders and leads with a headline', async ({ page, request }) => {
