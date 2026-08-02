@@ -993,6 +993,17 @@ def _register_skills(app_name: str, manifest: AppManifest, app_root: Path) -> li
     Returns list of registered skill names (namespaced).
     """
     registered: list[str] = []
+    if not manifest.skills:
+        # Nothing to link. Creating the namespaced dir anyway leaves an EMPTY
+        # ``skills/<app_name>/`` behind, and when a PACKAGED builtin skill shares
+        # the app's name that empty dir masks it: ``_ensure_builtin_skills`` copies
+        # at gateway start, app registration runs after, and the mkdir then leaves a
+        # directory whose ``SKILL.md`` is gone — so every SOP the app's cron prompts
+        # point at silently does not exist on disk. Observed with ops-mission-control,
+        # whose skill ships under ``builtin_skills/`` precisely because a builtin's
+        # app dir is never copied into the data home.
+        return registered
+
     skills_root = _skills_dir()
     app_skills_dir = skills_root / app_name
     app_skills_dir.mkdir(parents=True, exist_ok=True)
@@ -1067,7 +1078,18 @@ def _register_skills(app_name: str, manifest: AppManifest, app_root: Path) -> li
 
 
 def _deregister_skills(app_name: str) -> int:
-    """Remove the app's skill symlinks from ~/.kiro/crew/skills/."""
+    """Remove the app's skill symlinks from ~/.kiro/crew/skills/.
+
+    Removes **only what registration created** — the symlinks, and the directory
+    itself once it holds nothing else. It must NOT ``rmtree`` unconditionally: when a
+    PACKAGED builtin skill shares the app's name, ``skills/<app_name>/`` is that
+    skill's real directory, not an app-owned link farm. Blowing it away deleted a
+    shipped skill and every SOP under it, leaving the app's cron prompts pointing at
+    files that no longer existed — silently, since a missing skill file is not an
+    error anywhere. Hit for real by ops-mission-control, whose skill ships under
+    ``builtin_skills/`` because a builtin app's own directory is never copied into
+    the data home.
+    """
     skills_root = _skills_dir()
     app_skills_dir = skills_root / app_name
     if not app_skills_dir.exists():
@@ -1082,7 +1104,19 @@ def _deregister_skills(app_name: str) -> int:
                 flat_link = skills_root / item.name
                 if flat_link.is_symlink() and flat_link.resolve() == target:
                     flat_link.unlink()
-        shutil.rmtree(app_skills_dir)
+                item.unlink()
+        # Only prune the directory if registration is all that was ever in it.
+        # Any surviving real file means this path belongs to something else.
+        if any(app_skills_dir.iterdir()):
+            logger.info(
+                "Deregistered %d app skill link(s) for %s; keeping %s "
+                "(contains files this app does not own)",
+                len(removed_skills),
+                app_name,
+                app_skills_dir,
+            )
+            return 1 if removed_skills else 0
+        app_skills_dir.rmdir()
         logger.info("Deregistered skills for app %s", app_name)
         sel().log_tool_invocation(
             session_key="",
