@@ -16,7 +16,7 @@
     "Claims a firing alarm within one heartbeat and investigates before anyone has to look",
     "Knowledge ledger with confidence and trust levels \u2014 a repeat failure resolves from what you already know",
     "Live board in the dashboard and as replyable Slack threads, so the channel is the dashboard",
-    "Connects AWS CloudWatch, PagerDuty, Datadog, GitHub Issues, or any system that can POST signed JSON",
+    "Connects AWS CloudWatch, PagerDuty, Datadog, GitHub Issues, or any system that can POST signed JSON — including Alertmanager-shaped bodies, fanned out one incident per alert",
     "Read-only by default \u2014 write actions are opt-in per signal pattern, and every one is audited",
     "Rotation-aware: the on-shift automation tier arms and disarms itself"
   ],
@@ -45,6 +45,27 @@
       "send_message",
       "spawn_run",
       "learn_add"
+    ]
+  },
+  "notifications": {
+    "channels": [
+      {
+        "id": "waiting-on-you",
+        "name": "Waiting on you",
+        "icon": "UserCheck",
+        "defaultPriority": "critical"
+      },
+      {
+        "id": "source-health",
+        "name": "Source health",
+        "icon": "Radio"
+      },
+      {
+        "id": "incident-released",
+        "name": "Released incidents",
+        "icon": "Clock",
+        "defaultPriority": "passive"
+      }
     ]
   },
   "dependencies": {

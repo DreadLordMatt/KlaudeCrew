@@ -303,6 +303,26 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
         "Slack — centrally, so an adapter author cannot leak a credential by "
         "forgetting to redact.",
     ),
+    (
+        "Ops Mission Control desktop notifications",
+        "apps/builtins/ops_mission_control/backend/notify_out.py",
+        "Incident titles and provider failure reasons pushed onto the local "
+        "notification bus. A separate egress from the Slack board even though the "
+        "source text is the same third-party provider payload: this one lands in the "
+        "OS notification centre and in the persisted notification JSONL. Runs the "
+        "credential and exfiltration-URL scanners plus the app's own provider-token "
+        "pass, matching the postmortem writer — core redaction alone leaves a "
+        "provider api_key inside a URL intact.",
+    ),
+    (
+        "Ops Mission Control incident postmortem",
+        "apps/builtins/ops_mission_control/backend/store.py",
+        "The per-incident Markdown artifact written when an incident closes "
+        "(incidents/<id>.md). A distinct boundary from the two above because the "
+        "file is a SHAREABLE local artifact — it exists so an operator can hand a "
+        "colleague, or a ticket, the investigation record — so its provider titles "
+        "and model-authored diagnosis are redacted at the write, not at a read.",
+    ),
 )
 
 # Modules that call a redactor but are NOT an output egress boundary, so they do
