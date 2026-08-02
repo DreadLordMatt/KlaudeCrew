@@ -89,6 +89,22 @@ def _manifest_to_builtin_dict(manifest: AppManifest) -> dict[str, Any]:
     if pp_d:
         d["publishProvider"] = pp_d
 
+    # Notification channels (RFC local notification bus, Phase 2).
+    #
+    # This branch was MISSING, and its absence was invisible because no builtin had
+    # ever declared a channel. ``notifications`` is a ``_KNOWN_FIELDS`` member, so it
+    # does not fall through into ``manifest.extra`` either — it was simply dropped.
+    # ``register_builtin_apps`` persists this dict verbatim as the app's on-disk
+    # ``app.json``, and that file is what ``get_app_manifest`` reads, so every consumer
+    # downstream (``_resolve_app_channels``, ``GET /api/notifications/channels``, the
+    # Settings → Notifications rail) would have seen zero declared channels for a
+    # builtin that declares three. The cost: an app could pass manifest validation with
+    # channels, register, push, and be refused as "channel not declared in app manifest"
+    # against a manifest it never got to keep.
+    notif_d = manifest.notifications.to_dict()
+    if notif_d:
+        d["notifications"] = notif_d
+
     return d
 
 
