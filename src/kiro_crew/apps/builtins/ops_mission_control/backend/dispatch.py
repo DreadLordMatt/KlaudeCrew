@@ -33,17 +33,24 @@ from typing import Any
 
 from kiro_crew.apps.builtins.ops_mission_control.backend import (
     ledger,
+    notify_out,
     rotation,
     slack_out,
     store,
 )
 from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+    OPEN_VERIFICATIONS,
     STATE_FIRING,
+    STATE_SUPPRESSED,
     STATUS_STALE,
     TERMINAL_STATUSES,
+    VERIFY_CLEARED,
+    VERIFY_STILL_FIRING,
+    VERIFY_UNKNOWN,
     Incident,
     LedgerEntry,
     Signal,
+    utc_now_iso,
 )
 from kiro_crew.apps.builtins.ops_mission_control.backend.providers import read_config
 from kiro_crew.apps.builtins.ops_mission_control.backend.providers.base import (
@@ -67,6 +74,7 @@ DEFAULT_STALE_AFTER_SECS = 2 * 60 * 60
 
 _CONFIG_MAX_CLAIMS = "max_claims_per_cycle"
 _CONFIG_STALE_AFTER = "stale_after_secs"
+_CONFIG_NEEDS_HUMAN_STALE_AFTER = "needs_human_stale_after_secs"
 
 #: Total characters of provider evidence rendered into one investigation brief.
 #:
@@ -101,12 +109,18 @@ class ClaimedIncident:
     #: would make ``record_use`` inflate the use count of an entry this incident never
     #: actually used — corrupting the one number that tells a responder how proven a fix is.
     similar: list[LedgerEntry] = field(default_factory=list)
+    #: Entry ids among ``matches`` that matched on the PROVIDER's own identity rather
+    #: than on our shape hash. Kept as ids rather than a flag on the entry because a
+    #: ``LedgerEntry`` is a stored record and "how did we find you this time" is a
+    #: property of this lookup, not of the entry.
+    exact_match_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "incident": self.incident.to_dict(),
             "matches": [m.to_dict() for m in self.matches],
             "similar": [m.to_dict() for m in self.similar],
+            "exact_match_ids": list(self.exact_match_ids),
             "evidence": [
                 {"source": e.source, "kind": e.kind, "title": e.title, "body": e.body}
                 for e in self.evidence
@@ -128,6 +142,22 @@ class CycleResult:
     unclaimed_remaining: int = 0
     errors: dict[str, str] = field(default_factory=dict)
     skipped_reason: str = ""
+    #: Post-action verification verdicts this cycle reached, ``{incident_id: verdict}``.
+    #:
+    #: Only incidents whose recheck came DUE this cycle appear. An empty map is the
+    #: normal case — most cycles have nothing to verify — and is not the same as "every
+    #: action worked".
+    verifications: dict[str, str] = field(default_factory=dict)
+    #: Signals a human already parked at the provider, which this cycle saw and
+    #: deliberately did not claim.
+    #:
+    #: Counted, not just filtered. Without this the suppressed signals vanish from
+    #: ``CycleResult`` entirely — not in ``polled``, not in ``errors``, nowhere — so the
+    #: dashboard's "Polled N firing signal(s); nothing new to claim" line reports a
+    #: SMALLER world than the cycle actually saw, and an operator reading it cannot tell
+    #: a genuinely quiet estate from one where three alarms are parked. That is the same
+    #: looks-deliberate-does-nothing failure the state itself exists to fix.
+    suppressed: int = 0
 
     @property
     def changed(self) -> bool:
@@ -137,8 +167,25 @@ class CycleResult:
         Silence-by-default is a hard requirement, not an optimization: the
         workflow this models stayed usable at ~200 messages/week precisely
         because its heartbeat never spoke unless there was news.
+
+        ``suppressed`` is deliberately NOT part of this. A suppression is the provider
+        reporting that somebody already handled the alarm's disposition — the least
+        newsworthy thing a cycle can find, and announcing it would make the heartbeat
+        speak on exactly the signals an operator asked to stop hearing about.
+
+        ``verifications`` counts only where the verdict is ``still_firing``. That verdict
+        means the app previously reported an action as applied and the alarm is still
+        going — a claim it made that turned out not to be true, which is the single most
+        newsworthy thing this cycle can discover. ``cleared`` is the expected outcome and
+        announcing it would make the heartbeat congratulate itself, and ``unknown`` is
+        "we could not look", which a later cycle retries and which must never be
+        broadcast as a finding.
         """
-        return bool(self.claimed or self.released)
+        return bool(
+            self.claimed
+            or self.released
+            or any(v == VERIFY_STILL_FIRING for v in self.verifications.values())
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -149,6 +196,8 @@ class CycleResult:
             "errors": self.errors,
             "changed": self.changed,
             "skipped_reason": self.skipped_reason,
+            "suppressed": self.suppressed,
+            "verifications": dict(self.verifications),
         }
 
 
@@ -262,13 +311,18 @@ def attach_ledger_matches(incident: Incident) -> ClaimedIncident:
     keeps proving useful climbs the ranking and an entry nobody needs decays out
     during hygiene — the ledger stays a working index rather than an archive.
     """
-    matches = ledger.match(incident.signal.fingerprint)
+    provider_key = incident.signal.provider_key
+    matches = ledger.match(incident.signal.fingerprint, provider_key=provider_key)
+    # Whether the best match was decided by the provider's own identity or by our shape
+    # hash, captured BEFORE record_use binds the key (which would make every match look
+    # exact from the second occurrence onward and erase the distinction).
+    exact_ids = {m.entry_id for m in matches if ledger.is_exact_match(m, provider_key)}
     # Record the use and keep the UPDATED entry: rendering the pre-increment copy
     # would show "used 0×" for a pattern this very incident just used, which
     # misreports the one number that tells a responder how proven a fix is.
     recorded: list[LedgerEntry] = []
     for entry in matches:
-        updated = ledger.record_use(entry.entry_id, incident.signal.fingerprint)
+        updated = ledger.record_use(entry.entry_id, incident.signal.fingerprint, provider_key)
         recorded.append(updated or entry)
     matches = recorded
 
@@ -276,11 +330,194 @@ def attach_ledger_matches(incident: Incident) -> ClaimedIncident:
     if matches:
         store.update_fields(incident.incident_id, ledger_matches=[m.entry_id for m in matches])
         incident.ledger_matches = [m.entry_id for m in matches]
-    return ClaimedIncident(incident=incident, matches=matches, fast_path=fast_path)
+    return ClaimedIncident(
+        incident=incident,
+        matches=matches,
+        fast_path=fast_path,
+        exact_match_ids=sorted(exact_ids),
+    )
+
+
+def verify_pending_actions(
+    signals: list[Signal],
+    health: dict[str, dict[str, Any]],
+    *,
+    now: str | None = None,
+) -> dict[str, str]:
+    """Re-read the world for every incident whose post-action recheck has come due.
+
+    **The gap this closes.** ``routes._handle_action`` awaited ``sink.execute``, audited
+    the call, returned, and stopped. Nothing ever looked again, so ``ActionResult.ok``
+    meant exactly one thing: the provider returned 2xx. That is not the claim the board
+    was making. Checkmk dispatches commands asynchronously through Livestatus and its own
+    docs warn that a 2xx "only indicates whether the request was successfully
+    transmitted, NOT whether it was in fact successfully executed"; Nagios's command pipe
+    returns nothing at all. So the app could report a suppression or a resolve as applied
+    while the alarm kept firing, with no code anywhere in a position to notice.
+
+    **A failed poll is NOT evidence the action worked, and that is the whole risk here.**
+    This function reuses the signals and ``poll_health`` from the poll the cycle already
+    did, and refuses to reach any verdict for a source whose poll did not succeed —
+    exactly the rule ``reconcile.md`` Pass 1 step 3 states for resolving on absence, for
+    exactly the same reason. Reading "absent from firing" as "the fix landed" would be
+    that bug in a new place, and here it would be worse: it would also feed a FALSE
+    success into the ledger's track record, making a fix that never worked look proven.
+    ``unknown`` is therefore recorded and left OPEN, so a later cycle retries it.
+
+    **Only some actions are verifiable, and the rest say so.** An ``ack`` leaves an alert
+    firing by design (``normalize_state`` maps ``acknowledged`` onto ``firing`` on
+    purpose), so firing state carries no information about whether the ack landed —
+    those are marked ``not_checkable`` at execution time in ``routes._handle_action`` and
+    never reach this function.
+
+    Runs on a worker thread (the caller wraps it): it reads the dispatch index and may
+    write both the index and the ledger.
+
+    Returns ``{incident_id: verdict}`` for the incidents it decided this cycle only.
+    """
+    stamp = now or utc_now_iso()
+    firing_ids = {s.id for s in signals if s.state == STATE_FIRING}
+    # Parked signals are tracked separately from both buckets. See the branch below: they
+    # are the one absence that must not be read as recovery, and after a `silence` this app
+    # issued they are what SUCCESS looks like — which made `cleared` a self-congratulation.
+    # Keyed by id and carrying the SIGNAL, not just its id, because the attribution below
+    # has to come from THIS poll. The incident's own `signal` is the snapshot taken when it
+    # was claimed — before anybody parked it — so reading `suppressed_by` off the incident
+    # would reliably produce an empty attribution in exactly the case that needs one.
+    suppressed_now = {s.id: s for s in signals if s.state == STATE_SUPPRESSED}
+    verdicts: dict[str, str] = {}
+
+    for incident in store.read_index().values():
+        if incident.verification not in OPEN_VERIFICATIONS:
+            continue
+        if not incident.verify_after or incident.verify_after > stamp:
+            # Not due yet. String comparison is sound because every timestamp in this app
+            # is the same fixed-width UTC ``%Y-%m-%dT%H:%M:%SZ`` form (``utc_now_iso``).
+            continue
+
+        source_health = health.get(incident.signal.source)
+        if not source_health or not source_health.get("ok"):
+            reason = str((source_health or {}).get("detail") or "it has not been polled")
+            verdict = VERIFY_UNKNOWN
+            detail = (
+                f"Could not verify: the last poll of {incident.signal.source} did not "
+                f"succeed ({reason}), so the signal's absence proves nothing. Will "
+                f"re-check on a later cycle."
+            )
+        elif not source_health.get("snapshot", True) and incident.signal.id not in firing_ids:
+            # A non-snapshot source (the webhook spool) answered, and the signal is absent —
+            # which proves nothing, because `poll` DRAINED the queue. The signal appears in
+            # exactly one cycle's result and is missing from every cycle after it whether or
+            # not anything changed at the sender, so "polled ok and absent" is not the
+            # recovery it is for every polled API.
+            #
+            # This is the same absence-is-not-evidence rule as the failed-poll branch above,
+            # reached through a SUCCESSFUL poll — which is exactly why the `ok` guard could
+            # not catch it, and why one cycle after any webhook delivery an action verified
+            # as `cleared` ("the resolve held") with the fault still live.
+            verdict = VERIFY_UNKNOWN
+            detail = (
+                f"Could not verify: {incident.signal.source} delivers by push and its spool "
+                f"is drained by each poll, so this signal's absence is expected whether or "
+                f"not the {incident.last_action} worked. It can only be confirmed by the "
+                f"sender delivering the signal again, or not."
+            )
+        elif incident.signal.id in suppressed_now:
+            # A signal a human parked at the provider is the THIRD reason it is absent from
+            # `firing`, and reading it as `cleared` was strictly the worst of the three
+            # readings: after a `silence` this app itself issued, "the provider now reports
+            # it suppressed" is exactly what a SUCCESSFUL silence looks like — so the
+            # recheck congratulated the app on hiding a live fault, and `use_count` was the
+            # number that grew. Verified before fixing: silence a firing webhook signal,
+            # re-poll with `state=suppressed`, and the verdict was `cleared` with the detail
+            # "the silence held".
+            #
+            # `unknown` rather than `still_firing`, because the underlying condition is
+            # genuinely unobservable while the alarm is muted — the provider has stopped
+            # evaluating it into a firing state. `unknown` is in OPEN_VERIFICATIONS, so the
+            # recheck retries once the suppression lifts, which is the only moment the
+            # question can actually be answered.
+            verdict = VERIFY_UNKNOWN
+            # From THIS poll, not from the incident's claim-time snapshot — which predates
+            # the parking and would name nobody.
+            parked_by = suppressed_now[incident.signal.id].suppressed_by
+            detail = (
+                f"Could not verify: {incident.signal.source} now reports this signal as "
+                f"parked at the provider"
+                + (f" by {parked_by}" if parked_by else "")
+                + f", so it is not being evaluated into a firing state and its absence "
+                f"says nothing about whether the {incident.last_action} worked. Will "
+                f"re-check once the suppression lifts."
+            )
+        elif incident.signal.id in firing_ids:
+            verdict = VERIFY_STILL_FIRING
+            detail = (
+                f"Still firing at {incident.signal.source} after the {incident.last_action} "
+                f"reported success. The provider accepted the request; the condition did "
+                f"not change."
+            )
+        else:
+            verdict = VERIFY_CLEARED
+            detail = (
+                f"No longer firing at {incident.signal.source}, which polled successfully "
+                f"— the {incident.last_action} held."
+            )
+
+        try:
+            store.update_fields(
+                incident.incident_id,
+                verification=verdict,
+                verification_detail=detail,
+            )
+        except (KeyError, ValueError):
+            # Pruned or raced away between the read and the write. Not an error worth
+            # failing a cycle for, and nothing else in the cycle depends on it.
+            logger.debug(
+                "ops-mission-control: could not record verification for %s",
+                incident.incident_id,
+                exc_info=True,
+            )
+            continue
+        verdicts[incident.incident_id] = verdict
+
+        if verdict == VERIFY_STILL_FIRING:
+            _record_verification_misses(incident)
+
+    return verdicts
+
+
+def _record_verification_misses(incident: Incident) -> None:
+    """Charge a miss to every ledger entry this incident's fix was drawn from.
+
+    This is the ONLY producer of ``miss_count``, and the standard of evidence is
+    deliberately narrow: an action executed, the recheck ran against a source that
+    actually answered, and the signal is still firing. Anything looser — an incident that
+    merely recurred, a poll we could not make — would demote entries on inference, and a
+    knowledge base that demotes on inference is as harmful as one that never demotes.
+
+    Charged to every entry in ``ledger_matches`` rather than to a single "the one we
+    used", because nothing records which match the investigation actually applied
+    (``Incident.proposed_action`` is declared and never assigned). Attributing the miss to
+    a guess would be worse than attributing it to all of them: ``MAX_MATCHES_PER_SIGNAL``
+    is 3, so the blast radius is bounded, and a match that keeps being shown for a failure
+    that keeps coming back has genuinely not earned the fast path either.
+
+    Never raises — a ledger fault must not fail the verification that already got written.
+    """
+    for entry_id in incident.ledger_matches:
+        try:
+            ledger.record_miss(entry_id)
+        except OSError:
+            logger.exception(
+                "ops-mission-control: could not record a ledger miss for %s", entry_id
+            )
 
 
 async def run_cycle(
-    *, max_claims: int | None = None, slack_client: Any | None = None
+    *,
+    max_claims: int | None = None,
+    slack_client: Any | None = None,
+    state: Any | None = None,
 ) -> CycleResult:
     """Run one dispatch cycle.
 
@@ -290,6 +527,10 @@ async def run_cycle(
     ``slack_client`` is the gateway's live Slack client, passed in by the caller
     (KiroCrew has no global state accessor). None simply means the pin board is
     not mirrored this cycle.
+
+    ``state`` is the gateway's ``DashboardState``, threaded in for the same reason and
+    used only for the local notification bus (``notify_out``). None means no desktop
+    notification this cycle, which is what every non-gateway caller gets.
     """
     registry = get_registry()
 
@@ -315,8 +556,19 @@ async def run_cycle(
             )
         )
 
+    # Snapshot health BEFORE the poll so the notification below can fire on the EDGE.
+    # Without the before-picture the only available test is "is it failing now", which
+    # is true on every one of the 30 heartbeats an hour-long outage spans — the
+    # "unchanged condition" SKILL.md forbids re-notifying for.
+    health_before = registry.poll_health()
+
     signals, errors = await registry.poll_all()
     firing = [s for s in signals if s.state == STATE_FIRING]
+    # Counted here, and that is the ONLY thing done with it. The claim filter above is
+    # unchanged on purpose: "a suppressed signal must not be claimed" holds by
+    # construction because a new state simply is not `firing`, so there is no second
+    # predicate for a future edit to forget.
+    suppressed = sum(1 for s in signals if s.state == STATE_SUPPRESSED)
 
     index = store.read_index()
     # A signal is "owned" only by an OPEN incident. A closed one (resolved/escalated) must
@@ -360,8 +612,23 @@ async def run_cycle(
             await asyncio.to_thread(_attach_similar_safely, result)
             claimed.append(result)
 
+    # Post-action verification rides on the poll this cycle ALREADY made — no extra
+    # provider call, which is what keeps "re-read the signal after acting" inside the
+    # heartbeat's flat cost instead of needing a cron of its own. It reads the FULL signal
+    # list rather than `firing`, because a source that returned a signal in any other
+    # state still answered, and it consults the same `poll_health` that decides whether
+    # absence means anything at all.
+    verifications = await asyncio.to_thread(
+        verify_pending_actions, signals, registry.poll_health()
+    )
+
+    stale_after = _config_int(_CONFIG_STALE_AFTER, DEFAULT_STALE_AFTER_SECS)
     released = await asyncio.to_thread(
-        store.sweep_stale, _config_int(_CONFIG_STALE_AFTER, DEFAULT_STALE_AFTER_SECS)
+        store.sweep_stale,
+        stale_after,
+        # 0 / unset means "derive from the working threshold", which is what
+        # ``sweep_stale`` does for ``None``.
+        _config_int(_CONFIG_NEEDS_HUMAN_STALE_AFTER, 0) or None,
     )
 
     # Mirror newly-claimed incidents onto the Slack pin board. After the claim, so
@@ -369,6 +636,13 @@ async def run_cycle(
     # tolerant internally.
     if claimed:
         await slack_out.publish_all([c.incident for c in claimed], slack_client)
+
+    # Desktop notifications for the two things this cycle can discover that nobody is
+    # otherwise told about. Deliberately NOT one per claim: a claim is the heartbeat
+    # working, it already shows on the board and in Slack, and notifying it would make
+    # this channel the heartbeat feed the design refuses. After the claim and the Slack
+    # mirror, so a bus fault can cost neither.
+    _notify_cycle_changes(state, health_before, registry.poll_health(), released)
 
     if claimed or released:
         sel().log_api_access(
@@ -386,7 +660,49 @@ async def run_cycle(
         polled=len(firing),
         unclaimed_remaining=max(0, len(candidates) - len(claimed)),
         errors=errors,
+        suppressed=suppressed,
+        verifications=verifications,
     )
+
+
+def _notify_cycle_changes(
+    state: Any | None,
+    health_before: dict[str, dict[str, Any]],
+    health_after: dict[str, dict[str, Any]],
+    released: list[str],
+) -> None:
+    """Push a desktop notification for each STATE CHANGE this cycle produced.
+
+    Two conditions, both edge-triggered:
+
+    - a source that answered (or had never been polled) and now does not. A source
+      that was ALREADY failing pushes nothing: that is the unchanged condition
+      ``SKILL.md``'s noise discipline forbids re-notifying for, and at a 120-second
+      heartbeat an hour of downtime would otherwise be 30 identical toasts.
+    - each incident ``sweep_stale`` released. Release is a one-shot event, so there is
+      no edge to compute.
+
+    A source that has never been polled counts as "was ok" on purpose: its FIRST
+    failure is news (the operator just configured it and it does not work), and
+    treating unknown as already-failing would swallow exactly that notification.
+
+    Never raises — the cycle's result must not depend on the notification centre.
+    """
+    if state is None:
+        return
+    try:
+        for source_id, entry in health_after.items():
+            if entry.get("ok"):
+                continue
+            if health_before.get(source_id, {}).get("ok") is False:
+                continue
+            notify_out.notify_source_unhealthy(
+                state, source_id, str(entry.get("detail") or "the last poll failed")
+            )
+        if released:
+            notify_out.notify_incidents_released(state, list(released))
+    except Exception:  # noqa: BLE001 — notifying is not the work
+        logger.exception("ops-mission-control: cycle notifications failed")
 
 
 async def gather_evidence_safely(registry: Any, signal: Signal) -> list[Evidence]:
@@ -464,20 +780,45 @@ def investigation_brief(claimed: ClaimedIncident) -> str:
     else:
         if claimed.fast_path:
             lines.append(
-                "KNOWN PATTERN (verified, high confidence) — confirm it still "
-                "applies, then propose this fix rather than re-deriving it:"
+                "KNOWN PATTERN (verified, high confidence, and it has worked before) — "
+                "confirm it still applies, then propose this fix rather than "
+                "re-deriving it:"
             )
         else:
             lines.append(
                 "Possible prior patterns — treat these as hypotheses to test, not "
-                "answers (none is both verified and high-confidence):"
+                "answers (none has cleared the fast-path bar: verified, high "
+                "confidence, used at least "
+                f"{ledger.MIN_USES_FOR_FAST_PATH}×, and never observed to fail):"
             )
+        exact = set(claimed.exact_match_ids)
         for entry in claimed.matches:
+            # Say HOW this matched. An exact hit is the provider's own identity for the
+            # failure; a shape hit is our text heuristic, which strips bare numbers and
+            # therefore cannot distinguish a 4xx alarm from a 5xx one on the same
+            # resource. An agent told only "matched" cannot weigh those differently.
+            how = (
+                "exact provider identity"
+                if entry.entry_id in exact
+                else "same shape (heuristic — verify it is really this failure)"
+            )
             lines.append(
-                f"  • [{entry.confidence}/{entry.trust}, used {entry.use_count}×] "
-                f"{entry.pattern}"
+                f"  • [{entry.confidence}/{entry.trust}, used {entry.use_count}×, "
+                f"{how}] {entry.pattern}"
             )
             lines.append(f"      fix: {entry.fix}")
+            if ledger.is_demoted(entry):
+                # Stated on its own line, in the imperative, because the ranked list
+                # itself reads as an endorsement. This entry has been cited and the same
+                # failure came back — an agent handed only "used 4×" would read the count
+                # as corroboration when part of it is the record of this fix not holding.
+                lines.append(
+                    f"      WARNING: this fix was applied and the signal was still "
+                    f"firing afterwards {entry.miss_count}× (most recently "
+                    f"{entry.last_miss or 'unknown'}). Do not propose it without "
+                    f"establishing why it failed, or say plainly that you are retrying "
+                    f"something that has already failed."
+                )
 
     if claimed.similar:
         # Framed as leads, NOT patterns. These reached the brief by semantic similarity,

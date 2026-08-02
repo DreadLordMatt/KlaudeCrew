@@ -159,6 +159,78 @@ class TestCycleSilence(_HomeIsolated):
         self.assertEqual(result.polled, 0)
 
 
+class TestSuppressedSignalsAreNeverClaimed(_HomeIsolated):
+    """Investigating something an operator explicitly parked destroys trust fastest.
+
+    The claim rule is a single filter on ``state == firing``, so this holds by
+    construction — which is precisely why it needs a test: the property is invisible in the
+    code (there is nothing that says "suppressed"), so a later refactor that widened the
+    filter to "not ok" would look harmless and would silently start investigating parked
+    alarms.
+    """
+
+    async def test_a_parked_signal_is_not_claimed(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import STATE_SUPPRESSED
+
+        self._add_source([self._signal(state=STATE_SUPPRESSED)])
+        result = await dispatch.run_cycle()
+        self.assertEqual(result.claimed, [])
+        self.assertEqual(result.unclaimed_remaining, 0)
+
+    async def test_a_parked_signal_is_counted_not_silently_dropped(self):
+        """Otherwise the cycle reports a smaller world than it saw.
+
+        `polled` counts firing signals only, so without this count a cycle facing three
+        parked alarms reports "Polled 0 firing signal(s)" — indistinguishable from a
+        genuinely quiet estate, which is the looks-deliberate-does-nothing failure the
+        state itself exists to fix.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import STATE_SUPPRESSED
+
+        self._add_source(
+            [self._signal(native_id=f"a{n}", state=STATE_SUPPRESSED) for n in range(3)]
+        )
+        result = await dispatch.run_cycle()
+        self.assertEqual(result.suppressed, 3)
+        self.assertEqual(result.polled, 0)
+        self.assertEqual(result.to_dict()["suppressed"], 3)
+
+    async def test_a_parked_signal_does_not_break_silence(self):
+        """A suppression is not news, and the heartbeat must not speak on it.
+
+        Someone silenced the alarm to stop hearing about it; announcing it would be the app
+        re-notifying on exactly the signals an operator asked to mute.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import STATE_SUPPRESSED
+
+        self._add_source([self._signal(state=STATE_SUPPRESSED)])
+        result = await dispatch.run_cycle()
+        self.assertFalse(result.changed)
+
+    async def test_firing_work_beside_a_parked_signal_is_still_claimed(self):
+        """The filter must exclude the parked one only — not shrink the cycle."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            STATE_FIRING,
+            STATE_SUPPRESSED,
+        )
+
+        self._add_source(
+            [
+                self._signal(native_id="parked", title="parked one", state=STATE_SUPPRESSED),
+                self._signal(native_id="live", title="live one", state=STATE_FIRING),
+            ]
+        )
+        result = await dispatch.run_cycle()
+        self.assertEqual(len(result.claimed), 1)
+        self.assertEqual(result.claimed[0].incident.signal.title, "live one")
+        self.assertEqual(result.polled, 1)
+        self.assertEqual(result.suppressed, 1)
+
+
 class TestClaimCap(_HomeIsolated):
     async def test_storm_is_capped_not_dropped(self):
         """A 50-alarm storm claims the cap now and the rest on later cycles."""
@@ -192,7 +264,15 @@ class TestClaimCap(_HomeIsolated):
 class TestLedgerWiring(_HomeIsolated):
     """The point of the whole app: a repeat failure arrives with its answer."""
 
-    def _seed_verified_pattern(self, fingerprint):
+    def _seed_verified_pattern(self, fingerprint, *, prior_uses=None):
+        """Seed a verified/high entry that has ALREADY earned the fast path.
+
+        ``prior_uses`` defaults to ``MIN_USES_FOR_FAST_PATH - 1`` because the claim under
+        test contributes the last one itself: ``attach_ledger_matches`` calls
+        ``record_use`` before ``is_fast_path``. Written as arithmetic over the constant
+        rather than a literal so raising the floor does not silently turn every fast-path
+        test in this class into a test of the floor instead.
+        """
         from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
         from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
             CONFIDENCE_HIGH,
@@ -200,7 +280,7 @@ class TestLedgerWiring(_HomeIsolated):
             LedgerEntry,
         )
 
-        return ledger.upsert(
+        entry = ledger.upsert(
             LedgerEntry.create(
                 pattern="DLQ fills with duplicate-PK rows",
                 fix="Clear the DLQ and redrive",
@@ -209,6 +289,10 @@ class TestLedgerWiring(_HomeIsolated):
                 trust=TRUST_VERIFIED,
             )
         )
+        uses = ledger.MIN_USES_FOR_FAST_PATH - 1 if prior_uses is None else prior_uses
+        for _ in range(uses):
+            ledger.record_use(entry.entry_id)
+        return entry
 
     async def test_matching_pattern_is_attached_and_persisted(self):
         from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, store
@@ -262,11 +346,48 @@ class TestLedgerWiring(_HomeIsolated):
         from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, ledger
 
         signal = self._signal()
-        self._seed_verified_pattern(signal.fingerprint)
+        self._seed_verified_pattern(signal.fingerprint, prior_uses=0)
         self._add_source([signal])
         claimed = (await dispatch.run_cycle()).claimed[0]
         self.assertEqual(claimed.matches[0].use_count, 1)
         self.assertEqual(ledger.read_entries()[0].use_count, 1)
+
+    async def test_a_verified_entry_matching_for_the_first_time_is_not_the_fast_path(self):
+        """A brand-new entry must not unlock "propose this fix directly" on sight.
+
+        `POST /ledger` takes `confidence` and `trust` verbatim, so one hand-authored
+        entry could arrive as verified/high and be proposed for a production failure
+        having never been applied to anything. Worse after the exact-identity layer:
+        `record_use` binds the provider key on that first match, so from occurrence two
+        onward the same single piece of evidence presents as an EXACT match — a strictly
+        stronger-looking claim with nothing new behind it.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch
+
+        signal = self._signal()
+        self._seed_verified_pattern(signal.fingerprint, prior_uses=0)
+        self._add_source([signal])
+        claimed = (await dispatch.run_cycle()).claimed[0]
+        # Matched, and the fix is still carried — this is a demotion to "hypothesis",
+        # not a withholding.
+        self.assertEqual(len(claimed.matches), 1)
+        self.assertFalse(claimed.fast_path)
+        self.assertIn("Clear the DLQ and redrive", dispatch.investigation_brief(claimed))
+
+    async def test_an_entry_whose_fix_failed_loses_the_fast_path(self):
+        """The mechanical downward path, end to end at the outermost caller."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, ledger
+
+        signal = self._signal()
+        entry = self._seed_verified_pattern(signal.fingerprint)
+        ledger.record_miss(entry.entry_id)
+        self._add_source([signal])
+        claimed = (await dispatch.run_cycle()).claimed[0]
+        self.assertFalse(claimed.fast_path)
+        # And the agent is TOLD, not merely denied the fast path — a ranked list reads
+        # as an endorsement, so silence here would leave "used 2×" looking like
+        # corroboration when part of that count is the record of the fix not holding.
+        self.assertIn("STILL FIRING", dispatch.investigation_brief(claimed).upper())
 
     async def test_recurrence_of_the_same_failure_matches_its_ancestor(self):
         """Different numbers and timestamps, same pattern — the whole premise."""
@@ -528,7 +649,7 @@ class TestBrief(_HomeIsolated):
         )
 
         signal = self._signal()
-        ledger.upsert(
+        entry = ledger.upsert(
             LedgerEntry.create(
                 pattern="p",
                 fix="f",
@@ -537,6 +658,10 @@ class TestBrief(_HomeIsolated):
                 trust=TRUST_VERIFIED,
             )
         )
+        # Verified and high is no longer sufficient on its own: the entry needs a track
+        # record too. The claim under test supplies the last use itself.
+        for _ in range(ledger.MIN_USES_FOR_FAST_PATH - 1):
+            ledger.record_use(entry.entry_id)
         self._add_source([signal])
         claimed = (await dispatch.run_cycle()).claimed[0]
         self.assertIn("KNOWN PATTERN", dispatch.investigation_brief(claimed))
@@ -637,6 +762,290 @@ class TestProviderErrorsSurface(_HomeIsolated):
         # The healthy source still produced a claim.
         self.assertEqual(len(result.claimed), 1)
         self.assertIn("broken", result.errors)
+
+
+class TestPostActionVerification(_HomeIsolated):
+    """An action's success is re-read, and a failed poll is never read as success.
+
+    Before this, `_handle_action` awaited `sink.execute`, audited, and stopped — so
+    `ActionResult.ok` meant only "the provider returned 2xx". Checkmk dispatches commands
+    asynchronously and documents that a 2xx says nothing about execution; Nagios's command
+    pipe returns nothing at all. The board could therefore report an applied fix with no
+    code anywhere in a position to notice it had not landed.
+    """
+
+    def _acted_incident(self, signal, *, action="silence", due="2020-01-01T00:00:00Z"):
+        """Claim `signal` and stamp it as though an action had just been executed."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import store
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            MODE_ACT,
+            VERIFY_PENDING,
+        )
+
+        incident = store.claim(signal, operating_mode=MODE_ACT)
+        assert incident is not None
+        return store.update_fields(
+            incident.incident_id,
+            last_action=action,
+            last_action_at="2020-01-01T00:00:00Z",
+            verify_after=due,
+            verification=VERIFY_PENDING,
+        )
+
+    async def test_a_signal_still_firing_after_an_action_is_reported_as_such(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, store
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            VERIFY_STILL_FIRING,
+        )
+
+        signal = self._signal()
+        incident = self._acted_incident(signal)
+        self._add_source([signal])
+        result = await dispatch.run_cycle()
+        self.assertEqual(result.verifications[incident.incident_id], VERIFY_STILL_FIRING)
+        stored = store.get_incident(incident.incident_id)
+        assert stored is not None
+        self.assertEqual(stored.verification, VERIFY_STILL_FIRING)
+        self.assertIn("Still firing", stored.verification_detail)
+
+    async def test_a_signal_gone_from_a_healthy_poll_confirms_the_action(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, store
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import VERIFY_CLEARED
+
+        signal = self._signal()
+        incident = self._acted_incident(signal)
+        # The source answers, and this signal is not among what it returned.
+        self._add_source([self._signal(native_id="alarm/other")])
+        result = await dispatch.run_cycle()
+        self.assertEqual(result.verifications[incident.incident_id], VERIFY_CLEARED)
+        stored = store.get_incident(incident.incident_id)
+        assert stored is not None
+        self.assertEqual(stored.verification, VERIFY_CLEARED)
+
+    async def test_a_failed_poll_is_never_read_as_the_action_having_worked(self):
+        """The bug class §5.10 explicitly says not to reintroduce.
+
+        Absence from a source that returned 429, timed out, or is backing off is not
+        evidence of anything — and here reading it as success would ALSO feed a false
+        positive into the ledger's track record, making a fix that never worked look
+        proven. `unknown` is recorded and left OPEN so a later cycle retries.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, store
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            OPEN_VERIFICATIONS,
+            VERIFY_UNKNOWN,
+        )
+
+        signal = self._signal()
+        incident = self._acted_incident(signal)
+
+        class _Broken:
+            id = "fake"  # the SAME source id the signal names
+            display_name = "Fake"
+
+            def configured(self):
+                return True
+
+            async def poll(self):
+                raise RuntimeError("429 Too Many Requests")
+
+        self.registry.register_signal_source(_Broken())
+        result = await dispatch.run_cycle()
+        self.assertEqual(result.verifications[incident.incident_id], VERIFY_UNKNOWN)
+        stored = store.get_incident(incident.incident_id)
+        assert stored is not None
+        self.assertIn(stored.verification, OPEN_VERIFICATIONS)
+        self.assertIn("429", stored.verification_detail)
+
+    async def test_a_recheck_that_is_not_due_yet_reaches_no_verdict(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, store
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import VERIFY_PENDING
+
+        signal = self._signal()
+        incident = self._acted_incident(signal, due="2099-01-01T00:00:00Z")
+        self._add_source([signal])
+        result = await dispatch.run_cycle()
+        self.assertEqual(result.verifications, {})
+        stored = store.get_incident(incident.incident_id)
+        assert stored is not None
+        self.assertEqual(stored.verification, VERIFY_PENDING)
+
+    async def test_a_still_firing_verdict_charges_a_miss_to_every_matched_entry(self):
+        """The §5.10 → §5.9 join: verification is what makes use_count mean "worked"."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, ledger, store
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import LedgerEntry
+
+        signal = self._signal()
+        entry = ledger.upsert(
+            LedgerEntry.create(pattern="p", fix="f", fingerprints=[signal.fingerprint])
+        )
+        incident = self._acted_incident(signal)
+        store.update_fields(incident.incident_id, ledger_matches=[entry.entry_id])
+        self._add_source([signal])
+        await dispatch.run_cycle()
+        self.assertEqual(ledger.read_entries()[0].miss_count, 1)
+
+    async def test_a_cleared_verdict_charges_no_miss(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, ledger, store
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import LedgerEntry
+
+        signal = self._signal()
+        entry = ledger.upsert(
+            LedgerEntry.create(pattern="p", fix="f", fingerprints=[signal.fingerprint])
+        )
+        incident = self._acted_incident(signal)
+        store.update_fields(incident.incident_id, ledger_matches=[entry.entry_id])
+        self._add_source([self._signal(native_id="alarm/other")])
+        await dispatch.run_cycle()
+        self.assertEqual(ledger.read_entries()[0].miss_count, 0)
+
+    async def test_an_unverified_poll_charges_no_miss(self):
+        """`unknown` must not demote anything — it is a statement about us, not the fix."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, ledger, store
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import LedgerEntry
+
+        signal = self._signal()
+        entry = ledger.upsert(
+            LedgerEntry.create(pattern="p", fix="f", fingerprints=[signal.fingerprint])
+        )
+        incident = self._acted_incident(signal)
+        store.update_fields(incident.incident_id, ledger_matches=[entry.entry_id])
+
+        class _Broken:
+            id = "fake"
+            display_name = "Fake"
+
+            def configured(self):
+                return True
+
+            async def poll(self):
+                raise RuntimeError("provider down")
+
+        self.registry.register_signal_source(_Broken())
+        await dispatch.run_cycle()
+        self.assertEqual(ledger.read_entries()[0].miss_count, 0)
+
+    async def test_a_cleared_verification_is_not_news_but_a_still_firing_one_is(self):
+        """`changed` gates the cron's silence, so what counts as news is load-bearing.
+
+        A confirmed action is the expected outcome and announcing it would make the
+        heartbeat congratulate itself. A still-firing one means the app previously
+        reported something as applied that was not — the most newsworthy thing a cycle
+        can find.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend.dispatch import CycleResult
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            VERIFY_CLEARED,
+            VERIFY_STILL_FIRING,
+            VERIFY_UNKNOWN,
+        )
+
+        self.assertFalse(CycleResult(verifications={"INV-1": VERIFY_CLEARED}).changed)
+        self.assertFalse(CycleResult(verifications={"INV-1": VERIFY_UNKNOWN}).changed)
+        self.assertTrue(CycleResult(verifications={"INV-1": VERIFY_STILL_FIRING}).changed)
+
+    async def test_an_incident_with_no_action_is_never_verified(self):
+        """Every incident on disk before this feature reads as "" — not as verified fine."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, store
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import MODE_OBSERVE
+
+        signal = self._signal()
+        incident = store.claim(signal, operating_mode=MODE_OBSERVE)
+        assert incident is not None
+        self._add_source([signal])
+        result = await dispatch.run_cycle()
+        self.assertEqual(result.verifications, {})
+        stored = store.get_incident(incident.incident_id)
+        assert stored is not None
+        self.assertEqual(stored.verification, "")
+
+    async def test_a_signal_parked_at_the_provider_does_not_confirm_the_action(self):
+        """A suppression is the THIRD reason a signal is absent, and the worst to misread.
+
+        After a `silence` this app itself issued, "the provider now reports it suppressed"
+        is precisely what SUCCESS looks like — so reading it as `cleared` made the recheck
+        congratulate the app for muting a live fault, and charged nothing to the ledger
+        while `use_count` grew. `unknown` instead, and OPEN, because the condition is
+        genuinely unobservable while the alarm is muted: the recheck can only be answered
+        once the suppression lifts.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, store
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            OPEN_VERIFICATIONS,
+            STATE_SUPPRESSED,
+            VERIFY_UNKNOWN,
+        )
+
+        signal = self._signal()
+        incident = self._acted_incident(signal, action="silence")
+        # The SAME signal id, now reported parked rather than firing.
+        parked = self._signal(state=STATE_SUPPRESSED, suppressed_by="silence-abc")
+        self.assertEqual(parked.id, signal.id)
+        self._add_source([parked])
+        result = await dispatch.run_cycle()
+        self.assertEqual(result.verifications[incident.incident_id], VERIFY_UNKNOWN)
+        stored = store.get_incident(incident.incident_id)
+        assert stored is not None
+        self.assertIn(stored.verification, OPEN_VERIFICATIONS)
+        self.assertIn("parked", stored.verification_detail)
+        # Attribution named, so the operator does not have to hunt for who muted it.
+        self.assertIn("silence-abc", stored.verification_detail)
+
+    async def test_a_drained_push_spool_does_not_confirm_the_action(self):
+        """Absence from a SUCCESSFUL poll is not always evidence — the `ok` guard's blind spot.
+
+        The webhook source is a spool: `poll` drains it, so a delivered signal appears in
+        exactly one cycle's result and is absent from every cycle after, whether or not
+        anything changed at the sender. `poll_health` recorded that empty drain as
+        `{"ok": True, "signals": 0}`, which the recheck read as "the source answered and
+        the signal is gone" — so one cycle after any webhook delivery an action verified as
+        `cleared` with the fault still live at the sender.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, store
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            OPEN_VERIFICATIONS,
+            VERIFY_UNKNOWN,
+        )
+
+        signal = self._signal()
+        incident = self._acted_incident(signal, action="resolve")
+
+        class _Spool:
+            id = "fake"  # the SAME source id the signal names
+            display_name = "Spool"
+            # The one property that separates this from every polled API.
+            is_snapshot = False
+
+            def configured(self):
+                return True
+
+            async def poll(self):
+                return []  # drained
+
+        self.registry.register_signal_source(_Spool())
+        result = await dispatch.run_cycle()
+        self.assertEqual(result.verifications[incident.incident_id], VERIFY_UNKNOWN)
+        stored = store.get_incident(incident.incident_id)
+        assert stored is not None
+        self.assertIn(stored.verification, OPEN_VERIFICATIONS)
+        self.assertIn("push", stored.verification_detail)
+
+    async def test_a_snapshot_source_still_confirms_on_absence(self):
+        """The fix above must not make every source unverifiable.
+
+        `is_snapshot` defaults TRUE precisely so a companion adapter written before it
+        existed keeps its previous, correct behaviour — only a source that genuinely
+        drains a queue opts out.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import VERIFY_CLEARED
+
+        signal = self._signal()
+        incident = self._acted_incident(signal, action="resolve")
+        # A plain fake declaring nothing — the default-true path.
+        self._add_source([self._signal(native_id="alarm/other")])
+        result = await dispatch.run_cycle()
+        self.assertEqual(result.verifications[incident.incident_id], VERIFY_CLEARED)
 
 
 if __name__ == "__main__":

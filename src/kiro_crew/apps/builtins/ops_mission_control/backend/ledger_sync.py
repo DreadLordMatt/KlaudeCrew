@@ -29,9 +29,16 @@ buys is that the conflicted file is *reconcilable* — `ledger.read_entries` ski
 mid-merge, and `resolve_conflict` finishes the job by rewriting the file from the
 already-reconciled entries.
 
-**Pull before you match, push after you learn.** Ordering matters: pulling before a
-ledger match is what makes a teammate's lesson available to this investigation, and
-pushing after recording one is what makes yours available to theirs.
+**Pull before you match, push after you learn** — the INTENDED ordering, and stated here as
+intent because the wiring does not yet deliver it. Pulling before a ledger match is what
+makes a teammate's lesson available to this investigation, and pushing after recording one is
+what makes yours available to theirs.
+
+What actually runs is coarser: the only caller of this transport is the daily
+``POST /ledger/hygiene`` pass on the ``primary`` tier, so exchange happens once a day on one
+box rather than around each match. Recorded here rather than left as an aspiration a reader
+would mistake for a description — see ``sync_safely`` for what the gap costs, which is more
+than latency because ``rotation.yaml`` rides the same repo.
 
 See ``docs/system-specs/modules/ops-mission-control.md`` § Ledger sync.
 """
@@ -40,6 +47,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +67,30 @@ _REMOTE_KEY = "ledger_sync_remote"
 _BRANCH_KEY = "ledger_sync_branch"
 
 DEFAULT_BRANCH = "main"
+
+#: Branch names we will hand to ``git``, mirroring ``routes._SAFE_BRANCH_RE``.
+#:
+#: Duplicated rather than imported, deliberately: ``routes`` is the HTTP door, and it is
+#: not the only door. ``set_settings`` is a plain function the tests (and any in-process
+#: caller) invoke directly, and ``data/config.json`` is a hand-editable file. So the
+#: API-layer check cannot be the only validation before a value reaches a ``git`` argv.
+#: Importing ``routes`` from here would also invert the dependency — the transport must
+#: not know about the web layer.
+#:
+#: The hazard is concrete, not theoretical: ``git init -b '-x'`` cheerfully creates
+#: ``refs/heads/-x``, and ``git symbolic-ref HEAD refs/heads/--upload-pack=evil`` succeeds
+#: with no validation at all. ``git branch -m --`` does refuse those, which is why the
+#: alignment path below uses it — but ``branch()`` also feeds fetch/merge/push refspecs,
+#: where an option-like value is a worse surprise than a clear fallback.
+_SAFE_BRANCH_RE = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._/-]{0,98}")
+
+#: Why the local HEAD is not on the configured branch, when that could not be fixed.
+#: Module-level rather than threaded through ``_ensure_repo``'s ``(bool, str)`` return,
+#: because a refusal to align must NOT read as "the repo is unusable" — pull and push
+#: still work through their explicit refspecs, exactly as they did before this alignment
+#: existed. ``status()`` reads it so the operator hears about it without pull/push
+#: changing behaviour.
+_align_refusal: str = ""
 
 #: Wall-clock cap per git invocation. A hung fetch against an unreachable remote must
 #: not stall the dispatch heartbeat, which is the caller.
@@ -80,7 +112,52 @@ def remote() -> str:
 
 
 def branch() -> str:
-    return str(read_config().get(_BRANCH_KEY, "")).strip() or DEFAULT_BRANCH
+    """The configured branch, or ``main``. Never returns something git could misread.
+
+    Falls back rather than raising: this is called on the ``/state`` hot path and from
+    inside git argv construction, and a hard failure there would take out the whole card
+    over a typo in a hand-edited config file. The fallback is logged at WARNING because
+    silently syncing a branch the operator did not name is its own kind of lie.
+    """
+    configured_name = str(read_config().get(_BRANCH_KEY, "")).strip()
+    if not configured_name:
+        return DEFAULT_BRANCH
+    if not _SAFE_BRANCH_RE.fullmatch(configured_name):
+        logger.warning(
+            "ops-mission-control: %s=%r is not a usable git ref (letters, digits and "
+            "._/- only, not starting with '-'); syncing %s instead",
+            _BRANCH_KEY,
+            configured_name[:120],
+            DEFAULT_BRANCH,
+        )
+        return DEFAULT_BRANCH
+    return configured_name
+
+
+def _head_branch() -> str:
+    """The branch ``.git/HEAD`` actually points at, or "" when there is not one.
+
+    Returns "" for a detached HEAD (the file holds a bare sha), for a repo that has not
+    been initialized, and for any read failure — including a ``.git`` FILE rather than a
+    directory, which is a worktree/submodule gitdir pointer.
+
+    A FILE READ, not a ``git`` spawn, and that is the load-bearing choice: ``status()`` is
+    synchronous and sits inline on ``/state``, the dashboard's hot poll. ``.git/HEAD`` is a
+    single line git rewrites atomically, so reading it costs nothing and cannot block.
+
+    Never raises. ``routes._ledger_sync_status`` catches any throw from ``status()``,
+    logs ``.exception`` and falls back to a blank card — so a raising probe would both spam
+    the gateway log on every poll and HIDE the very state it exists to report.
+    """
+    try:
+        line = (_repo_root() / ".git" / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not line.startswith("ref:"):
+        return ""  # a bare sha — detached HEAD
+    ref = line[4:].strip()
+    prefix = "refs/heads/"
+    return ref[len(prefix) :] if ref.startswith(prefix) else ""
 
 
 def status() -> dict[str, Any]:
@@ -88,27 +165,121 @@ def status() -> dict[str, Any]:
 
     Distinguishes the failure modes because they need different fixes: off (flip the
     toggle), no remote (enter one), and no git repo yet (it gets created on first sync).
+
+    CONFLICT STATE WAS MISSING, AND IT WAS THE ONE STATE THAT LIES. ``push`` REFUSES
+    outright while ``rotation.yaml`` holds conflict markers (see the guard below), but it
+    said so only to the log and to a SEL audit line: ``sync_safely`` swallows the refusal
+    into a ``logger.warning``, and the daily hygiene handler drops it into a response
+    nobody reads. Meanwhile this function reported "Syncing …" — so an operator whose
+    schedule conflicted watched a card claim sync was working while every single push was
+    refused. The cost is not cosmetic: nothing new reaches the team's ledger, and the
+    schedule that gates who picks up work stays unparseable for everyone who pulls it.
+    Both detectors already exist, are cheap file reads, and never raise, so there was no
+    reason for this to be invisible.
+
+    "SYNCING ON BRANCH <b>" WAS A SECOND OVERSTATED CLAIM, and it was true nowhere.
+    ``git init`` was run with no ``-b``, so git picked its own default (``master``) and
+    nothing ever moved HEAD onto the configured branch — ``branch()`` was used ONLY inside
+    fetch/merge/push refspecs. Found by inspecting the author's live install: config said
+    ``main``, ``.git/HEAD`` said ``master``, and there was no ``[branch]`` section at all.
+    Sync worked, by accident of those explicit refspecs, while this card named a ref the
+    local repo was not on. The cost landed on the operator: with no upstream, the two
+    obvious recovery commands both fail outright (``git pull`` → "no tracking information
+    for the current branch"; ``git push`` → "the current branch master has no upstream
+    branch") — and a conflicted ``rotation.yaml``, which the push guard above REFUSES, is
+    exactly the case that has to be fixed by hand in that directory.
+
+    ``local_branch`` / ``branch_matches`` / ``detached`` exist so the card can tell the
+    operator which of those it is. ``initialized`` deliberately stays gated on
+    ``.is_dir()``, so a ``.git`` FILE (a worktree or submodule gitdir pointer) reads as
+    uninitialized exactly as it did before.
     """
     cfg = read_config()
     enabled = bool(cfg.get(_ENABLED_KEY))
     url = str(cfg.get(_REMOTE_KEY, "")).strip()
     initialized = (_repo_root() / ".git").is_dir()
+    ledger_conflict = has_conflict()
+    schedule_conflict = schedule_has_conflict()
+    wanted_branch = branch()
+    local_branch = _head_branch() if initialized else ""
+    detached = initialized and not local_branch
+    # An uninitialized repo has nothing to disagree with, so it MATCHES. Reporting a
+    # mismatch there would put a warning on the ordinary pre-first-sync state and train the
+    # operator to ignore the one field that means something.
+    branch_matches = (not initialized) or local_branch == wanted_branch
     if not enabled:
         detail = "Off. Turn on to share the knowledge ledger with your team over git."
     elif not url:
         detail = "No remote set — enter a git URL (SSH or HTTPS) your team can push to."
+    elif schedule_conflict:
+        # Named as a refusal rather than as a warning because that is literally what the
+        # push path does. Anything softer would leave the operator waiting for a sync that
+        # is never going to happen.
+        detail = (
+            f"{_SCHEDULE_FILENAME} holds git conflict markers, so every push is refused "
+            "until it is resolved by hand — nothing new is reaching your team."
+        )
+    elif ledger_conflict:
+        # Reconcilable, not fatal: entries are content-addressed, ``read_entries`` skips
+        # markers, and the next push rewrites the file from the reconciled union. Said out
+        # loud anyway so a conflict an operator can see in git is not a mystery here.
+        #
+        # ``_where`` rather than a hardcoded "on branch <b>": this branch OUTRANKS the
+        # branch-mismatch branch below, so if the sentence claimed the local repo was on the
+        # configured branch, a conflicted ledger would hide the mismatch entirely.
+        detail = (
+            "The ledger holds git conflict markers. Entries are still readable and the "
+            f"next sync reconciles them; {_where(url, wanted_branch, branch_matches)}."
+        )
     elif not initialized:
         detail = f"Ready. The repo is created on the first sync ({url})."
+    elif detached:
+        # Reported, never repaired. A detached HEAD here means a merge or rebase went
+        # sideways, and moving refs out from under one can lose the operator's in-progress
+        # work — so alignment refuses too (``git branch -m`` refuses outright anyway).
+        detail = (
+            f"Publishing to {url} on branch {wanted_branch}, but this repo's HEAD is "
+            "detached — no local branch is checked out, so git commands you run here have "
+            f"no upstream. Finish or abort the merge or rebase, then switch to "
+            f"{wanted_branch}. Left alone on purpose: moving refs under a detached HEAD "
+            "can lose work in progress."
+        )
+    elif not branch_matches:
+        detail = (
+            f"Publishing to {url} on branch {wanted_branch} through an explicit refspec, "
+            f"but this repo is on {local_branch} — so a plain git pull or git push in the "
+            "ledger directory fails with no upstream configured. "
+        ) + (_align_refusal or f"The next sync moves it onto {wanted_branch}.")
     else:
-        detail = f"Syncing {url} on branch {branch()}."
+        detail = f"Syncing {url} on branch {wanted_branch}."
     return {
         "enabled": enabled,
         "remote": url,
-        "branch": branch(),
+        # The CONFIGURED branch — what the operator asked for. Kept under this key because
+        # that is what every existing consumer already means by it.
+        "branch": wanted_branch,
+        # What ``.git/HEAD`` actually points at. The two are separate keys because they
+        # genuinely diverged on a live install, and collapsing them is the bug.
+        "local_branch": local_branch,
+        "branch_matches": branch_matches,
+        "detached": detached,
         "initialized": initialized,
         "ready": enabled and bool(url),
+        "conflict": ledger_conflict,
+        "schedule_conflict": schedule_conflict,
         "detail": detail,
     }
+
+
+def _where(url: str, wanted_branch: str, branch_matches: bool) -> str:
+    """How to name where sync publishes, in a way that is true in both branch states.
+
+    Splitting this out keeps one wording in one place: "syncing X on branch b" is a claim
+    about the LOCAL repo as well as the remote, and it is false whenever HEAD is elsewhere.
+    """
+    if branch_matches:
+        return f"syncing {url} on branch {wanted_branch}"
+    return f"publishing to {url} onto branch {wanted_branch} through an explicit refspec"
 
 
 def set_settings(
@@ -175,6 +346,85 @@ async def _git(*args: str) -> tuple[int, str, str]:
             Path(cleanup).unlink(missing_ok=True)
 
 
+async def _align_branch() -> str:
+    """Put HEAD on the configured branch and make it track the remote's.
+
+    Returns "" on success, or a short operator-facing reason when it deliberately refused.
+    Never treated as a sync failure by the caller: pull and push have always worked through
+    explicit refspecs, and this fix must not be able to make the app worse than it was.
+
+    ``git branch -m --`` is the primitive, and every one of these properties was verified
+    against real git rather than assumed:
+
+    - rc=0 on an UNBORN branch (fresh ``git init``, no commit yet) — it just rewrites
+      ``.git/HEAD``. That matters because a fresh install has no commit.
+    - rc=0 on a born branch, keeping the SAME sha. No content moves.
+    - Leaves a DIRTY tree (modified + untracked files) completely untouched.
+    - Preserves an IN-PROGRESS conflicted merge: ``MERGE_HEAD`` survives and the index
+      stays ``UU``. A pull that conflicted mid-way therefore is not disturbed.
+
+    ``git checkout``/``git switch`` has none of those: against a dirty tree and a divergent
+    ref it auto-merges and can conflict, which would corrupt the working ledger.
+
+    ``--`` plus git's own ref-name validation is the argv guard. Verified:
+    ``git branch -m -- '--upload-pack=evil'`` fails rc=128, while
+    ``git symbolic-ref HEAD refs/heads/--upload-pack=evil`` succeeds with no validation —
+    which is why the symbolic-ref shortcut is not used here.
+    """
+    wanted = branch()
+
+    # DETACHED HEAD: report, do not touch. A detached HEAD in this directory means a merge
+    # or rebase went sideways, and moving refs under it can lose the operator's state.
+    # ``git branch -m`` refuses anyway ("cannot rename the current branch while not on
+    # any"), so this is naming the reason rather than adding a restriction.
+    rc, out, _ = await _git("symbolic-ref", "--short", "HEAD")
+    current = out.strip()
+    if rc != 0 or not current:
+        return (
+            "This repo's HEAD is detached, so it was left alone — finish or abort the "
+            f"merge or rebase in progress, then run: git switch {wanted}"
+        )
+
+    if current != wanted:
+        # A DIFFERENT branch of that name ALREADY EXISTS. Refuse. ``git branch -M`` would
+        # succeed here by DELETING that ref and every commit only it holds — two divergent
+        # lines of ledger work silently collapsed into one, which is precisely the
+        # lesson-stranding this whole change exists to stop. Same register as the push
+        # guard above: refuse, and name the cost and the manual command.
+        rc, _, _ = await _git("show-ref", "--verify", "--quiet", f"refs/heads/{wanted}")
+        if rc == 0:
+            reason = (
+                f"A different local branch named {wanted} already exists, so this repo was "
+                f"left on {current} rather than guess which history to keep. Merge them by "
+                f"hand: git switch {wanted} && git merge {current}"
+            )
+            logger.warning("ops-mission-control: ledger sync branch not aligned — %s", reason)
+            return reason
+        rc, _, err = await _git("branch", "-m", "--", wanted)
+        if rc != 0:
+            reason = (
+                f"Could not move this repo onto {wanted}: {err.strip()[:160]}. It stays on "
+                f"{current}; sync still publishes through an explicit refspec."
+            )
+            logger.warning("ops-mission-control: ledger sync branch not aligned — %s", reason)
+            return reason
+
+    # TRACKING, written explicitly and AFTER the rename. The order is load-bearing and the
+    # trap is easy to miss: ``git branch -m`` migrates ``branch.<old>.remote`` but leaves
+    # ``branch.<old>.merge`` pointing at the OLD ref, so renaming master → main leaves git
+    # holding ``branch.main.merge = refs/heads/master``. Verified.
+    #
+    # ``git config``, NOT ``git branch --set-upstream-to``: the latter fails in both of the
+    # ordinary first-sync states — no ``origin/<branch>`` fetched yet ("the requested
+    # upstream branch 'origin/main' does not exist") and an unborn branch ("no commit on
+    # branch 'main' yet"). An empty remote is the NORMAL way a team starts, so a tool that
+    # only works once the remote has commits is the wrong tool. ``git config`` works in
+    # both, and it is the same two keys ``--set-upstream-to`` would have written.
+    await _git("config", "--", f"branch.{wanted}.remote", "origin")
+    await _git("config", "--", f"branch.{wanted}.merge", f"refs/heads/{wanted}")
+    return ""
+
+
 async def _ensure_repo() -> tuple[bool, str]:
     """Initialize the repo and its remote if needed. Idempotent."""
     root = _repo_root()
@@ -211,6 +461,19 @@ async def _ensure_repo() -> tuple[bool, str]:
         rc, _, err = await _git("remote", "set-url", "origin", url)
         if rc != 0:
             return False, f"git remote set-url failed: {err.strip()[:200]}"
+
+    # Put HEAD on the configured branch and give it an upstream. One call site covers both
+    # directions because ``pull`` and ``push`` both come through here, and it also handles
+    # the operator CHANGING the branch later: the next sync re-runs this and follows them,
+    # exactly like the remote handling above.
+    #
+    # NOT allowed to fail this function. Alignment is a usability fix — it is what makes a
+    # plain ``git pull`` in the ledger directory work, which is how a conflicted
+    # ``rotation.yaml`` gets fixed by hand. Sync itself has never depended on it. Turning a
+    # refusal into ``(False, ...)`` would stop publishing over a condition that never
+    # stopped publishing before, so the reason is stashed for ``status()`` instead.
+    global _align_refusal
+    _align_refusal = await _align_branch()
     return True, ""
 
 
@@ -501,9 +764,23 @@ async def _has_unpushed() -> bool:
 async def sync_safely(*, direction: str = "pull") -> str:
     """Run a sync step, swallowing every fault. Returns a short outcome string.
 
-    The dispatch cycle and the daily hygiene pass call this. Shared memory improving an
-    investigation is worth having; it is never worth losing a claim over, so an
-    unreachable remote degrades to "this instance works from what it already knows".
+    **The daily hygiene pass is the ONLY caller** — ``POST /ledger/hygiene``, on the
+    ``primary`` tier. This docstring previously said "the dispatch cycle and the daily
+    hygiene pass call this", and the dispatch half was never true: ``grep ledger_sync
+    dispatch.py`` returns nothing. That overstatement is worth a correction rather than a
+    quiet deletion, because it cost two real things and both are still open.
+
+    First, cadence: shared memory converges once a DAY, on the leader's box, not per
+    incident — so the module docstring's "pull before you match, push after you learn" is an
+    aspiration, not a description. Second, and worse: ``rotation.yaml`` travels in the same
+    repo, so a non-primary instance has no code path that ever fetches the schedule. It
+    keeps arming (or not) off whatever it last saw, which is the double-claim the
+    single-owner model exists to prevent, reintroduced by the transport. Closing it means an
+    always-tier pull job or a ``sync_safely(direction="pull")`` from ``run_cycle``.
+
+    Shared memory improving an investigation is worth having; it is never worth losing a
+    claim over, so an unreachable remote degrades to "this instance works from what it
+    already knows".
 
     One retry on the FIRST attempt, because the sandbox backend probe is deliberately
     deferred off the event loop on a cold cache and raises a self-described TRANSIENT

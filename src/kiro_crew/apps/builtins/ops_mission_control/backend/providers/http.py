@@ -39,12 +39,49 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _REQUIRED_SCHEME = "https"
 
 
+#: Statuses that mean "back off", as distinct from "this request was wrong".
+#: 429 is the explicit one; 503 and 504 are the ones a provider returns while shedding
+#: load, where re-polling at full rate on the next heartbeat makes it worse.
+RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 503, 504})
+
+#: Cap on an honoured ``Retry-After``. A provider (or a proxy in front of one) asking
+#: for a day would otherwise switch a source off with no operator action and no way
+#: back short of a restart.
+MAX_RETRY_AFTER_SECS = 15 * 60
+
+
+def _parse_retry_after(raw: str | None) -> int:
+    """Seconds from a ``Retry-After`` header, clamped. 0 when absent or unparseable.
+
+    Only the delta-seconds form is honoured. The HTTP-date form is legal but rare from
+    JSON APIs, and parsing dates here would mean trusting a provider's clock against
+    ours — a wrong answer there silently disables a source, so absent is the safer read.
+    """
+    if not raw:
+        return 0
+    try:
+        secs = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(secs, MAX_RETRY_AFTER_SECS))
+
+
 class HttpError(RuntimeError):
     """A provider HTTP call failed. The message is always token-scrubbed."""
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, retry_after: int = 0) -> None:
         super().__init__(redact_tokens(message))
         self.status = status
+        #: Seconds the provider asked us to wait, already clamped. 0 when it did not
+        #: say. Read by the registry's backoff gate — before this existed, ``status``
+        #: was assigned here and read nowhere, so a 429 and a 404 were handled
+        #: identically and a rate-limited provider was re-polled every cycle.
+        self.retry_after = retry_after
+
+    @property
+    def is_retryable(self) -> bool:
+        """Whether re-polling soon is pointless or harmful, rather than just failing."""
+        return self.status in RETRYABLE_STATUSES
 
 
 def request_json(
@@ -83,7 +120,14 @@ def request_json(
             detail = exc.read(4096).decode("utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             detail = ""
-        raise HttpError(exc.code, f"HTTP {exc.code}: {detail[:400]}") from None
+        # ``Retry-After`` is read here because this is the only place the response
+        # headers exist; by the time a caller sees the HttpError they are gone.
+        retry_after = 0
+        try:
+            retry_after = _parse_retry_after(exc.headers.get("Retry-After"))
+        except Exception:  # noqa: BLE001 — a malformed header must not mask the error
+            retry_after = 0
+        raise HttpError(exc.code, f"HTTP {exc.code}: {detail[:400]}", retry_after) from None
     except urllib.error.URLError as exc:
         raise HttpError(0, f"transport error: {exc.reason}") from None
     except (TimeoutError, OSError) as exc:

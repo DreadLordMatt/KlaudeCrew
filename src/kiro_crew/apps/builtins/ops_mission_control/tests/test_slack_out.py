@@ -284,5 +284,93 @@ class TestBlockShape(_HomeIsolated):
         self.assertIn("https://example.com/alarm", rendered)
 
 
+class _FakeState:
+    """The slice of DashboardState the reply link touches."""
+
+    def __init__(self, *, slots: set[str] | None = None, raises: bool = False) -> None:
+        self.links: list[tuple[str, str, str]] = []
+        self._slots = slots if slots is not None else set()
+        self._raises = raises
+
+    def get_slot(self, name: str) -> object | None:
+        return object() if name in self._slots else None
+
+    def link_slack(self, slot_name: str, thread_ts: str, channel_id: str) -> None:
+        if self._raises:
+            raise RuntimeError("host refused")
+        self.links.append((slot_name, thread_ts, channel_id))
+
+
+class TestBoardThreadIsReplyable(_HomeIsolated):
+    """A reply into the board thread must reach the investigation.
+
+    The app recorded ``slack_thread_ts`` on its own incident record only. Inbound Slack
+    routing resolves a thread through the HOST's session map, which nothing here
+    populated — so a reply resolved to no session and was dropped **silently**, with no
+    error and no ephemeral, while the store listing advertised replyable threads. A
+    silent drop on the operator's most natural action is worse than having no Slack.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        slack_out.set_settings(enabled=True, channel_id="C0123456789")
+        claimed = store.claim(_signal(), operating_mode="observe")
+        assert claimed is not None
+        self.incident = claimed
+
+    def _with_ts(self, slot_key: str = "") -> Incident:
+        updates: dict[str, Any] = {"slack_thread_ts": "171000.5"}
+        if slot_key:
+            updates["slot_key"] = slot_key
+        return store.update_fields(self.incident.incident_id, **updates)
+
+    def test_the_thread_is_registered_against_the_incidents_slot(self) -> None:
+        slot = f"ops-mission-control-{self.incident.incident_id}"
+        state = _FakeState(slots={slot})
+        self.assertTrue(slack_out.link_thread_to_investigation(self._with_ts(), state))
+        self.assertEqual(state.links, [(slot, "171000.5", "C0123456789")])
+
+    def test_an_explicit_slot_key_is_honoured_over_the_convention(self) -> None:
+        state = _FakeState(slots={"custom-slot"})
+        incident = self._with_ts(slot_key="custom-slot")
+        self.assertTrue(slack_out.link_thread_to_investigation(incident, state))
+        self.assertEqual(state.links[0][0], "custom-slot")
+
+    def test_no_thread_yet_is_not_a_link(self) -> None:
+        """Nothing to register before the board message exists."""
+        state = _FakeState(slots={f"ops-mission-control-{self.incident.incident_id}"})
+        self.assertFalse(slack_out.link_thread_to_investigation(self.incident, state))
+        self.assertEqual(state.links, [])
+
+    def test_a_missing_slot_reports_honestly_rather_than_claiming_success(self) -> None:
+        """The slot is created after the claim, so an early call legitimately misses.
+
+        It must return False rather than True: the caller reports this to the agent as
+        ``slack_thread_replyable``, and a false positive would tell an operator their
+        reply will land when it will not.
+        """
+        state = _FakeState(slots=set())
+        self.assertFalse(slack_out.link_thread_to_investigation(self._with_ts(), state))
+        self.assertEqual(state.links, [])
+
+    def test_a_host_without_the_method_is_a_no_op(self) -> None:
+        self.assertFalse(slack_out.link_thread_to_investigation(self._with_ts(), object()))
+
+    def test_no_state_is_a_no_op(self) -> None:
+        self.assertFalse(slack_out.link_thread_to_investigation(self._with_ts(), None))
+
+    def test_a_host_failure_is_never_fatal(self) -> None:
+        """Same posture as every other send here: Slack trouble cannot break dispatch."""
+        slot = f"ops-mission-control-{self.incident.incident_id}"
+        state = _FakeState(slots={slot}, raises=True)
+        self.assertFalse(slack_out.link_thread_to_investigation(self._with_ts(), state))
+
+    def test_linking_is_skipped_when_slack_output_is_off(self) -> None:
+        slack_out.set_settings(enabled=False)
+        slot = f"ops-mission-control-{self.incident.incident_id}"
+        state = _FakeState(slots={slot})
+        self.assertFalse(slack_out.link_thread_to_investigation(self._with_ts(), state))
+
+
 if __name__ == "__main__":
     unittest.main()

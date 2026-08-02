@@ -11,11 +11,14 @@ or hanging provider must degrade to a per-source error, never take down the poll
 import asyncio
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from typing import Any
 
 from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
     ACTION_RESOLVE,
+    ACTION_SILENCE,
     VALID_ACTIONS,
     Signal,
 )
@@ -108,6 +111,189 @@ class TestPollFanOut(unittest.IsolatedAsyncioTestCase):
     async def test_no_sources_is_not_an_error(self):
         signals, errors = await OpsProviderRegistry().poll_all()
         self.assertEqual((signals, errors), ([], {}))
+
+
+class TestPollHealthAndBackoff(unittest.IsolatedAsyncioTestCase):
+    """Absence of a signal is only evidence when the poll actually succeeded.
+
+    Without this distinction a 429 or a provider outage reads exactly like "everything
+    cleared", and the reconcile SOP closes live incidents with a resolution string that
+    asserts something false. ``resolved`` is terminal, so that work does not come back.
+    """
+
+    async def test_a_successful_poll_is_recorded_as_healthy(self):
+        registry = OpsProviderRegistry()
+        registry.register_signal_source(_FakeSource("good", [_signal()]))
+        await registry.poll_all()
+        health = registry.poll_health()
+        self.assertTrue(health["good"]["ok"])
+        self.assertEqual(health["good"]["signals"], 1)
+
+    async def test_a_failed_poll_is_recorded_as_unhealthy_with_the_reason(self):
+        registry = OpsProviderRegistry()
+        registry.register_signal_source(_FakeSource("bad", fail=True))
+        await registry.poll_all()
+        health = registry.poll_health()
+        self.assertFalse(health["bad"]["ok"])
+        self.assertIn("exploded", health["bad"]["detail"])
+
+    async def test_a_quiet_source_is_distinguishable_from_a_broken_one(self):
+        """The whole point: both contribute zero signals, only one means 'cleared'."""
+        registry = OpsProviderRegistry()
+        registry.register_signal_source(_FakeSource("quiet", []))
+        registry.register_signal_source(_FakeSource("broken", fail=True))
+        signals, _ = await registry.poll_all()
+        self.assertEqual(signals, [])
+        health = registry.poll_health()
+        self.assertTrue(health["quiet"]["ok"])
+        self.assertFalse(health["broken"]["ok"])
+
+    async def test_a_failed_source_is_skipped_on_the_next_cycle(self):
+        """A provider shedding load must not be re-polled at full rate every 120s."""
+        registry = OpsProviderRegistry()
+        source = _FakeSource("flaky", fail=True)
+        registry.register_signal_source(source)
+        await registry.poll_all()
+        # It would now succeed, but we are in backoff and must not even call it.
+        source._fail = False
+        source._signals = [_signal()]
+        signals, errors = await registry.poll_all()
+        self.assertEqual(signals, [])
+        self.assertIn("backing off", errors["flaky"])
+
+    async def test_a_timing_out_source_backs_off_too(self):
+        """The one failure mode that never armed a window, and the most expensive one.
+
+        `asyncio.TimeoutError` IS an `Exception`, so its own `except` clause shadowed the
+        generic one that calls `_note_backoff` — a hung provider was therefore re-polled on
+        every heartbeat, burning the FULL per-source timeout out of each one for as long as
+        it stayed hung. A failure that returns fast costs a socket; this one costs 15s of
+        every cycle.
+        """
+        registry = OpsProviderRegistry()
+
+        class _Hangs:
+            id = "hangs"
+            display_name = "hangs"
+
+            def configured(self):
+                return True
+
+            async def poll(self):
+                await asyncio.sleep(30)
+                return []
+
+        registry.register_signal_source(_Hangs())
+        _signals, errors = await registry.poll_all(timeout_secs=0.05)
+        self.assertIn("timed out", errors["hangs"])
+        self.assertIn("hangs", registry._backoff_until)
+        # And the next cycle skips it instead of paying the timeout again.
+        _signals, errors = await registry.poll_all(timeout_secs=0.05)
+        self.assertIn("backing off", errors["hangs"])
+
+    async def test_a_push_spool_is_not_a_snapshot_so_absence_proves_nothing(self):
+        """`ok` answers "did we look", not "did we see everything" — and those differ.
+
+        The webhook source drains its queue on poll, so a still-firing pushed signal is
+        absent from every cycle after the one that delivered it. Recording that as a plain
+        success let `verify_pending_actions` read absence as recovery through a SUCCESSFUL
+        poll, which is why the existing `ok` guard could not catch it.
+        """
+        registry = OpsProviderRegistry()
+
+        class _Spool:
+            id = "spool"
+            display_name = "spool"
+            is_snapshot = False
+
+            def configured(self):
+                return True
+
+            async def poll(self):
+                return []
+
+        registry.register_signal_source(_Spool())
+        registry.register_signal_source(_FakeSource("polled", [_signal()]))
+        await registry.poll_all()
+        health = registry.poll_health()
+        # Both answered; only one of them licenses an inference from absence.
+        self.assertTrue(health["spool"]["ok"])
+        self.assertFalse(health["spool"]["snapshot"])
+        self.assertTrue(health["polled"]["snapshot"])
+
+    async def test_the_real_webhook_source_declares_itself_non_snapshot(self):
+        """The flag has to be on the adapter that actually drains, not just supported."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import webhook
+
+        self.assertFalse(webhook.WebhookSignalSource.is_snapshot)
+
+    async def test_a_429_honours_the_providers_retry_after(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers.http import HttpError
+
+        class _RateLimited:
+            id = "limited"
+            display_name = "limited"
+
+            def configured(self):
+                return True
+
+            async def poll(self):
+                raise HttpError(429, "HTTP 429: slow down", 42)
+
+        registry = OpsProviderRegistry()
+        registry.register_signal_source(_RateLimited())
+        await registry.poll_all()
+        # 42s requested, so the deadline is ~42s out rather than the 5-minute default.
+        remaining = registry._backoff_until["limited"] - time.monotonic()
+        self.assertGreater(remaining, 30)
+        self.assertLess(remaining, 50)
+
+    async def test_a_success_clears_the_backoff(self):
+        registry = OpsProviderRegistry()
+        source = _FakeSource("recovers", fail=True)
+        registry.register_signal_source(source)
+        await registry.poll_all()
+        self.assertIn("recovers", registry._backoff_until)
+        # Simulate the window elapsing, then a good poll.
+        registry._backoff_until["recovers"] = time.monotonic() - 1
+        source._fail = False
+        source._signals = [_signal()]
+        await registry.poll_all()
+        self.assertNotIn("recovers", registry._backoff_until)
+        self.assertTrue(registry.poll_health()["recovers"]["ok"])
+
+    async def test_an_unpolled_source_is_absent_rather_than_assumed_healthy(self):
+        registry = OpsProviderRegistry()
+        registry.register_signal_source(_FakeSource("off", [_signal()], ready=False))
+        await registry.poll_all()
+        self.assertNotIn("off", registry.poll_health())
+
+
+class TestRetryAfterParsing(unittest.TestCase):
+    def test_delta_seconds_is_honoured_and_clamped(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import http
+
+        self.assertEqual(http._parse_retry_after("30"), 30)
+        self.assertEqual(http._parse_retry_after(" 30 "), 30)
+        self.assertEqual(
+            http._parse_retry_after("999999"),
+            http.MAX_RETRY_AFTER_SECS,
+        )
+
+    def test_unusable_values_yield_zero_rather_than_a_guess(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import http
+
+        for raw in (None, "", "Wed, 21 Oct 2026 07:28:00 GMT", "soon", "-5"):
+            self.assertEqual(http._parse_retry_after(raw), 0, raw)
+
+    def test_retryable_statuses_are_distinguished_from_client_errors(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers.http import HttpError
+
+        self.assertTrue(HttpError(429, "x").is_retryable)
+        self.assertTrue(HttpError(503, "x").is_retryable)
+        # A 404 or 401 is a configuration fault; waiting will not fix it.
+        self.assertFalse(HttpError(404, "x").is_retryable)
+        self.assertFalse(HttpError(401, "x").is_retryable)
 
 
 class _FakeRotation:
@@ -671,6 +857,96 @@ class TestPublicAdapterDefaults(unittest.IsolatedAsyncioTestCase):
         for expected in ("noop", "always-on", "cloudwatch", "pagerduty", "datadog"):
             self.assertIn(expected, catalog)
         reg.reset_registry()
+
+
+class TestSuppressionIsAlwaysBounded(unittest.IsolatedAsyncioTestCase):
+    """A suppression with no expiry hides a live fault until a human remembers it.
+
+    This is the property that makes ``act`` a bounded bet rather than an
+    all-or-nothing one: a WRONG silence expires by itself. The shipped Datadog sink
+    used to POST ``/mute`` with ``body={}``, and Datadog reads a missing ``end`` as
+    "mute forever" — so the board showed the incident resolved while the metric stayed
+    bad, with no way back but a human noticing.
+    """
+
+    def test_a_requested_window_is_clamped_not_honoured_blindly(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        self.assertEqual(models.resolve_silence_secs(600), 600)
+        self.assertEqual(models.resolve_silence_secs(10**9), models.MAX_SILENCE_SECS)
+
+    def test_unusable_input_yields_the_default_never_no_expiry(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        unusable: tuple[object, ...] = (None, "", "forever", 0, -1, [], {})
+        for raw in unusable:
+            self.assertEqual(
+                models.resolve_silence_secs(raw), models.DEFAULT_SILENCE_SECS, repr(raw)
+            )
+
+    async def test_datadog_mute_always_carries_an_end(self):
+        """The regression guard for the indefinite mute."""
+        import time as _time
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import datadog
+
+        sent: dict[str, Any] = {}
+
+        def _fake_request(url, *, method="GET", headers=None, params=None, body=None, **kw):
+            sent["url"] = url
+            sent["body"] = body
+            return {}
+
+        original = datadog.request_json
+        datadog.request_json = _fake_request
+        try:
+            adapter = datadog.DatadogAdapter()
+            result = adapter._execute_sync("123", ACTION_SILENCE, {})
+        finally:
+            datadog.request_json = original
+
+        self.assertTrue(result.ok)
+        self.assertIn("/mute", sent["url"])
+        body = sent["body"]
+        assert isinstance(body, dict)
+        # The whole point: an `end` is present and in the future.
+        self.assertIn("end", body)
+        self.assertGreater(body["end"], int(_time.time()))
+
+    async def test_datadog_resolve_alias_is_bounded_too(self):
+        """`resolve` still maps onto the mute for already-granted rules — bounded."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import datadog
+
+        sent: dict[str, Any] = {}
+
+        def _fake_request(url, *, method="GET", headers=None, params=None, body=None, **kw):
+            sent["body"] = body
+            return {}
+
+        original = datadog.request_json
+        datadog.request_json = _fake_request
+        try:
+            datadog.DatadogAdapter()._execute_sync("123", ACTION_RESOLVE, {})
+        finally:
+            datadog.request_json = original
+
+        body = sent["body"]
+        assert isinstance(body, dict)
+        self.assertIn("end", body)
+
+    async def test_datadog_advertises_the_honest_verb(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import datadog
+
+        actions = datadog.DatadogAdapter().supported_actions()
+        self.assertIn(ACTION_SILENCE, actions)
+        # Kept as an alias so an existing act-rule granting `resolve` is not revoked.
+        self.assertIn(ACTION_RESOLVE, actions)
+
+    async def test_github_does_not_claim_a_suppression_it_cannot_perform(self):
+        """An issue tracker has no snooze; advertising one would be a lie."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import github_issues
+
+        self.assertNotIn(ACTION_SILENCE, github_issues.GitHubIssuesAdapter().supported_actions())
 
 
 class TestHttpHelper(unittest.IsolatedAsyncioTestCase):

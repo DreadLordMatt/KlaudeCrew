@@ -40,7 +40,32 @@ VALID_SEVERITIES: frozenset[str] = frozenset({SEVERITY_CRITICAL, SEVERITY_WARNIN
 STATE_FIRING = "firing"
 STATE_OK = "ok"
 STATE_UNKNOWN = "unknown"
-VALID_STATES: frozenset[str] = frozenset({STATE_FIRING, STATE_OK, STATE_UNKNOWN})
+#: A human already parked this AT THE PROVIDER — an Alertmanager silence or inhibition,
+#: a Zabbix maintenance window, an Icinga downtime, a Sentry archive.
+#:
+#: This is a READ, and it is deliberately not ``ACTION_SILENCE`` below (the verb the app
+#: ISSUES). Conflating the two would put the app's own outbound intent and somebody
+#: else's decision into one word, and only one of them is a fact about the world.
+#:
+#: What the absence of this word cost: an adapter facing Alertmanager's
+#: ``status.state = "suppressed"`` had exactly two options and both were wrong. Report
+#: ``firing`` and the app investigates something an operator explicitly parked — the
+#: fastest way there is to lose an operator's trust in an autonomous responder. Or drop
+#: the signal, and "the app ignored my alarm" becomes indistinguishable from "someone
+#: silenced it". Both were reached by *every* new adapter privately, because there was
+#: no shared place to put the answer.
+#:
+#: Making it a STATE rather than a label is what keeps the claim rule single: dispatch
+#: claims ``state == firing`` in one place, so a suppressed signal is unclaimable by
+#: construction with no second predicate anyone can forget. A label would leave
+#: ``state == firing`` and require ``run_cycle`` to grow a second, label-reading
+#: condition — moving the reimplement-the-filter-privately failure into core. It also
+#: keeps ``unknown`` honest: ``unknown`` means "we could not read the state",
+#: ``suppressed`` means "we read it and a human parked it".
+STATE_SUPPRESSED = "suppressed"
+VALID_STATES: frozenset[str] = frozenset(
+    {STATE_FIRING, STATE_OK, STATE_UNKNOWN, STATE_SUPPRESSED}
+)
 
 STATUS_UNCLAIMED = "unclaimed"
 STATUS_DISPATCHED = "dispatched"
@@ -154,7 +179,113 @@ TRUST_OBSERVED = "observed"
 ACTION_ACK = "ack"
 ACTION_RESOLVE = "resolve"
 ACTION_COMMENT = "comment"
-VALID_ACTIONS: frozenset[str] = frozenset({ACTION_ACK, ACTION_RESOLVE, ACTION_COMMENT})
+#: Time-boxed suppression: silence this alert for a bounded window, then let it come
+#: back on its own.
+#:
+#: This is the safest write-back verb the provider landscape offers, and the vocabulary
+#: had no word for it. Every low-risk provider write is really this — an Alertmanager
+#: silence with a mandatory ``endsAt``, a Datadog mute with an ``end``, an Icinga ack
+#: with an ``expiry``, a Sentry archive with an ``ignoreDuration`` — so adapters were
+#: forced to express a mute as ``resolve``, which asserts something false about the
+#: world and hides a live fault permanently rather than temporarily.
+#:
+#: The property that matters for autonomy: a WRONG silence expires by itself. That makes
+#: "let the agent act" a bounded bet instead of an all-or-nothing one, which is what
+#: earning autonomy per-rule actually requires.
+ACTION_SILENCE = "silence"
+VALID_ACTIONS: frozenset[str] = frozenset(
+    {ACTION_ACK, ACTION_RESOLVE, ACTION_COMMENT, ACTION_SILENCE}
+)
+
+#: Actions that MUST carry a positive, bounded expiry. Enforced at the authorization
+#: boundary rather than left to each adapter: an unbounded suppression is exactly the
+#: outcome this verb exists to prevent, so a sink must not be able to opt out of the
+#: bound by forgetting to check.
+EXPIRING_ACTIONS: frozenset[str] = frozenset({ACTION_SILENCE})
+
+#: Actions whose success is OBSERVABLE by re-reading the signal's firing state, and
+#: therefore the only ones this app is able to verify.
+#:
+#: The distinction is the whole reason post-action verification is honest rather than
+#: decorative. ``resolve`` and ``silence`` both assert something about the firing
+#: condition, so a later poll is real evidence about whether they landed. ``ack`` and
+#: ``comment`` do not: an acknowledged alert keeps firing by design (see
+#: ``normalize_state``, where ``acknowledged`` maps onto ``firing`` on purpose), so
+#: "still firing after an ack" is the EXPECTED reading and says nothing at all about
+#: whether the ack was applied.
+#:
+#: So an ack is left explicitly unverified rather than verified against the wrong
+#: evidence. That is a gap this app admits: Checkmk dispatches commands asynchronously
+#: through Livestatus and documents that a 2xx "only indicates whether the request was
+#: successfully transmitted, NOT whether it was in fact successfully executed", and no
+#: adapter here reports acknowledgement state back. Claiming a verdict from firing state
+#: would turn an unverifiable write into a confident one, which is worse than saying so.
+VERIFIABLE_ACTIONS: frozenset[str] = frozenset({ACTION_RESOLVE, ACTION_SILENCE})
+
+#: Post-action verification verdicts, persisted on the incident.
+#:
+#: ``""`` (the default) means no action was ever executed — NOT "verified fine". Every
+#: incident written before this existed reads as that, which is correct.
+VERIFY_PENDING = "pending"
+#: The recheck ran against a SUCCESSFUL poll and the signal is no longer firing.
+VERIFY_CLEARED = "cleared"
+#: The recheck ran against a successful poll and the signal is STILL firing — the 2xx
+#: did not mean what the board reported it meant.
+VERIFY_STILL_FIRING = "still_firing"
+#: The recheck was due and we could not look: the source's last poll failed, timed out,
+#: or is in backoff. Deliberately NOT terminal — a later cycle where the source answers
+#: replaces it — because "we could not look" is a statement about us, not about the
+#: world, and freezing it would be the absence-is-evidence bug in a new place.
+VERIFY_UNKNOWN = "unknown"
+#: The action was executed but its success is not observable here (see
+#: ``VERIFIABLE_ACTIONS``). Recorded explicitly so the board can say "nothing checked
+#: this" instead of leaving a blank that reads as success.
+VERIFY_NOT_CHECKABLE = "not_checkable"
+VALID_VERIFICATIONS: frozenset[str] = frozenset(
+    {
+        VERIFY_PENDING,
+        VERIFY_CLEARED,
+        VERIFY_STILL_FIRING,
+        VERIFY_UNKNOWN,
+        VERIFY_NOT_CHECKABLE,
+    }
+)
+
+#: Verdicts that still owe a recheck. ``unknown`` is in here for the reason stated on
+#: it: the recheck did not happen, so the debt is not paid.
+OPEN_VERIFICATIONS: frozenset[str] = frozenset({VERIFY_PENDING, VERIFY_UNKNOWN})
+
+#: How long after a non-expiring action to re-read the signal. Five minutes: long
+#: enough for a provider to propagate a state change (CloudWatch evaluates on a
+#: period, PagerDuty and Datadog are eventually consistent through their own queues),
+#: short enough that the answer arrives inside the shift that took the action.
+#:
+#: A ``silence`` ignores this and schedules its recheck at the END of its own window
+#: instead — that is the schedule ``ACTION_SILENCE``'s mandatory expiry buys, and it is
+#: the more interesting moment: a suppression that expires straight back into the same
+#: firing condition is evidence nothing was fixed.
+DEFAULT_VERIFY_AFTER_SECS = 5 * 60
+
+#: Default and ceiling for a suppression window, in seconds. The ceiling is the real
+#: guard: a caller asking to silence something for a week is asking to forget it.
+DEFAULT_SILENCE_SECS = 4 * 60 * 60
+MAX_SILENCE_SECS = 24 * 60 * 60
+
+
+def resolve_silence_secs(raw: Any) -> int:
+    """Clamp a requested suppression window into ``(0, MAX_SILENCE_SECS]``.
+
+    Unparseable or non-positive input yields the DEFAULT, never "no expiry" — the one
+    reading that would reintroduce the indefinite mute this verb replaces.
+    """
+    try:
+        requested = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_SILENCE_SECS
+    if requested <= 0:
+        return DEFAULT_SILENCE_SECS
+    return min(requested, MAX_SILENCE_SECS)
+
 
 #: Length of the hex digest kept for fingerprints and ledger entry ids. 16 hex
 #: chars = 64 bits, ample against accidental collision in a per-user ledger while
@@ -208,15 +339,41 @@ def normalize_severity(raw: str) -> str:
 
 
 def normalize_state(raw: str) -> str:
-    """Map a provider's state vocabulary onto ``firing`` / ``ok`` / ``unknown``.
+    """Map a provider's state vocabulary onto ``firing`` / ``ok`` / ``suppressed`` / ``unknown``.
 
     Unknown values become ``unknown``, NOT ``firing`` — an unparseable state must
     not create phantom work on the board.
+
+    The suppression vocabulary is checked because every provider that publishes one uses
+    a different word for it, and before this they ALL landed in ``unknown``: verified,
+    ``suppressed``/``silenced``/``inhibited``/``in downtime`` returned exactly what
+    ``banana`` returned, so "a human parked this" was stored as "we could not parse it".
     """
     v = (raw or "").strip().lower()
     if v in VALID_STATES:
         return v
-    if v in {"alarm", "alert", "triggered", "open", "firing", "acknowledged", "warn"}:
+    # NOTE: `acknowledged` is deliberately NOT here — it stays in the firing set below.
+    # An acknowledged page is still unresolved and the whole point is to be working it
+    # (see providers/pagerduty.py `_OPEN_STATUSES`). Do not "fix" this by moving it.
+    if v in {"suppressed", "silenced", "inhibited", "muted", "snoozed", "downtime", "in downtime"}:
+        return STATE_SUPPRESSED
+    # `active` and `unprocessed` are the OTHER two values of Alertmanager's v2
+    # `alertStatus.state` enum, whose third is `suppressed`. Added in the same change that
+    # taught the webhook to read that object: admitting the parked case while leaving its
+    # two siblings falling to `unknown` would mean the v2 shape parses a silenced alert and
+    # drops a LIVE one — a worse failure than not reading the object at all. `unprocessed`
+    # means Alertmanager has the alert but has not fanned it out yet; it is live either way.
+    if v in {
+        "alarm",
+        "alert",
+        "triggered",
+        "open",
+        "firing",
+        "acknowledged",
+        "warn",
+        "active",
+        "unprocessed",
+    }:
         return STATE_FIRING
     if v in {"ok", "resolved", "closed", "cleared", "nominal"}:
         return STATE_OK
@@ -254,6 +411,39 @@ class Signal:
     url: str = ""
     labels: dict[str, str] = field(default_factory=dict)
     fingerprint: str = ""
+    #: The PROVIDER's own stable identity for this failure, when it publishes one —
+    #: an Alertmanager ``fingerprint``, a Sentry issue id, a Zabbix trigger
+    #: ``objectid``. Empty when the provider offers nothing trustworthy.
+    #:
+    #: Exists because ``fingerprint`` above is a heuristic over rendered text and
+    #: provably over-merges: with every bare digit stripped (see
+    #: ``_VOLATILE_PATTERNS``), "4xx error rate above 5" and "5xx error rate above 1"
+    #: on one resource hash identically, as do a p99 and a p50 latency alarm. The
+    #: ledger then hands a responder a fix learned from a DIFFERENT failure, which is
+    #: worse than no match. This field carries the identity the provider already
+    #: computed so an exact match can be preferred over a shape match.
+    #:
+    #: Set from explicit adapter input, never derived — a derived value would be
+    #: another heuristic wearing the word "exact".
+    provider_key: str = ""
+    #: WHO parked this, in the provider's own words — an Alertmanager silence id from
+    #: ``silencedBy``, the alert named in ``inhibitedBy``, a Zabbix maintenance name.
+    #:
+    #: Exists because ``state == suppressed`` alone answers the wrong half of the
+    #: operator's question. "Something silenced this" still leaves them hunting; the
+    #: attribution is what turns it into one click at the provider. Empty whenever the
+    #: provider publishes no attribution, and the UI must say so explicitly rather than
+    #: imply we know — an invented owner is worse than a blank.
+    suppressed_by: str = ""
+    #: WHICH KIND of suppression, machine-readable: ``silenced`` (a person created a
+    #: silence) or ``inhibited`` (another, higher-ranked alert is masking this one).
+    #:
+    #: Kept separate from ``suppressed_by`` because the operator's next move differs: a
+    #: silence is a decision to review or expire, while an inhibition means go look at
+    #: the alert doing the inhibiting — this one is a symptom.
+    #:
+    #: Like ``provider_key``, both fields are explicit adapter input and never derived.
+    suppressed_reason: str = ""
 
     @classmethod
     def create(
@@ -268,6 +458,9 @@ class Signal:
         resource: str = "",
         url: str = "",
         labels: dict[str, str] | None = None,
+        provider_key: str = "",
+        suppressed_by: str = "",
+        suppressed_reason: str = "",
     ) -> Signal:
         """Build a Signal with normalization and fingerprinting applied.
 
@@ -286,6 +479,15 @@ class Signal:
             url=url,
             labels=dict(labels or {}),
             fingerprint=compute_fingerprint(source, resource, title),
+            # Namespaced by source so two providers cannot collide on a bare numeric
+            # id — Sentry issue 12345 and a Zabbix trigger 12345 are unrelated.
+            provider_key=f"{source}:{provider_key}" if provider_key else "",
+            # NOT namespaced by source, unlike provider_key: this is display text for a
+            # human, not a match key, so prefixing it would only make the board read
+            # "webhook:silence-abc" where the operator wants the silence id they can
+            # paste into Alertmanager.
+            suppressed_by=suppressed_by,
+            suppressed_reason=suppressed_reason,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -305,6 +507,13 @@ class Signal:
             url=str(data.get("url", "")),
             labels={str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {},
             fingerprint=str(data.get("fingerprint", "")),
+            # Absent on every incident written before this field existed; empty is the
+            # correct reading of "this provider gave us no exact identity".
+            provider_key=str(data.get("provider_key", "")),
+            # Same rule: absent on every incident written before these existed, and empty
+            # is the correct reading of "this provider published no attribution".
+            suppressed_by=str(data.get("suppressed_by", "")),
+            suppressed_reason=str(data.get("suppressed_reason", "")),
         )
 
 
@@ -328,6 +537,32 @@ class Incident:
     #: constants), or "" when it is not blocked. Derived from the investigation
     #: slot rather than stored as intent, so it cannot go stale against reality.
     blocked_reason: str = ""
+    # ---- post-action verification (§5.10) --------------------------------------
+    # Three fields, all DEFAULT EMPTY so every incident already on disk stays valid and
+    # reads as "no action was taken", which is the truth for all of them.
+    #
+    # They exist because nothing re-read the signal after an action executed, so
+    # ``ActionResult.ok`` meant only "the provider returned 2xx". For an async command
+    # pipe that is not the same claim: the board reported an applied fix and no code
+    # anywhere had looked at whether the alarm stopped firing. That is the silent lie an
+    # ops agent must not tell, and it is also what makes ``LedgerEntry.use_count``
+    # mean "was shown to somebody" rather than "worked".
+    #: The last action this app executed for this incident (an ``ACTION_*`` value), or ""
+    #: when none has been.
+    last_action: str = ""
+    #: When that action was executed, ISO-8601 Z. Stored rather than derived from
+    #: ``updated_at`` because ``updated_at`` moves on every unrelated write, and the
+    #: recheck schedule has to be anchored to the ACTION.
+    last_action_at: str = ""
+    #: When the recheck becomes due, ISO-8601 Z. For an expiring action this is the end
+    #: of the suppression window; otherwise ``DEFAULT_VERIFY_AFTER_SECS`` later.
+    verify_after: str = ""
+    #: The verdict (a ``VERIFY_*`` value), or "" when no action was ever executed.
+    verification: str = ""
+    #: One sentence naming what was observed, in the recheck's own words — including
+    #: WHICH source could not be read when the verdict is ``unknown``. A bare enum sends
+    #: an operator hunting for the reason we already had.
+    verification_detail: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -353,6 +588,14 @@ class Incident:
             proposed_action=proposed if isinstance(proposed, dict) else None,
             resolution=str(data.get("resolution", "")),
             blocked_reason=str(data.get("blocked_reason", "")),
+            # Absent on every incident written before verification existed. Empty means
+            # "no action was taken", which is true of all of them — deliberately not
+            # back-filled to a verdict, because inventing one is the defect this fixes.
+            last_action=str(data.get("last_action", "")),
+            last_action_at=str(data.get("last_action_at", "")),
+            verify_after=str(data.get("verify_after", "")),
+            verification=str(data.get("verification", "")),
+            verification_detail=str(data.get("verification_detail", "")),
         )
 
     def is_open(self) -> bool:
@@ -367,9 +610,44 @@ class LedgerEntry:
     pattern: str
     fix: str
     fingerprints: list[str] = field(default_factory=list)
+    #: Provider-computed identities this entry has matched (see
+    #: ``Signal.provider_key``). Unions on merge exactly as ``fingerprints`` does, so
+    #: the git-synced append-only ledger keeps its conflict-free dedupe property.
+    #: Defaults empty, so every line written before this field existed stays valid and
+    #: keeps matching by fingerprint alone.
+    provider_keys: list[str] = field(default_factory=list)
     confidence: str = CONFIDENCE_MEDIUM
     trust: str = TRUST_OBSERVED
     use_count: int = 0
+    #: Times this entry was cited for a fix that DID NOT hold — the same failure came
+    #: back shortly after an incident closed citing it, or a provider reported a
+    #: regression. Defaults to 0, so every line already on disk reads as "never
+    #: contradicted", which is what we actually know about it.
+    #:
+    #: This is the mechanical downward path the ledger did not have. It was NOT
+    #: structurally unable to learn a fix failed — an agent can author a corrective
+    #: entry sharing the fingerprint and ``find_contradictions`` surfaces the pair — but
+    #: that path needs a model turn and a human's judgement, so nothing moved on
+    #: evidence alone. Meanwhile ``use_count`` incremented at CLAIM time, before any
+    #: outcome existed, so a wrong entry climbed the ranking on every mismatch and
+    #: survived the hygiene prune, which sorts by ``-use_count``.
+    miss_count: int = 0
+    #: When the most recent miss was recorded, ISO-8601 Z. Empty until there is one.
+    #: Kept so the hygiene pass and the board can say WHEN a fix stopped working — an
+    #: entry that missed once a year ago is a different object from one missing weekly.
+    last_miss: str = ""
+    #: The ``miss_count`` value at which the hygiene pass last demoted this entry.
+    #:
+    #: Exists so one piece of evidence costs one step. Hygiene runs nightly and its
+    #: demotion test is a RATIO, which stays true once it is true — so without this an
+    #: entry that missed once would be walked ``high → medium`` tonight and
+    #: ``medium → low`` tomorrow on no new evidence at all, arriving at the bottom of the
+    #: scale for a single failure. Demotion therefore requires ``miss_count`` to have
+    #: GROWN since the last one.
+    #:
+    #: Takes the MAX on merge, like ``miss_count`` itself: a teammate whose hygiene pass
+    #: already spent that evidence must not have it spent again after a git pull.
+    decayed_at_miss_count: int = 0
     first_seen: str = ""
     last_used: str = ""
     source: str = "agent"
@@ -393,6 +671,7 @@ class LedgerEntry:
         pattern: str,
         fix: str,
         fingerprints: list[str] | None = None,
+        provider_keys: list[str] | None = None,
         confidence: str = CONFIDENCE_MEDIUM,
         trust: str = TRUST_OBSERVED,
         source: str = "agent",
@@ -403,6 +682,7 @@ class LedgerEntry:
             pattern=pattern,
             fix=fix,
             fingerprints=list(fingerprints or []),
+            provider_keys=list(provider_keys or []),
             confidence=confidence if confidence in CONFIDENCE_DECAY else CONFIDENCE_MEDIUM,
             trust=trust if trust in {TRUST_VERIFIED, TRUST_OBSERVED} else TRUST_OBSERVED,
             use_count=0,
@@ -417,18 +697,34 @@ class LedgerEntry:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LedgerEntry:
         fps = data.get("fingerprints")
+        keys = data.get("provider_keys")
         try:
             use_count = int(data.get("use_count", 0))
         except (TypeError, ValueError):
             use_count = 0
+        try:
+            # Absent on every line written before demotion existed; 0 is the honest
+            # reading. A garbage value reads as 0 too, deliberately — the alternative is
+            # a single hand-edited line able to demote an entry the whole team relies on.
+            miss_count = int(data.get("miss_count", 0))
+        except (TypeError, ValueError):
+            miss_count = 0
+        try:
+            spent = int(data.get("decayed_at_miss_count", 0))
+        except (TypeError, ValueError):
+            spent = 0
         return cls(
             entry_id=str(data.get("entry_id", "")),
             pattern=str(data.get("pattern", "")),
             fix=str(data.get("fix", "")),
             fingerprints=[str(f) for f in fps] if isinstance(fps, list) else [],
+            provider_keys=[str(k) for k in keys] if isinstance(keys, list) else [],
             confidence=str(data.get("confidence", CONFIDENCE_MEDIUM)),
             trust=str(data.get("trust", TRUST_OBSERVED)),
             use_count=use_count,
+            miss_count=miss_count,
+            last_miss=str(data.get("last_miss", "")),
+            decayed_at_miss_count=spent,
             first_seen=str(data.get("first_seen", "")),
             last_used=str(data.get("last_used", "")),
             source=str(data.get("source", "agent")),

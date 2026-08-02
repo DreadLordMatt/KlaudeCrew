@@ -59,6 +59,9 @@ class NoopActionSink:
         return ActionResult(
             ok=True,
             action=action,
+            # ``ok`` here means "we successfully did nothing", and post-action verification
+            # cannot tell that from a real provider write — see ``ActionResult.simulated``.
+            simulated=True,
             detail=f"observe-only: would {action} {signal.id}",
         )
 

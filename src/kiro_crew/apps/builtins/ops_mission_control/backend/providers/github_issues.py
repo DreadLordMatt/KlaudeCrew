@@ -176,6 +176,11 @@ class GitHubIssuesAdapter:
                     fired_at=str(issue.get("createdAt", "")),
                     resource=repo,
                     url=str(issue.get("url", "")),
+                    # repo#number is GitHub's permanent identity for the issue. Note this
+                    # deliberately makes each ISSUE its own exact identity: unlike an
+                    # alarm, a GitHub issue does not recur — so an exact match here means
+                    # "we have worked this very issue before", which is the useful claim.
+                    provider_key=f"{repo}#{number}" if repo and number else "",
                     labels={
                         "repo": repo,
                         "issue_number": str(number),

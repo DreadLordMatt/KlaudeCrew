@@ -326,6 +326,206 @@ class TestTransition(_HomeIsolated):
         self.assertEqual(updated.status, models.STATUS_DISPATCHED)
 
 
+class TestClosingAnIncidentLeavesAnArtifact(_HomeIsolated):
+    """A closed incident must leave a Markdown record a non-KiroCrew reader can be handed.
+
+    The renderer existed for the whole life of the app with exactly one reference — its own
+    definition — so ``incidents/<id>.md`` was documented on-disk state that could not
+    exist, and ``/incident``'s ``log`` was a structurally-empty field. These tests pin the
+    call site rather than the renderer, because the renderer was never the broken half.
+    """
+
+    def test_resolving_an_incident_writes_its_postmortem(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(self._signal(title="DLQ depth above 100"), operating_mode="observe")
+        assert inc is not None
+        store.transition(inc.incident_id, models.STATUS_INVESTIGATING, diagnosis="pool exhausted")
+        store.transition(inc.incident_id, models.STATUS_RESOLVED, resolution="raised the cap")
+
+        path = store.incident_log_path(inc.incident_id)
+        self.assertTrue(path.is_file(), "resolving an incident wrote no postmortem")
+        body = path.read_text(encoding="utf-8")
+        self.assertIn("DLQ depth above 100", body)
+        self.assertIn("pool exhausted", body)
+        self.assertIn("raised the cap", body)
+        # The route that serves it must find it too — a file nothing can read is no better
+        # than no file.
+        self.assertEqual(store.read_log(inc.incident_id), body)
+
+    def test_escalating_also_writes_one(self):
+        """Both terminal statuses, not just the happy one.
+
+        An escalation is the case where a colleague is MOST likely to be handed the record,
+        so writing the artifact only on ``resolved`` would miss the main use.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(self._signal(), operating_mode="observe")
+        assert inc is not None
+        store.transition(inc.incident_id, models.STATUS_INVESTIGATING)
+        store.transition(inc.incident_id, models.STATUS_ESCALATED, diagnosis="beyond me")
+        self.assertTrue(store.incident_log_path(inc.incident_id).is_file())
+
+    def test_an_open_incident_has_no_artifact_yet(self):
+        """A postmortem describes a finished investigation; writing one early would lie."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(self._signal(), operating_mode="observe")
+        assert inc is not None
+        store.transition(inc.incident_id, models.STATUS_INVESTIGATING, diagnosis="looking")
+        self.assertFalse(store.incident_log_path(inc.incident_id).is_file())
+        self.assertEqual(store.read_log(inc.incident_id), "")
+
+    def test_every_terminal_status_is_covered_by_the_writer(self):
+        """Derived from the grammar, so a new terminal status cannot ship without an artifact.
+
+        ``TERMINAL_STATUSES`` is computed from ``LEGAL_TRANSITIONS``, so a future status
+        with no outgoing edge becomes terminal automatically — and would silently produce
+        no record if this test named the two statuses by hand instead.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        for status in sorted(models.TERMINAL_STATUSES):
+            inc = store.claim(self._signal(native_id=f"alarm/{status}"), operating_mode="observe")
+            assert inc is not None
+            store.transition(inc.incident_id, models.STATUS_INVESTIGATING)
+            store.transition(inc.incident_id, status)
+            self.assertTrue(
+                store.incident_log_path(inc.incident_id).is_file(),
+                f"closing into {status!r} left no postmortem",
+            )
+
+    def test_a_later_field_update_cannot_blank_a_good_artifact(self):
+        """The record is sourced from the incident, never from the caller's kwargs.
+
+        ``update_fields`` re-enters ``transition`` with the SAME (terminal) status and no
+        diagnosis, so a writer reading its arguments would re-render the artifact with
+        empty sections — destroying the finished record on an unrelated write.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(self._signal(), operating_mode="observe")
+        assert inc is not None
+        store.transition(inc.incident_id, models.STATUS_INVESTIGATING)
+        store.transition(
+            inc.incident_id, models.STATUS_RESOLVED, diagnosis="thread pool starved"
+        )
+        store.update_fields(inc.incident_id, slack_thread_ts="1700000000.000100")
+
+        body = store.read_log(inc.incident_id)
+        self.assertIn("thread pool starved", body)
+        self.assertNotIn("_pending_", body)
+
+    def test_the_artifact_is_owner_only(self):
+        """It describes production failures and is meant to be shared BY CHOICE.
+
+        The directory has been 0o700 from the start; the file inside it inherited the
+        umask, so on a machine with a permissive umask the filesystem decided who could
+        read it before the operator did.
+        """
+        import os
+        import stat
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        if os.name == "nt":  # pragma: no cover - POSIX permission bits only
+            self.skipTest("POSIX mode bits")
+        inc = store.claim(self._signal(), operating_mode="observe")
+        assert inc is not None
+        store.transition(inc.incident_id, models.STATUS_INVESTIGATING)
+        store.transition(inc.incident_id, models.STATUS_RESOLVED)
+        mode = stat.S_IMODE(store.incident_log_path(inc.incident_id).stat().st_mode)
+        self.assertEqual(mode & 0o077, 0, f"postmortem is readable beyond its owner: {mode:o}")
+
+    def test_a_failed_write_does_not_fail_the_close(self):
+        """A record of a state change must never be able to fail the state change.
+
+        Same reasoning the Slack mirror already runs on: by the time the artifact is
+        rendered the index write is durable, so an unwritable data directory must leave the
+        incident resolved rather than raising out of ``transition``.
+        """
+        from unittest import mock
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(self._signal(), operating_mode="observe")
+        assert inc is not None
+        store.transition(inc.incident_id, models.STATUS_INVESTIGATING)
+        with mock.patch.object(store, "write_log", side_effect=OSError("read-only fs")):
+            closed = store.transition(inc.incident_id, models.STATUS_RESOLVED)
+        self.assertEqual(closed.status, models.STATUS_RESOLVED)
+        persisted = store.get_incident(inc.incident_id)
+        assert persisted is not None
+        self.assertEqual(persisted.status, models.STATUS_RESOLVED)
+
+    def test_a_credential_in_provider_text_never_reaches_the_artifact(self):
+        """The postmortem is the one file an operator is EXPECTED to hand to someone else.
+
+        So it is the worst possible place for a leaked credential: the operator forwards it
+        themselves, with their own confidence behind it. The renderer interpolated provider
+        titles and a model-authored diagnosis verbatim and no ``redact`` call existed in
+        this module at all — invisible only because no caller ever produced a file.
+
+        Covers both scanners on purpose. Core alone misses a bare-hex Datadog key and a
+        prefix-less bearer token; the app's token pass alone misses an AWS access key id.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        dd_key = "0123456789abcdef0123456789abcdef"
+        signal = self._signal(title=f"probe failed: DD-API-KEY: {dd_key}", resource="svc/api")
+        inc = store.claim(signal, operating_mode="observe")
+        assert inc is not None
+        store.transition(inc.incident_id, models.STATUS_INVESTIGATING)
+        store.transition(
+            inc.incident_id,
+            models.STATUS_RESOLVED,
+            diagnosis="the reproducer used AKIAIOSFODNN7EXAMPLE",
+            resolution="rotated it; curl used Bearer sk-abcdefghijklmnopqrst",
+        )
+
+        body = store.read_log(inc.incident_id)
+        self.assertTrue(body, "no artifact to check")
+        self.assertNotIn(dd_key, body)
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", body)
+        self.assertNotIn("sk-abcdefghijklmnopqrst", body)
+        # Still a usable postmortem: only the secrets are gone, not the narrative.
+        self.assertIn("probe failed", body)
+        self.assertIn("the reproducer used", body)
+
+    def test_the_narrative_survives_redaction(self):
+        """Redaction must not be so eager that the artifact stops being worth sharing.
+
+        A scanner that ate ordinary diagnostic prose would make the file useless and push
+        people back to pasting the raw transcript, which is strictly worse.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        prose = "Connection pool exhausted at 14:02; tokenization-heavy requests queued."
+        inc = store.claim(self._signal(), operating_mode="observe")
+        assert inc is not None
+        store.transition(inc.incident_id, models.STATUS_INVESTIGATING)
+        store.transition(inc.incident_id, models.STATUS_RESOLVED, diagnosis=prose)
+        self.assertIn(prose, store.read_log(inc.incident_id))
+
+    def test_pruning_the_index_keeps_the_written_record(self):
+        """``prune_closed`` bounds the INDEX, and must not destroy history on disk.
+
+        That was already the stated decision; it only became a testable claim once a file
+        actually existed to delete.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(self._signal(), operating_mode="observe")
+        assert inc is not None
+        store.transition(inc.incident_id, models.STATUS_INVESTIGATING)
+        store.transition(inc.incident_id, models.STATUS_RESOLVED)
+        store.prune_closed(keep=0)
+        self.assertIsNone(store.get_incident(inc.incident_id))
+        self.assertTrue(store.incident_log_path(inc.incident_id).is_file())
+        self.assertIn("## Diagnosis", store.read_log(inc.incident_id))
+
+
 class TestStaleSweep(_HomeIsolated):
     @staticmethod
     def _backdate(incident_id: str, hours: int) -> None:
@@ -383,6 +583,68 @@ class TestStaleSweep(_HomeIsolated):
         store.transition(inc.incident_id, models.STATUS_RESOLVED)
         self._backdate(inc.incident_id, hours=99)
         self.assertEqual(store.sweep_stale(stale_after_secs=3600), [])
+
+    def test_unanswered_needs_human_is_eventually_released(self):
+        """An incident nobody answers must not pin its signal as claimed forever.
+
+        ``LEGAL_TRANSITIONS`` has always legalised ``needs_human -> stale`` for exactly
+        this reason, and the sweep never traversed it: ``needs_human`` was absent from
+        ``_SWEEPABLE_STATUSES``, so the alarm was never re-claimed and nothing said so.
+        The old guard asserted only that the transition was *legal*, which is why the
+        gap survived — this exercises the sweep itself.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(self._signal(), operating_mode=models.MODE_OBSERVE)
+        assert inc is not None
+        store.transition(inc.incident_id, models.STATUS_NEEDS_HUMAN)
+        # Past even the longer needs_human threshold (6× the working one).
+        self._backdate(inc.incident_id, hours=99)
+        released = store.sweep_stale(stale_after_secs=3600)
+        self.assertIn(inc.incident_id, released)
+        refreshed = store.get_incident(inc.incident_id)
+        assert refreshed is not None
+        self.assertEqual(refreshed.status, models.STATUS_STALE)
+
+    def test_needs_human_gets_a_longer_grace_than_a_dead_investigation(self):
+        """Waiting on a person is legitimately slower than an agent dying.
+
+        At 5 hours idle an ``investigating`` incident is stale (its agent is gone) but a
+        ``needs_human`` one is not — the operator may simply be asleep, and releasing it
+        would discard the investigation's context to re-derive it.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        waiting = store.claim(
+            self._signal(native_id="alarm/waiting"), operating_mode=models.MODE_OBSERVE
+        )
+        working = store.claim(
+            self._signal(native_id="alarm/working"), operating_mode=models.MODE_OBSERVE
+        )
+        assert waiting is not None and working is not None
+        store.transition(waiting.incident_id, models.STATUS_NEEDS_HUMAN)
+        store.transition(working.incident_id, models.STATUS_INVESTIGATING)
+        self._backdate(waiting.incident_id, hours=5)
+        self._backdate(working.incident_id, hours=5)
+
+        released = store.sweep_stale(stale_after_secs=3600)
+        self.assertIn(working.incident_id, released)
+        self.assertNotIn(waiting.incident_id, released)
+
+    def test_needs_human_threshold_is_independently_tunable(self):
+        """An operator who wants them coupled differently can say so."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(self._signal(), operating_mode=models.MODE_OBSERVE)
+        assert inc is not None
+        store.transition(inc.incident_id, models.STATUS_NEEDS_HUMAN)
+        self._backdate(inc.incident_id, hours=5)
+        # Default multiplier would keep it (6h); an explicit 1h releases it.
+        self.assertEqual(store.sweep_stale(stale_after_secs=3600), [])
+        self.assertIn(
+            inc.incident_id,
+            store.sweep_stale(stale_after_secs=3600, needs_human_after_secs=3600),
+        )
 
 
 class TestAutonomyGate(_HomeIsolated):
@@ -922,27 +1184,231 @@ class TestLedger(_HomeIsolated):
         self.assertEqual(entry.trust, models.TRUST_VERIFIED)
         self.assertEqual(entry.confidence, models.CONFIDENCE_HIGH)
 
+    def _proven(self, **overrides):
+        """A verified/high entry that has already earned the fast path."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        entry = models.LedgerEntry.create(
+            pattern=overrides.pop("pattern", "p"),
+            fix=overrides.pop("fix", "f"),
+            trust=models.TRUST_VERIFIED,
+            confidence=models.CONFIDENCE_HIGH,
+        )
+        entry.use_count = ledger.MIN_USES_FOR_FAST_PATH
+        for key, value in overrides.items():
+            setattr(entry, key, value)
+        return entry
+
     def test_fast_path_requires_verified_and_high(self):
         from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
 
-        weak = [
+        weak = self._proven()
+        weak.trust = models.TRUST_OBSERVED
+        self.assertFalse(ledger.is_fast_path([weak]))
+        self.assertTrue(ledger.is_fast_path([self._proven()]))
+
+    def test_fast_path_also_requires_a_track_record(self):
+        """Verified + high on an entry nobody has ever used is a claim, not a record.
+
+        `POST /ledger` takes `confidence` and `trust` verbatim, so without this floor one
+        hand-authored line unlocked "propose this fix directly" for a production failure
+        on its very first match — and `record_use` then binds the provider key, so every
+        later occurrence presents that same single piece of evidence as an EXACT match.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        fresh = self._proven(use_count=ledger.MIN_USES_FOR_FAST_PATH - 1)
+        self.assertFalse(ledger.is_fast_path([fresh]))
+        self.assertTrue(ledger.is_fast_path([self._proven()]))
+
+    def test_one_recorded_failure_relocks_the_fast_path(self):
+        """Unlocking needs corroboration; re-locking needs one counterexample.
+
+        The asymmetry is deliberate. A fix observed not to hold must stop being the thing
+        an agent proposes without checking — and it stays in the ledger with its full
+        text, because a fix that works sometimes is worth more than nothing.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        missed = self._proven(miss_count=1)
+        self.assertFalse(ledger.is_fast_path([missed]))
+        self.assertTrue(ledger.is_demoted(missed))
+        self.assertFalse(ledger.is_demoted(self._proven()))
+
+    def test_record_miss_does_not_inflate_the_use_count(self):
+        """A miss is not a use — that inversion is the original defect turned inside out."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        entry = ledger.upsert(models.LedgerEntry.create(pattern="p", fix="f"))
+        ledger.record_use(entry.entry_id)
+        updated = ledger.record_miss(entry.entry_id)
+        assert updated is not None
+        self.assertEqual(updated.use_count, 1)
+        self.assertEqual(updated.miss_count, 1)
+        self.assertTrue(updated.last_miss)
+
+    def test_record_miss_on_a_pruned_entry_is_not_an_error(self):
+        """Hygiene prunes; a miss charged to a gone entry must be a no-op, not a raise."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        self.assertIsNone(ledger.record_miss("nope"))
+
+    def test_reposting_an_entry_cannot_erase_its_recorded_failures(self):
+        """The promotion route must not double as a way to launder counter-evidence.
+
+        `ledger-hygiene.md` promotes observed → verified by re-POSTing the same
+        pattern+fix, which merges by content-addressed id. If that merge took the incoming
+        `miss_count` of 0, the nightly promotion step would clear every recorded failure
+        on exactly the entries most likely to have them — with one curl.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        entry = ledger.upsert(models.LedgerEntry.create(pattern="p", fix="f"))
+        ledger.record_miss(entry.entry_id)
+        merged = ledger.upsert(
             models.LedgerEntry.create(
-                pattern="p",
-                fix="f",
-                trust=models.TRUST_OBSERVED,
+                pattern="p", fix="f", trust=models.TRUST_VERIFIED,
                 confidence=models.CONFIDENCE_HIGH,
             )
-        ]
-        strong = [
+        )
+        self.assertEqual(merged.miss_count, 1)
+        self.assertEqual(ledger.read_entries()[0].miss_count, 1)
+
+    def test_a_git_merge_cannot_launder_a_teammates_recorded_failure(self):
+        """Duplicate ids reconcile on READ, and miss_count must take the max there too.
+
+        Confidence and trust take the STRONGEST of two records, so a merge that took the
+        lower miss_count would make "pull the team ledger" a way to clear a demotion —
+        the one direction a shared append-only knowledge base must never move by itself.
+        """
+        import json
+
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        mine = models.LedgerEntry.create(pattern="p", fix="f")
+        theirs = models.LedgerEntry.create(pattern="p", fix="f")
+        theirs.miss_count = 2
+        theirs.last_miss = "2026-07-01T00:00:00Z"
+        path = ledger.ledger_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Two lines, same content-addressed id — exactly what a real `git merge` leaves.
+        path.write_text(
+            json.dumps(mine.to_dict()) + "\n" + json.dumps(theirs.to_dict()) + "\n",
+            encoding="utf-8",
+        )
+        entries = ledger.read_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].miss_count, 2)
+
+    def test_hygiene_demotes_an_entry_whose_fix_stopped_working(self):
+        """The mechanical downward path §5.9 asked for, on the nightly pass not the hot one."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        entry = ledger.upsert(
             models.LedgerEntry.create(
-                pattern="p",
-                fix="f",
-                trust=models.TRUST_VERIFIED,
-                confidence=models.CONFIDENCE_HIGH,
+                pattern="p", fix="f",
+                trust=models.TRUST_VERIFIED, confidence=models.CONFIDENCE_HIGH,
             )
-        ]
-        self.assertFalse(ledger.is_fast_path(weak))
-        self.assertTrue(ledger.is_fast_path(strong))
+        )
+        ledger.record_use(entry.entry_id)
+        ledger.record_use(entry.entry_id)
+        ledger.record_miss(entry.entry_id)
+        ledger.record_miss(entry.entry_id)
+        summary = ledger.hygiene()
+        self.assertEqual(summary["demoted"], 1)
+        stored = ledger.read_entries()[0]
+        self.assertEqual(stored.confidence, models.CONFIDENCE_MEDIUM)
+        # Trust is NOT rewritten: "somebody saw this work" stays true even after it
+        # failed elsewhere, and overwriting a human's own observation is editorialising.
+        self.assertEqual(stored.trust, models.TRUST_VERIFIED)
+
+    def test_one_failure_costs_exactly_one_confidence_step(self):
+        """Hygiene runs nightly and its test is a ratio, which stays true once true.
+
+        Without the spent-evidence guard a single miss would walk an entry
+        high → medium → low across three nights on no new evidence at all, arriving at
+        the bottom of the scale for one failure.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        entry = ledger.upsert(
+            models.LedgerEntry.create(
+                pattern="p", fix="f",
+                trust=models.TRUST_VERIFIED, confidence=models.CONFIDENCE_HIGH,
+            )
+        )
+        ledger.record_miss(entry.entry_id)
+        self.assertEqual(ledger.hygiene()["demoted"], 1)
+        self.assertEqual(ledger.hygiene()["demoted"], 0)
+        self.assertEqual(ledger.hygiene()["demoted"], 0)
+        self.assertEqual(ledger.read_entries()[0].confidence, models.CONFIDENCE_MEDIUM)
+        # A SECOND, genuinely new failure spends a second step.
+        ledger.record_miss(entry.entry_id)
+        self.assertEqual(ledger.hygiene()["demoted"], 1)
+        self.assertEqual(ledger.read_entries()[0].confidence, models.CONFIDENCE_LOW)
+
+    def test_a_well_used_entry_is_not_condemned_by_one_bad_night(self):
+        """The ratio's whole purpose: more evidence it works, more it takes to overturn."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        entry = ledger.upsert(
+            models.LedgerEntry.create(
+                pattern="p", fix="f",
+                trust=models.TRUST_VERIFIED, confidence=models.CONFIDENCE_HIGH,
+            )
+        )
+        for _ in range(8):
+            ledger.record_use(entry.entry_id)
+        ledger.record_miss(entry.entry_id)
+        self.assertEqual(ledger.hygiene()["demoted"], 0)
+        self.assertEqual(ledger.read_entries()[0].confidence, models.CONFIDENCE_HIGH)
+
+    def test_stats_reports_proven_separately_from_its_two_halves(self):
+        """`verified` and `high_confidence` are each HALF the bar, so neither is the bar.
+
+        A board showing only those two overstated the ledger's authority: an entry can be
+        counted in both while being something nobody has ever successfully applied.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        entry = ledger.upsert(
+            models.LedgerEntry.create(
+                pattern="p", fix="f",
+                trust=models.TRUST_VERIFIED, confidence=models.CONFIDENCE_HIGH,
+            )
+        )
+        stats = ledger.stats()
+        self.assertEqual(stats["verified"], 1)
+        self.assertEqual(stats["high_confidence"], 1)
+        self.assertEqual(stats["proven"], 0)
+        for _ in range(ledger.MIN_USES_FOR_FAST_PATH):
+            ledger.record_use(entry.entry_id)
+        self.assertEqual(ledger.stats()["proven"], 1)
+        ledger.record_miss(entry.entry_id)
+        after = ledger.stats()
+        self.assertEqual(after["proven"], 0)
+        self.assertEqual(after["demoted"], 1)
+        self.assertEqual(after["total_misses"], 1)
+
+    def test_prune_order_stops_preferring_the_most_misleading_entries(self):
+        """The prune sorted by `-use_count` alone, so a false match was pruned LAST.
+
+        `use_count` incremented at claim time, before any outcome existed — so an entry
+        that kept matching the wrong failure climbed the ranking on every mismatch and
+        was the last thing the cap dropped. The ledger preferentially kept its worst rows.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        misleading = ledger.upsert(models.LedgerEntry.create(pattern="wrong", fix="a"))
+        useful = ledger.upsert(models.LedgerEntry.create(pattern="right", fix="b"))
+        for _ in range(4):
+            ledger.record_use(misleading.entry_id)
+            ledger.record_miss(misleading.entry_id)
+        for _ in range(3):
+            ledger.record_use(useful.entry_id)
+        ledger.hygiene()
+        # Hygiene writes in prune order, so position IS survival order at the cap.
+        self.assertEqual([e.pattern for e in ledger.read_entries()], ["right", "wrong"])
 
     def test_record_use_binds_new_fingerprint(self):
         from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
@@ -953,6 +1419,157 @@ class TestLedger(_HomeIsolated):
         assert updated is not None
         self.assertEqual(updated.use_count, 1)
         self.assertIn("b", updated.fingerprints)
+
+
+class TestShapeHashOverMerges(_HomeIsolated):
+    """The motivating defect for the exact-identity layer, asserted as a fact.
+
+    ``compute_fingerprint`` strips every bare digit, so alarms that differ only in a
+    number are indistinguishable to it. This is not a bug to fix in the hash — the
+    stripping is deliberate, so that a DLQ at 500 and at 900 match — it is a reason the
+    hash cannot be the ONLY key. Pinned so nobody later "fixes" the collision and
+    quietly removes the reason the provider_key path exists.
+    """
+
+    def test_distinct_failures_collide_on_the_shape_hash(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            compute_fingerprint as fp,
+        )
+
+        self.assertEqual(
+            fp("cloudwatch", "svc/api", "4xx error rate above 5"),
+            fp("cloudwatch", "svc/api", "5xx error rate above 1"),
+        )
+        self.assertEqual(
+            fp("cloudwatch", "svc/api", "p99 latency above 500ms"),
+            fp("cloudwatch", "svc/api", "p50 latency above 100ms"),
+        )
+
+    def test_an_exact_provider_key_separates_them(self):
+        """What the collision costs, and what the exact key buys."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        four = models.Signal.create(
+            source="cloudwatch",
+            native_id="alarm/four",
+            title="4xx error rate above 5",
+            resource="svc/api",
+            provider_key="us-east-1/four-xx",
+        )
+        five = models.Signal.create(
+            source="cloudwatch",
+            native_id="alarm/five",
+            title="5xx error rate above 1",
+            resource="svc/api",
+            provider_key="us-east-1/five-xx",
+        )
+        # Same shape hash, different provider identity — the premise of the fix.
+        self.assertEqual(four.fingerprint, five.fingerprint)
+        self.assertNotEqual(four.provider_key, five.provider_key)
+
+        # A lesson learned about the 4xx alarm, bound to BOTH its keys.
+        ledger.upsert(
+            models.LedgerEntry.create(
+                pattern="4xx spike from a bad deploy",
+                fix="roll back the canary",
+                fingerprints=[four.fingerprint],
+                provider_keys=[four.provider_key],
+                confidence=models.CONFIDENCE_HIGH,
+                trust=models.TRUST_VERIFIED,
+            )
+        )
+        # A different, weaker lesson about the 5xx alarm.
+        ledger.upsert(
+            models.LedgerEntry.create(
+                pattern="5xx from upstream timeouts",
+                fix="raise the pool size",
+                fingerprints=[five.fingerprint],
+                provider_keys=[five.provider_key],
+            )
+        )
+
+        # Both still match by shape (they share a fingerprint) — but the 5xx signal's
+        # OWN entry must rank first, ahead of the verified/high one that merely collides.
+        ranked = ledger.match(five.fingerprint, provider_key=five.provider_key)
+        self.assertEqual(ranked[0].pattern, "5xx from upstream timeouts")
+        self.assertTrue(ledger.is_exact_match(ranked[0], five.provider_key))
+        self.assertFalse(ledger.is_exact_match(ranked[1], five.provider_key))
+
+    def test_without_a_provider_key_behaviour_is_unchanged(self):
+        """Adapters that publish no stable identity must keep working exactly as before."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        ledger.upsert(models.LedgerEntry.create(pattern="p", fix="f", fingerprints=["fp"]))
+        self.assertEqual(len(ledger.match("fp")), 1)
+        self.assertEqual(len(ledger.match("fp", provider_key="")), 1)
+
+    def test_a_provider_key_alone_matches_when_the_shape_drifted(self):
+        """The point of the exact key: a reworded alarm still finds its own lesson."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        ledger.upsert(
+            models.LedgerEntry.create(
+                pattern="p", fix="f", fingerprints=["old-shape"], provider_keys=["cw:alarm-7"]
+            )
+        )
+        found = ledger.match("a-totally-different-shape", provider_key="cw:alarm-7")
+        self.assertEqual(len(found), 1)
+
+    def test_record_use_binds_the_provider_key(self):
+        """The first fuzzy match teaches the entry the provider's identity."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        entry = models.LedgerEntry.create(pattern="p", fix="f", fingerprints=["fp"])
+        ledger.upsert(entry)
+        updated = ledger.record_use(entry.entry_id, fingerprint="fp", provider_key="cw:alarm-9")
+        assert updated is not None
+        self.assertIn("cw:alarm-9", updated.provider_keys)
+        # And the next occurrence is now an EXACT match rather than a shape guess.
+        self.assertTrue(ledger.is_exact_match(ledger.match("fp", provider_key="cw:alarm-9")[0], "cw:alarm-9"))
+
+    def test_provider_keys_union_on_merge_like_fingerprints(self):
+        """Preserves the conflict-free git dedupe property for the new field."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        ledger.upsert(models.LedgerEntry.create(pattern="p", fix="f", provider_keys=["k1"]))
+        ledger.upsert(models.LedgerEntry.create(pattern="p", fix="f", provider_keys=["k2"]))
+        entries = ledger.read_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(set(entries[0].provider_keys), {"k1", "k2"})
+
+    def test_keys_bound_to_one_entry_are_capped(self):
+        """A per-occurrence identity (PagerDuty) must not grow a JSONL line forever."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
+
+        entry = models.LedgerEntry.create(pattern="p", fix="f")
+        ledger.upsert(entry)
+        for i in range(ledger.MAX_KEYS_PER_ENTRY + 25):
+            ledger.record_use(entry.entry_id, provider_key=f"pd:incident/{i}")
+        stored = ledger.read_entries()[0]
+        self.assertLessEqual(len(stored.provider_keys), ledger.MAX_KEYS_PER_ENTRY)
+        # Newest kept, oldest dropped — the recent identity is the one about to recur.
+        self.assertIn(f"pd:incident/{ledger.MAX_KEYS_PER_ENTRY + 24}", stored.provider_keys)
+        self.assertNotIn("pd:incident/0", stored.provider_keys)
+
+    def test_a_ledger_line_written_before_the_field_existed_still_loads(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        legacy = {
+            "entry_id": "abc",
+            "pattern": "p",
+            "fix": "f",
+            "fingerprints": ["fp"],
+            "confidence": "medium",
+            "trust": "observed",
+            "use_count": 2,
+        }
+        path = ledger.ledger_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+        loaded = ledger.read_entries()
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0].provider_keys, [])
+        self.assertEqual(len(ledger.match("fp")), 1)
 
     def test_hygiene_decays_unused_confidence(self):
         from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, models
@@ -1077,3 +1694,164 @@ class TestContradictionDetection(_HomeIsolated):
         from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
 
         self.assertEqual(ledger.find_contradictions(), [])
+
+
+class TestThePostmortemSaysWhetherAnythingWasVerified(_HomeIsolated):
+    """The artifact is what a colleague reads with no access to the board.
+
+    "Actions taken: silenced the alarm" is the sentence most likely to be believed as an
+    OUTCOME, and for the whole life of the renderer it would have said exactly that on the
+    strength of a 2xx, with nothing in the file admitting no code had looked again.
+    """
+
+    def _closed(self, **fields):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models, store
+
+        inc = store.claim(
+            models.Signal.create(source="cloudwatch", native_id="alarm/dlq", title="DLQ deep"),
+            operating_mode=models.MODE_ACT,
+        )
+        assert inc is not None
+        if fields:
+            store.update_fields(inc.incident_id, **fields)
+        store.transition(inc.incident_id, models.STATUS_INVESTIGATING)
+        store.transition(inc.incident_id, models.STATUS_RESOLVED, resolution="silenced it")
+        return store.read_log(inc.incident_id)
+
+    def test_a_still_firing_action_is_named_as_such_in_the_artifact(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            ACTION_SILENCE,
+            VERIFY_STILL_FIRING,
+        )
+
+        log = self._closed(
+            last_action=ACTION_SILENCE,
+            verification=VERIFY_STILL_FIRING,
+            verification_detail="Still firing at cloudwatch after the silence.",
+        )
+        self.assertIn("STILL FIRING", log)
+
+    def test_an_unverifiable_action_says_sent_not_confirmed(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            ACTION_ACK,
+            VERIFY_NOT_CHECKABLE,
+        )
+
+        log = self._closed(last_action=ACTION_ACK, verification=VERIFY_NOT_CHECKABLE)
+        self.assertIn("cannot observe", log)
+        self.assertIn("not as confirmed", log)
+
+    def test_an_incident_that_closed_before_its_recheck_ran_admits_it(self):
+        """`resolved` is terminal, so this is the last word on it — it must not imply success."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            ACTION_SILENCE,
+            VERIFY_PENDING,
+        )
+
+        log = self._closed(last_action=ACTION_SILENCE, verification=VERIFY_PENDING)
+        self.assertIn("NOT CONFIRMED", log)
+
+    def test_an_incident_with_no_action_gets_no_verification_line_at_all(self):
+        """Most incidents. A "not applicable" line on every one buries the cases that matter."""
+        log = self._closed()
+        self.assertNotIn("Verification", log)
+
+    def test_the_verification_detail_goes_through_the_redactor(self):
+        """It quotes a provider's own poll-failure text, which can carry a credential."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+            ACTION_SILENCE,
+            VERIFY_UNKNOWN,
+        )
+
+        log = self._closed(
+            last_action=ACTION_SILENCE,
+            verification=VERIFY_UNKNOWN,
+            verification_detail="401 from https://api.datadoghq.com?api_key=" + "a" * 32,
+        )
+        self.assertNotIn("a" * 32, log)
+
+
+class TestTheSweepWindowsAreReadableBack(_HomeIsolated):
+    """``PUT /settings`` accepted these three and no read path returned any of them.
+
+    So an operator could change how long a dead investigation pins a signal and get no
+    confirmation, no way to look the value up again, and — for the untouched case, which is
+    every install — no way to discover the defaults they were already living under. The
+    knob turned and the dial did not exist. A regression here silently restores that:
+    nothing else in the app would fail, which is precisely why it survived so long.
+    """
+
+    def test_the_defaults_in_force_are_reported_without_any_config(self):
+        """The commonest case. An install that never touched these still has values."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, rotation, store
+
+        windows = rotation.sweep_windows()
+        self.assertEqual(
+            windows["max_claims_per_cycle"], dispatch.DEFAULT_MAX_CLAIMS_PER_CYCLE
+        )
+        self.assertEqual(windows["stale_after_secs"], dispatch.DEFAULT_STALE_AFTER_SECS)
+        self.assertEqual(
+            windows["needs_human_stale_after_secs"],
+            dispatch.DEFAULT_STALE_AFTER_SECS * store.DEFAULT_NEEDS_HUMAN_STALE_MULTIPLIER,
+        )
+
+    def test_an_unset_needs_human_window_is_reported_resolved_not_as_zero(self):
+        """Unset does NOT mean "never released" — ``sweep_stale`` derives it.
+
+        Reporting the raw stored ``0`` would tell an operator an unanswered question holds
+        its signal forever, which is the opposite of what the sweep does.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation, store
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
+            set_top_level,
+        )
+
+        set_top_level("stale_after_secs", 600)
+        windows = rotation.sweep_windows()
+        self.assertEqual(
+            windows["needs_human_stale_after_secs"],
+            600 * store.DEFAULT_NEEDS_HUMAN_STALE_MULTIPLIER,
+        )
+        # And it says the number is ours, not the operator's — a derived window MOVES when
+        # the working threshold changes, and the UI must be able to say which it is.
+        self.assertTrue(windows["needs_human_derived"])
+
+    def test_an_explicitly_set_needs_human_window_is_reported_as_pinned(self):
+        from kiro_crew.apps.builtins.ops_mission_control.backend import rotation
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
+            set_top_level,
+        )
+
+        set_top_level("stale_after_secs", 600)
+        set_top_level("needs_human_stale_after_secs", 9000)
+        windows = rotation.sweep_windows()
+        self.assertEqual(windows["needs_human_stale_after_secs"], 9000)
+        self.assertFalse(windows["needs_human_derived"])
+
+    def test_the_reported_windows_are_the_ones_the_heartbeat_actually_applies(self):
+        """The whole value of the dial is that it points where the machine is going.
+
+        ``rotation`` has to duplicate the config-key strings (importing them would close an
+        import cycle with ``dispatch``), so a rename on either side would leave this panel
+        confidently displaying a default while the heartbeat used the operator's value.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, rotation
+
+        self.assertEqual(rotation._CONFIG_MAX_CLAIMS, dispatch._CONFIG_MAX_CLAIMS)
+        self.assertEqual(rotation._CONFIG_STALE_AFTER, dispatch._CONFIG_STALE_AFTER)
+        self.assertEqual(
+            rotation._CONFIG_NEEDS_HUMAN_STALE_AFTER,
+            dispatch._CONFIG_NEEDS_HUMAN_STALE_AFTER,
+        )
+
+    def test_a_corrupt_stored_window_falls_back_instead_of_reporting_nonsense(self):
+        """``_config_int`` already guards this; the dial must inherit that, not bypass it."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import dispatch, rotation
+        from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
+            set_top_level,
+        )
+
+        set_top_level("stale_after_secs", "not a number")
+        self.assertEqual(
+            rotation.sweep_windows()["stale_after_secs"], dispatch.DEFAULT_STALE_AFTER_SECS
+        )

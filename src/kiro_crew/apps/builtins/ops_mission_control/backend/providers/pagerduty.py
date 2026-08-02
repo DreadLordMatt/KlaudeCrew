@@ -21,10 +21,12 @@ from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
     ACTION_ACK,
     ACTION_COMMENT,
     ACTION_RESOLVE,
+    ACTION_SILENCE,
     SEVERITY_CRITICAL,
     SEVERITY_WARNING,
     STATE_FIRING,
     Signal,
+    resolve_silence_secs,
 )
 from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
     config_list,
@@ -138,6 +140,13 @@ class PagerDutyAdapter:
                     fired_at=str(incident.get("created_at", "")),
                     resource=str(service.get("summary", "")) if isinstance(service, dict) else "",
                     url=str(incident.get("html_url", "")),
+                    # PagerDuty mints a NEW incident id each time an alert re-triggers, so
+                    # unlike a CloudWatch alarm name this identifies the occurrence, not
+                    # the recurring failure. It is still the right exact key — matching
+                    # "this very incident" is correct when work is re-claimed after a
+                    # sweep — it just will not generalize across occurrences, and the
+                    # fingerprint remains the path that does.
+                    provider_key=f"incident/{incident_id}" if incident_id else "",
                     labels={
                         "incident_number": str(incident.get("incident_number", "")),
                         "status": str(incident.get("status", "")),
@@ -186,7 +195,12 @@ class PagerDutyAdapter:
         # advertise no actions rather than failing at execute time.
         if not config_value(PROVIDER_ID, _CONFIG_FROM_EMAIL):
             return frozenset()
-        return frozenset({ACTION_ACK, ACTION_RESOLVE, ACTION_COMMENT})
+        # ``silence`` maps onto PagerDuty's own snooze, which takes a REQUIRED duration —
+        # so it is a genuine time-boxed suppression rather than an ack dressed up as one.
+        # An ack, by contrast, has no expiry: it says "I am on it", and if the responder
+        # then vanishes the incident stays acknowledged and un-paged indefinitely. Those
+        # are different promises and the vocabulary now keeps them apart.
+        return frozenset({ACTION_ACK, ACTION_RESOLVE, ACTION_COMMENT, ACTION_SILENCE})
 
     async def execute(self, signal: Signal, action: str, payload: dict[str, Any]) -> ActionResult:
         if not self.configured():
@@ -213,6 +227,24 @@ class PagerDutyAdapter:
                     method="POST",
                     headers=_headers(for_write=True),
                     body={"note": {"content": str(payload.get("note", ""))[:1000]}},
+                )
+            elif action == ACTION_SILENCE:
+                # Snooze re-pages automatically when the window elapses, which is the
+                # self-healing property that makes this the safe verb to grant.
+                duration = resolve_silence_secs(payload.get("duration_secs"))
+                request_json(
+                    f"{_API_BASE}/incidents/{incident_id}/snooze",
+                    method="POST",
+                    headers=_headers(for_write=True),
+                    body={"duration": duration},
+                )
+                return ActionResult(
+                    ok=True,
+                    action=action,
+                    detail=(
+                        f"pagerduty incident {incident_id} snoozed for "
+                        f"{duration // 60}m — it re-pages when the window elapses"
+                    ),
                 )
             else:
                 status = "acknowledged" if action == ACTION_ACK else "resolved"

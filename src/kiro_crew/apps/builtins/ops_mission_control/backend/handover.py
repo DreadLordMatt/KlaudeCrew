@@ -34,10 +34,6 @@ import logging
 from typing import Any
 
 from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, store
-from kiro_crew.apps.builtins.ops_mission_control.backend.ledger import (
-    FAST_PATH_CONFIDENCE,
-    FAST_PATH_TRUST,
-)
 from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
     STATUS_ESCALATED,
     STATUS_NEEDS_HUMAN,
@@ -78,15 +74,29 @@ def recurring_patterns() -> list[dict[str, Any]]:
             "pattern": _clip(e.pattern),
             "fix": _clip(e.fix),
             "uses": e.use_count,
+            #: Times the fix was cited and the failure came back. In the digest because
+            #: the digest's whole job at shift change is "what will page you and what to
+            #: do about it" — and "the obvious answer to this one has already failed
+            #: twice" is the single most valuable thing the incoming responder can be
+            #: told about a recurring pattern. Without it they reach for the top-ranked
+            #: fix precisely because it recurs.
+            "misses": e.miss_count,
             "confidence": e.confidence,
             "trust": e.trust,
-            # A verified/high entry can be applied directly; anything weaker is a
-            # hypothesis, and saying so is the difference between a useful digest
-            # and one that gets someone to apply the wrong fix confidently.
-            # Reuse the ledger's own fast-path definition rather than restating
-            # "verified/high" — a digest that disagreed with the engine about what
-            # counts as proven would tell a responder to trust the wrong entry.
-            "proven": e.trust == FAST_PATH_TRUST and e.confidence == FAST_PATH_CONFIDENCE,
+            # A proven entry can be applied directly; anything weaker is a hypothesis,
+            # and saying so is the difference between a useful digest and one that gets
+            # someone to apply the wrong fix confidently.
+            #
+            # Delegated to the ledger's own predicate rather than restating
+            # "verified/high" — which is exactly what this line used to do, and it went
+            # stale the moment the bar gained a use-count floor and a miss ceiling. A
+            # digest that disagrees with the engine about what counts as proven tells a
+            # responder to trust an entry the agent itself would not.
+            "proven": ledger.entry_unlocks_fast_path(e),
+            #: Louder than "not proven", and a different fact: this fix was tried and
+            #: the failure returned. An untested hypothesis is worth more than a
+            #: refuted one, so the digest must not render them the same.
+            "demoted": ledger.is_demoted(e),
             "last_used": e.last_used,
         }
         for e in entries[:MAX_PATTERNS]
@@ -249,6 +259,12 @@ def render_text(digest: dict[str, Any]) -> str:
         out.append("What keeps happening (most frequent first):")
         for pat in digest["recurring_patterns"]:
             mark = "proven" if pat["proven"] else f"{pat['confidence']}/{pat['trust']}"
+            # A refuted fix is called out IN the pasted text, not only in the dashboard.
+            # This text is what lands in the handover thread, and it is where the incoming
+            # responder reads "this keeps happening" — the one place a fix that has already
+            # failed must not appear as the answer with nothing said about it.
+            if pat["misses"]:
+                mark += f", failed {pat['misses']}×"
             out.append(f"  • {pat['uses']}× [{mark}] {pat['pattern']}")
             out.append(f"      fix: {pat['fix']}")
         out.append("")

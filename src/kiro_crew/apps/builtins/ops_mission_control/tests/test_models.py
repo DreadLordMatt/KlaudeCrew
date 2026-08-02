@@ -82,6 +82,118 @@ class TestNormalization(unittest.TestCase):
         self.assertEqual(models.normalize_state("resolved"), models.STATE_OK)
 
 
+class TestProviderSideSuppressionIsReadable(unittest.TestCase):
+    """"A human parked this at the provider" must be distinguishable from every other state.
+
+    Before this, the entire suppression vocabulary normalized to ``unknown`` — the same
+    answer ``banana`` gets — so an adapter had two wrong options: report ``firing`` and
+    investigate something an operator explicitly parked, or drop the signal so that "the
+    app ignored my alarm" and "someone silenced it" look identical.
+    """
+
+    def test_every_providers_word_for_parked_reads_as_suppressed(self):
+        """The vocabularies differ per provider; all of them used to land in `unknown`."""
+        for raw in (
+            "suppressed",  # Alertmanager status.state
+            "silenced",
+            "inhibited",  # Alertmanager, masked by a higher-ranked alert
+            "muted",  # Datadog
+            "snoozed",
+            "downtime",  # Icinga
+            "in downtime",
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(models.normalize_state(raw), models.STATE_SUPPRESSED)
+
+    def test_the_whole_v2_status_enum_parses_not_just_the_parked_value(self):
+        """Found while implementing this: admitting only `suppressed` was worse than nothing.
+
+        Alertmanager's v2 `alertStatus.state` enum is `{unprocessed, active, suppressed}`.
+        Teaching the reader the object shape while leaving the other two values falling to
+        `unknown` would mean the v2 payload parses a SILENCED alert correctly and drops a
+        LIVE one — the app going quiet on real work in exchange for reading a mute.
+        """
+        self.assertEqual(models.normalize_state("active"), models.STATE_FIRING)
+        self.assertEqual(models.normalize_state("unprocessed"), models.STATE_FIRING)
+        self.assertEqual(models.normalize_state("suppressed"), models.STATE_SUPPRESSED)
+
+    def test_suppressed_is_not_unknown(self):
+        """The two mean opposite things: 'we read it' versus 'we could not read it'."""
+        self.assertNotEqual(models.normalize_state("suppressed"), models.normalize_state("banana"))
+
+    def test_suppressed_is_a_valid_state(self):
+        """`from_dict` re-normalizes, so a state outside VALID_STATES would not round-trip."""
+        self.assertIn(models.STATE_SUPPRESSED, models.VALID_STATES)
+
+    def test_acknowledged_is_still_firing(self):
+        """Deliberate: an acknowledged page is unresolved and the point is to work it.
+
+        Pinned because "ack means someone handled it" is the intuitive-and-wrong reading,
+        and mapping it here would silently stop the app responding to live pages.
+        """
+        self.assertEqual(models.normalize_state("acknowledged"), models.STATE_FIRING)
+
+    def test_a_suppressed_signal_carries_its_attribution(self):
+        """Who parked it is what separates 'ignored' from 'silenced' for an operator."""
+        signal = models.Signal.create(
+            source="webhook",
+            native_id="fp1",
+            title="disk full",
+            state="suppressed",
+            suppressed_by="silence-7f3",
+            suppressed_reason="silenced",
+        )
+        self.assertEqual(signal.state, models.STATE_SUPPRESSED)
+        self.assertEqual(signal.suppressed_by, "silence-7f3")
+        self.assertEqual(signal.suppressed_reason, "silenced")
+
+    def test_attribution_is_not_namespaced_by_source(self):
+        """Unlike `provider_key` this is display text, not a match key.
+
+        Prefixing it would put "webhook:silence-7f3" on the board where the operator wants
+        the silence id they can paste into Alertmanager.
+        """
+        signal = models.Signal.create(
+            source="webhook", native_id="x", title="t", suppressed_by="silence-7f3"
+        )
+        self.assertEqual(signal.suppressed_by, "silence-7f3")
+
+    def test_an_incident_written_before_these_fields_still_loads(self):
+        """New persisted fields must default empty or every on-disk incident breaks."""
+        legacy = {
+            "id": "webhook:old",
+            "source": "webhook",
+            "title": "an alarm from before",
+            "state": "firing",
+        }
+        signal = models.Signal.from_dict(legacy)
+        self.assertEqual(signal.suppressed_by, "")
+        self.assertEqual(signal.suppressed_reason, "")
+
+    def test_attribution_round_trips_through_disk(self):
+        signal = models.Signal.create(
+            source="webhook",
+            native_id="x",
+            title="t",
+            state="inhibited",
+            suppressed_by="ClusterDown",
+            suppressed_reason="inhibited",
+        )
+        restored = models.Signal.from_dict(signal.to_dict())
+        self.assertEqual(restored.state, models.STATE_SUPPRESSED)
+        self.assertEqual(restored.suppressed_by, "ClusterDown")
+        self.assertEqual(restored.suppressed_reason, "inhibited")
+
+    def test_reading_a_suppression_is_not_the_same_word_as_issuing_one(self):
+        """`ACTION_SILENCE` is a verb the app issues; this state is a fact it reads.
+
+        One word for both would merge our own outbound intent with another party's
+        decision, and only one of those is a fact about the world.
+        """
+        self.assertNotIn(models.STATE_SUPPRESSED, models.VALID_ACTIONS)
+        self.assertNotIn(models.ACTION_SILENCE, models.VALID_STATES)
+
+
 class TestEffectiveMode(unittest.TestCase):
     def test_rule_cannot_escalate_above_app_ceiling(self):
         """An operator pinned to observe cannot be overridden by a rule."""

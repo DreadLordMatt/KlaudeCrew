@@ -17,6 +17,17 @@ A two-instance roundtrip against a bare remote found four, in the order they bit
    ``git add ledger.jsonl`` only, so the on-call schedule — un-ignored specifically so it
    could sync — would have been committed nowhere and silently never reached anyone.
 
+A FIFTH was found later, and NOT by these tests — by inspecting the owner's live install:
+
+5. **The local repo was never on the configured branch.** ``git init`` ran with no ``-b``,
+   so git picked ``master``, and ``branch()`` was used ONLY inside refspecs. Config said
+   ``main``, ``.git/HEAD`` said ``master``, ``.git/config`` had no ``[branch]`` section.
+   These tests missed it because they only ever asked whether the CONTENT arrived — and it
+   did, through those explicit refspecs. What broke was everything around the content: no
+   upstream, so the operator's own ``git pull`` / ``git push`` in the ledger directory both
+   failed, in exactly the directory where a refused ``rotation.yaml`` has to be fixed by
+   hand. "The bytes arrived" is not the whole contract.
+
 These tests are slower than the mocked ones on purpose. The whole feature is "git moves
 the text", so the thing worth testing is git.
 """
@@ -350,3 +361,366 @@ class TestScheduleConflicts(_TwoInstances):
         self.assertNotIn("<<<<<<<", text, "markers must never survive a pull")
         self.assertIn("alice", text, "the remote's version wins")
         self.assertIn("schedule conflict", detail)
+
+
+class TestStatusMatchesWhatPushWillDo(_TwoInstances):
+    """``status()`` is the only thing the operator sees. It must not contradict ``push``.
+
+    Against a real repo because the point is agreement between two functions that read the
+    same working tree: a mocked git can make either one say anything.
+    """
+
+    def _schedule(self, ledger_mod, body: str):
+        path = ledger_mod.ledger_path().parent / "rotation.yaml"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    async def test_a_clean_repo_reports_syncing(self):
+        """The baseline the conflict cases are measured against."""
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        self._schedule(
+            ledger, "shifts:\n  - from: 2026-08-01\n    to: 2026-08-08\n    who: alice\n"
+        )
+        self.assertEqual(await sync.sync_safely(direction="push"), "pushed")
+
+        status = sync.status()
+        self.assertTrue(status["ready"])
+        self.assertTrue(status["initialized"])
+        self.assertFalse(status["conflict"])
+        self.assertFalse(status["schedule_conflict"])
+        self.assertIn("Syncing", status["detail"])
+
+    async def test_status_reports_the_refusal_push_actually_makes(self):
+        """The silent-stop this closes: refused pushes while the card read "Syncing …".
+
+        The refusal reached the log and a SEL audit line only, and ``sync_safely`` swallows
+        it into a warning, so the operator's single source of truth kept claiming sync was
+        working. Nothing new reached the team for as long as the conflict lasted.
+        """
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        self._schedule(
+            ledger,
+            "shifts:\n  - from: 2026-08-01\n    to: 2026-08-08\n"
+            "<<<<<<< HEAD\n    who: alice\n=======\n    who: bob\n>>>>>>> origin/main\n",
+        )
+
+        detail = await sync.sync_safely(direction="push")
+        status = sync.status()
+
+        self.assertIn("refused", detail)
+        self.assertTrue(status["schedule_conflict"], "the refusal must be visible in Settings")
+        self.assertIn("refused", status["detail"])
+        self.assertNotIn("Syncing", status["detail"])
+
+    async def test_a_conflicted_ledger_still_reports_as_publishing(self):
+        """A ledger conflict must NOT read like the schedule refusal.
+
+        ``push`` reconciles a conflicted ledger and publishes; saying "refused" here would
+        send the operator hand-editing a file the app has already fixed.
+        """
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        path = ledger.ledger_path()
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + '<<<<<<< HEAD\n{"entry_id": "x"}\n=======\n>>>>>>> origin/main\n',
+            encoding="utf-8",
+        )
+
+        status = sync.status()
+        self.assertTrue(status["conflict"])
+        self.assertFalse(status["schedule_conflict"])
+        self.assertNotIn("refused", status["detail"])
+        self.assertEqual(await sync.sync_safely(direction="push"), "pushed")
+
+
+class TestTheLocalBranchIsTheConfiguredBranch(_TwoInstances):
+    """A fifth bug of the same species, found in the owner's LIVE install, not by a test.
+
+    `git init` ran with no `-b`, so git picked its own default (`master`) and nothing ever
+    moved HEAD onto `ledger_sync_branch` or wrote tracking config. `branch()` was used ONLY
+    inside refspecs — `fetch origin <b>`, `merge origin/<b>`, `push HEAD:<b>`,
+    `rev-list origin/<b>..HEAD` — so sync worked *by accident of those refspecs* while local
+    HEAD and the configured branch were permanently different refs. Config said `main`,
+    `.git/HEAD` said `master`, and `.git/config` had no `[branch]` section at all.
+
+    None of that showed up here, because these tests only ever asked whether the CONTENT
+    arrived — and it did. What it cost was everything around the content: `status()` claimed
+    "on branch main" while HEAD was elsewhere, and the operator's two obvious recovery
+    commands both failed outright ("no tracking information for the current branch" /
+    "the current branch master has no upstream branch"). That is not academic: the push
+    guard REFUSES a conflicted `rotation.yaml` and tells the operator to fix it by hand, in
+    exactly the directory where `git pull` did not work.
+    """
+
+    async def test_the_local_repo_ends_up_on_the_configured_branch(self):
+        """The test that would have caught it. `git init` picks `master`; config says `main`."""
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        self.assertEqual(await sync.sync_safely(direction="push"), "pushed")
+
+        root = ledger.ledger_path().parent
+        self.assertEqual(
+            _git(root, "branch", "--show-current").strip(),
+            "main",
+            "the repo must be ON the branch the operator configured, not git's default",
+        )
+
+    async def test_the_configured_branch_gets_an_upstream(self):
+        """Without tracking, the operator's own `git pull` / `git push` both fail.
+
+        That is the whole cost of the bug: a conflicted `rotation.yaml` must be resolved by
+        hand in this directory (push refuses it), and the two commands anyone would reach
+        for did not work.
+        """
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        await sync.sync_safely(direction="push")
+
+        root = ledger.ledger_path().parent
+        self.assertEqual(_git(root, "config", "--get", "branch.main.remote").strip(), "origin")
+        self.assertEqual(
+            _git(root, "config", "--get", "branch.main.merge").strip(),
+            "refs/heads/main",
+            "`git branch -m` migrates .remote but leaves .merge on the OLD ref, so this "
+            "has to be written explicitly after the rename",
+        )
+        self.assertEqual(
+            _git(root, "rev-parse", "--abbrev-ref", "main@{upstream}").strip(),
+            "origin/main",
+            "git itself must agree the branch is tracked",
+        )
+
+    async def test_an_empty_remote_still_gets_an_aligned_branch(self):
+        """The FIRST-sync state, which is also where the obvious fix would have failed.
+
+        A fresh team repo has no commits, so `origin/main` does not exist and
+        `git branch --set-upstream-to=origin/main` fails ("the requested upstream branch
+        does not exist"); on an unborn local branch it fails differently ("no commit on
+        branch 'main' yet"). Alignment must work before either exists, which is why it
+        writes `branch.<n>.remote` / `.merge` directly.
+        """
+        _, sync, _ = self._use(self.home_a)
+        # Pull first, against a remote that has nothing: the early-return path.
+        detail = await sync.sync_safely(direction="pull")
+        self.assertNotIn("failed", detail)
+
+        root = sync._repo_root()
+        self.assertEqual(_git(root, "branch", "--show-current").strip(), "main")
+        self.assertEqual(_git(root, "config", "--get", "branch.main.remote").strip(), "origin")
+
+    async def test_changing_the_branch_later_moves_the_local_repo_too(self):
+        """The operator can change `ledger_sync_branch`; HEAD must follow.
+
+        Before this, fetch/merge/push silently re-pointed at the new remote ref while HEAD
+        kept accumulating on the old one — so HEAD carried both branches' history and the
+        first push to the new branch either got rejected non-fast-forward or published the
+        old branch's history onto it.
+        """
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        await sync.sync_safely(direction="push")
+
+        sync.set_settings(branch_name="team-ledger")
+        await sync.sync_safely(direction="push")
+
+        root = ledger.ledger_path().parent
+        self.assertEqual(_git(root, "branch", "--show-current").strip(), "team-ledger")
+        self.assertEqual(
+            _git(root, "config", "--get", "branch.team-ledger.merge").strip(),
+            "refs/heads/team-ledger",
+        )
+
+    async def test_alignment_leaves_a_dirty_tree_and_its_commit_alone(self):
+        """Renaming must not touch content. `git checkout`/`switch` would.
+
+        `git branch -m` keeps the same sha and does not touch the working tree; a checkout
+        onto a divergent ref against a dirty tree auto-merges and can conflict — which here
+        means corrupting the live ledger.
+        """
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        await sync.sync_safely(direction="push")
+
+        root = ledger.ledger_path().parent
+        before = _git(root, "rev-parse", "HEAD").strip()
+        # A local edit that has not been committed yet, plus an untracked file.
+        ledger.upsert(entry.create(pattern="an uncommitted second lesson", fix="another fix"))
+        (root / "scratch.txt").write_text("local only", encoding="utf-8")
+
+        sync.set_settings(branch_name="renamed-branch")
+        self.assertEqual(await sync._align_branch(), "")
+
+        self.assertEqual(_git(root, "rev-parse", "HEAD").strip(), before, "the sha must not move")
+        self.assertEqual(len(ledger.read_entries()), 2, "the uncommitted lesson must survive")
+        self.assertTrue((root / "scratch.txt").exists())
+
+    async def test_an_existing_divergent_branch_is_refused_not_overwritten(self):
+        """`git branch -M` would DELETE it. Two lines of ledger work, silently collapsed.
+
+        Refusing costs the operator one manual merge. Guessing costs a teammate's lesson,
+        which is the exact outcome this change exists to prevent.
+        """
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        await sync.sync_safely(direction="push")
+
+        root = ledger.ledger_path().parent
+        # A second branch holding a commit only IT has.
+        _git(root, "branch", "other-work")
+        other_sha = _git(root, "rev-parse", "other-work").strip()
+
+        sync.set_settings(branch_name="other-work")
+        reason = await sync._align_branch()
+        self.assertIn("already exists", reason)
+        self.assertEqual(_git(root, "branch", "--show-current").strip(), "main", "left in place")
+        self.assertEqual(
+            _git(root, "rev-parse", "other-work").strip(),
+            other_sha,
+            "the other branch and its commits must still be there",
+        )
+
+    async def test_a_detached_head_is_reported_and_left_alone(self):
+        """A detached HEAD means a merge or rebase went sideways; moving refs can lose it."""
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        await sync.sync_safely(direction="push")
+
+        root = ledger.ledger_path().parent
+        _git(root, "checkout", "-q", "--detach", "HEAD")
+        head_before = (root / ".git" / "HEAD").read_text(encoding="utf-8")
+
+        reason = await sync._align_branch()
+        self.assertIn("detached", reason)
+        self.assertEqual(
+            (root / ".git" / "HEAD").read_text(encoding="utf-8"),
+            head_before,
+            "nothing may be moved under a detached HEAD",
+        )
+
+    async def test_alignment_never_turns_into_a_sync_failure(self):
+        """This fix must not be able to make the app worse than it was.
+
+        Publishing has always worked through explicit refspecs, with or without a local
+        branch. So even when alignment refuses, the push must still land.
+        """
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        await sync.sync_safely(direction="push")
+
+        root = ledger.ledger_path().parent
+        _git(root, "checkout", "-q", "--detach", "HEAD")
+        ledger.upsert(entry.create(pattern="a lesson recorded while detached", fix="a fix"))
+        self.assertEqual(await sync.sync_safely(direction="push"), "pushed")
+
+        ledger, sync, entry = self._use(self.home_b)
+        await sync.sync_safely(direction="pull")
+        patterns = [e.pattern for e in ledger.read_entries()]
+        self.assertIn("a lesson recorded while detached", patterns)
+
+
+class TestStatusDoesNotOverstateTheBranch(_TwoInstances):
+    """`status()` is the only thing the operator sees, and it named a ref HEAD was not on.
+
+    This is the UI-facing half of the bug: the card said "Syncing <url> on branch main" on
+    an install whose HEAD was `master`. An operator who trusted it had no way to learn that
+    their own `git pull` in that directory would fail.
+    """
+
+    async def test_an_aligned_repo_reports_a_match(self):
+        """The baseline the mismatch cases are measured against."""
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        await sync.sync_safely(direction="push")
+
+        status = sync.status()
+        self.assertEqual(status["branch"], "main")
+        self.assertEqual(status["local_branch"], "main")
+        self.assertTrue(status["branch_matches"])
+        self.assertFalse(status["detached"])
+        self.assertIn("Syncing", status["detail"])
+
+    async def test_a_mismatch_is_named_instead_of_claimed_to_be_syncing(self):
+        """Reproduces the live install exactly: HEAD on `master`, config on `main`."""
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        await sync.sync_safely(direction="push")
+
+        root = ledger.ledger_path().parent
+        _git(root, "branch", "-m", "master")
+
+        status = sync.status()
+        self.assertEqual(status["branch"], "main", "the CONFIGURED branch")
+        self.assertEqual(status["local_branch"], "master", "what .git/HEAD actually points at")
+        self.assertFalse(status["branch_matches"])
+        self.assertNotIn(
+            "Syncing git",
+            status["detail"],
+            "it must not claim to be syncing ON a branch this repo is not on",
+        )
+        self.assertIn("master", status["detail"], "name the branch it is actually on")
+
+    async def test_a_detached_head_says_so(self):
+        """A mismatch and a detached HEAD need DIFFERENT remedies, so they read differently.
+
+        A mismatch the next sync repairs by itself; a detached HEAD is deliberately left for
+        the operator, so telling them to wait would leave them waiting forever.
+        """
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        await sync.sync_safely(direction="push")
+
+        root = ledger.ledger_path().parent
+        _git(root, "checkout", "-q", "--detach", "HEAD")
+
+        status = sync.status()
+        self.assertTrue(status["detached"])
+        self.assertEqual(status["local_branch"], "", "a bare sha is not a branch name")
+        self.assertFalse(status["branch_matches"])
+        self.assertIn("detached", status["detail"])
+
+    async def test_an_uninitialized_repo_is_not_reported_as_a_mismatch(self):
+        """There is nothing yet to disagree with, and a warning here trains the operator
+        to ignore the one field that means something."""
+        _, sync, _ = self._use(self.home_a)
+        status = sync.status()
+        self.assertFalse(status["initialized"])
+        self.assertTrue(status["branch_matches"])
+        self.assertFalse(status["detached"])
+        self.assertEqual(status["local_branch"], "")
+
+    async def test_a_conflicted_ledger_does_not_hide_a_branch_mismatch(self):
+        """The ledger-conflict sentence outranks the branch one, so it must not overstate.
+
+        Its old wording ended "syncing <url> on branch <b>" — the same false claim, on a
+        path that takes precedence.
+        """
+        ledger, sync, entry = self._use(self.home_a)
+        ledger.upsert(entry.create(pattern="a lesson to carry", fix="a fix"))
+        await sync.sync_safely(direction="push")
+        root = ledger.ledger_path().parent
+        _git(root, "branch", "-m", "master")
+        path = ledger.ledger_path()
+        path.write_text(
+            path.read_text(encoding="utf-8") + '<<<<<<< HEAD\n{"entry_id": "x"}\n=======\n>>>>>>> x\n',
+            encoding="utf-8",
+        )
+
+        status = sync.status()
+        self.assertTrue(status["conflict"])
+        self.assertFalse(status["branch_matches"])
+        self.assertNotIn("on branch main.", status["detail"])
+
+    async def test_an_option_like_branch_falls_back_instead_of_reaching_git(self):
+        """`set_settings` bypasses the route's validation, and config.json is hand-editable.
+
+        Verified hazards this guards: `git init -b '-x'` creates `refs/heads/-x`, and
+        `git symbolic-ref HEAD refs/heads/--upload-pack=evil` succeeds with NO validation.
+        """
+        _, sync, _ = self._use(self.home_a)
+        for bad in ("--upload-pack=evil", "-x", "main evil", "with\nnewline"):
+            with self.subTest(branch=bad):
+                sync.set_settings(branch_name=bad)
+                self.assertEqual(sync.branch(), "main")

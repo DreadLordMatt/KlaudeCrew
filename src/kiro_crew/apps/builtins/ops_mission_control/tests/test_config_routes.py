@@ -258,6 +258,84 @@ class TestSettingsRoute(_HomeIsolatedAsync):
         self.assertFalse(status["enabled"])
         self.assertIn("detail", status)
 
+    async def test_the_failure_fallback_has_the_same_shape_as_a_real_status(self):
+        """One shape, so the UI can read every field instead of guarding each one.
+
+        The fallback used to carry two keys out of six. A panel reading it therefore had to
+        guard each field individually, and forgetting one renders ``undefined`` as the team's
+        remote — which reads as a repo called "undefined" rather than as "we could not tell".
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger_sync
+
+        real = routes._ledger_sync_status()
+        with mock.patch.object(ledger_sync, "status", side_effect=RuntimeError("git exploded")):
+            fallback = routes._ledger_sync_status()
+        self.assertEqual(set(real), set(fallback))
+
+    async def test_a_conflicted_schedule_is_reported_rather_than_only_logged(self):
+        """A refused push must be visible, not just audited.
+
+        ``push`` REFUSES while ``rotation.yaml`` holds conflict markers, and said so only to
+        the log and a SEL line — ``sync_safely`` swallows the refusal. Meanwhile ``status()``
+        reported "Syncing …", so an operator watched a card claim sync worked through an
+        indefinite publishing outage: no lesson reached the team, and the file that decides
+        who picks up work stayed unparseable for everyone who pulled it.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger, ledger_sync
+
+        await routes._handle_put_settings(
+            _request(
+                {
+                    "ledger_sync_remote": "git@github.com:acme/ops-ledger.git",
+                    "ledger_sync_enabled": True,
+                }
+            )
+        )
+        clean = routes._ledger_sync_status()
+        self.assertFalse(clean["schedule_conflict"])
+
+        schedule = ledger.ledger_path().parent / ledger_sync._SCHEDULE_FILENAME
+        schedule.parent.mkdir(parents=True, exist_ok=True)
+        schedule.write_text(
+            "shifts:\n<<<<<<< HEAD\n  - who: alice\n=======\n  - who: bob\n>>>>>>> origin/main\n",
+            encoding="utf-8",
+        )
+
+        conflicted = routes._ledger_sync_status()
+        self.assertTrue(conflicted["schedule_conflict"])
+        self.assertIn("refused", conflicted["detail"])
+        self.assertNotIn("Syncing", conflicted["detail"])
+
+    async def test_a_conflicted_ledger_is_reported_separately_from_the_schedule(self):
+        """The two conflicts are not the same severity and must not be conflated.
+
+        A ledger conflict is reconcilable — ids are content-addressed, ``read_entries`` skips
+        the markers, and the next push rewrites the union — so sync keeps publishing. Reading
+        it as fatal would send an operator hand-editing a file the app already handles;
+        reading a SCHEDULE conflict as reconcilable would hide a total publishing stop.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import ledger
+
+        await routes._handle_put_settings(
+            _request(
+                {
+                    "ledger_sync_remote": "git@github.com:acme/ops-ledger.git",
+                    "ledger_sync_enabled": True,
+                }
+            )
+        )
+        path = ledger.ledger_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '<<<<<<< HEAD\n{"entry_id": "a"}\n=======\n{"entry_id": "b"}\n>>>>>>> origin/main\n',
+            encoding="utf-8",
+        )
+
+        status = routes._ledger_sync_status()
+        self.assertTrue(status["conflict"])
+        self.assertFalse(status["schedule_conflict"])
+        self.assertNotIn("refused", status["detail"])
+
 
 class TestManifestCrons(unittest.TestCase):
     """The app is inert unless the manifest declares its crons."""

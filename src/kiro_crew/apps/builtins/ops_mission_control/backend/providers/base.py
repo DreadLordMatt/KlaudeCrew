@@ -145,6 +145,23 @@ class ActionResult:
     action: str
     detail: str = ""
     error: str = ""
+    #: True when the sink RECORDED the intent instead of performing it — the observe-only
+    #: default, and anything a companion ships in the same spirit (a dry-run mode).
+    #:
+    #: Exists because ``ok=True`` from such a sink means "we successfully did nothing", and
+    #: post-action verification cannot tell that apart from a real provider write. It read
+    #: the still-firing alarm as the ACTION having failed and charged a ``miss_count`` to
+    #: every ledger entry the investigation cited — so on the default install, where
+    #: ``cloudwatch``/``webhook`` register no ``ActionSink`` at all and every action falls
+    #: through to ``noop``, exercising the proposal flow demoted the operator's own proven
+    #: knowledge for a write that was never attempted. Verified: an entry at
+    #: verified/high/2 uses went to ``miss_count=1`` and lost the fast path after one
+    #: observe-only "resolve".
+    #:
+    #: Defaults False, so every existing sink and every companion that has not heard of
+    #: this field keeps being verified — the safe direction, since a real write is the case
+    #: that must be checked.
+    simulated: bool = False
 
 
 @dataclass(frozen=True)
@@ -189,6 +206,24 @@ class SignalSource(Protocol):
     async def poll(self) -> list[Signal]:
         """Return currently-firing signals, normalized via ``Signal.create``."""
         ...
+
+
+#: Sources whose ``poll`` returns a COMPLETE snapshot of what is currently firing, so an
+#: absence from the result is positive evidence the signal cleared.
+#:
+#: Read off ``SignalSource.is_snapshot`` when the adapter declares it, defaulting TRUE
+#: because every polled API (CloudWatch, Datadog, PagerDuty, GitHub) is one and only the
+#: exceptions need to say so.
+#:
+#: ``webhook`` is the exception, and its absence here was a real wrong answer rather than a
+#: taxonomy nicety. It is a PUSH spool: ``poll`` calls ``drain``, which empties the queue —
+#: so the very next cycle returns ``[]`` for a signal that is still firing at the sender,
+#: and ``poll_health`` recorded that as ``ok: True`` with ``signals: 0``. Every consumer
+#: that reads "the poll succeeded and the signal is absent" as recovery therefore got a
+#: confident wrong answer one cycle after any webhook delivery. Verified: a claimed webhook
+#: signal reached the verdict ``cleared`` ("the resolve held") off an empty drain, with
+#: nothing having changed at the sender.
+DEFAULT_IS_SNAPSHOT = True
 
 
 @runtime_checkable

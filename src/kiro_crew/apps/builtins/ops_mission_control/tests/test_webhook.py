@@ -237,6 +237,343 @@ class TestPayloadValidation(_Env):
         self.assertEqual(webhook.queue_depth(), 0)
 
 
+class TestAlertmanagerEnvelope(_Env):
+    """The v4 ``{status, alerts:[...]}`` body — the most common machine-readable alert.
+
+    Previously rejected outright: a raw Alertmanager body carries no top-level
+    ``title``/``summary``, so ``signal_from_payload`` returned None and the ingress
+    answered 400 "payload has no title" — while this module's own docstring named
+    Alertmanager as a supported sender.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._enable()
+
+    def _send(self, payload: object) -> tuple[bool, str]:
+        raw = json.dumps(payload).encode("utf-8")
+        return webhook.enqueue(raw, _sign(raw))
+
+    @staticmethod
+    def _alertmanager(*, count: int = 2, status: str = "firing") -> dict[str, object]:
+        return {
+            "status": status,
+            "commonLabels": {"cluster": "prod"},
+            "alerts": [
+                {
+                    "status": status,
+                    "labels": {
+                        "alertname": "HighErrorRate",
+                        "severity": "critical",
+                        "instance": f"web-{i}:9100",
+                    },
+                    "annotations": {"summary": f"error rate high on web-{i}"},
+                    "startsAt": "2026-08-01T00:00:00Z",
+                    "generatorURL": "https://prom.example/graph?g0.expr=up",
+                    "fingerprint": f"fp{i}",
+                }
+                for i in range(count)
+            ],
+        }
+
+    def test_a_raw_alertmanager_body_is_accepted(self) -> None:
+        accepted, _ = self._send(self._alertmanager(count=1))
+        self.assertTrue(accepted)
+
+    def test_each_alert_becomes_its_own_signal(self) -> None:
+        """Alertmanager groups by design; collapsing a group loses which hosts are hit."""
+        accepted, detail = self._send(self._alertmanager(count=3))
+        self.assertTrue(accepted)
+        self.assertIn("3 signals", detail)
+        signals = webhook.drain()
+        self.assertEqual(len(signals), 3)
+        self.assertEqual(
+            {s.resource for s in signals},
+            {"web-0:9100", "web-1:9100", "web-2:9100"},
+        )
+
+    def test_the_providers_own_fingerprint_becomes_the_exact_match_key(self) -> None:
+        self._send(self._alertmanager(count=1))
+        signal = webhook.drain()[0]
+        self.assertEqual(signal.provider_key, "webhook:fp0")
+
+    def test_title_falls_back_through_annotations_then_alertname(self) -> None:
+        self._send(
+            {
+                "alerts": [
+                    {"labels": {"alertname": "OnlyARuleName"}},
+                    {
+                        "labels": {"alertname": "ignored"},
+                        "annotations": {"description": "a described failure"},
+                    },
+                ]
+            }
+        )
+        titles = {s.title for s in webhook.drain()}
+        self.assertEqual(titles, {"OnlyARuleName", "a described failure"})
+
+    def test_common_labels_merge_under_per_alert_labels(self) -> None:
+        self._send(self._alertmanager(count=1))
+        signal = webhook.drain()[0]
+        self.assertEqual(signal.labels.get("cluster"), "prod")
+        self.assertEqual(signal.labels.get("alertname"), "HighErrorRate")
+
+    def test_grafana_values_are_kept_as_evidence(self) -> None:
+        """Grafana sends the actual breaching numbers; they are free evidence."""
+        self._send(
+            {
+                "alerts": [
+                    {
+                        "labels": {"alertname": "Latency"},
+                        "values": {"A": 512.5, "B": 1},
+                    }
+                ]
+            }
+        )
+        signal = webhook.drain()[0]
+        self.assertIn("A=512.5", signal.labels.get("values", ""))
+
+    def test_a_resolved_alert_arrives_as_ok_not_firing(self) -> None:
+        """Without this a sender could create work but never retract it."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        self._send(self._alertmanager(count=1, status="resolved"))
+        signal = webhook.drain()[0]
+        self.assertEqual(signal.state, models.STATE_OK)
+
+    def test_a_per_alert_status_overrides_the_envelope(self) -> None:
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        self._send(
+            {
+                "status": "firing",
+                "alerts": [
+                    {"labels": {"alertname": "A"}, "status": "resolved"},
+                    {"labels": {"alertname": "B"}, "status": "firing"},
+                ],
+            }
+        )
+        by_title = {s.title: s.state for s in webhook.drain()}
+        self.assertEqual(by_title["A"], models.STATE_OK)
+        self.assertEqual(by_title["B"], models.STATE_FIRING)
+
+    def test_one_malformed_alert_does_not_discard_the_rest(self) -> None:
+        accepted, _ = self._send(
+            {
+                "alerts": [
+                    {"labels": {"alertname": "good-one"}},
+                    "not-a-dict",
+                    {"labels": {}},  # no title derivable
+                    {"labels": {"alertname": "good-two"}},
+                ]
+            }
+        )
+        self.assertTrue(accepted)
+        self.assertEqual({s.title for s in webhook.drain()}, {"good-one", "good-two"})
+
+    def test_an_alerts_group_with_nothing_usable_is_refused(self) -> None:
+        accepted, detail = self._send({"alerts": [{"labels": {}}, "junk"]})
+        self.assertFalse(accepted)
+        self.assertEqual(detail, "payload has no title")
+
+    def test_an_empty_alerts_list_falls_back_to_the_flat_envelope(self) -> None:
+        """``alerts: []`` must not shadow a body that is otherwise valid."""
+        accepted, _ = self._send({"alerts": [], "title": "a flat signal"})
+        self.assertTrue(accepted)
+        self.assertEqual(webhook.drain()[0].title, "a flat signal")
+
+    def test_the_fan_out_is_bounded(self) -> None:
+        """A sender must not be able to mint unbounded work in one POST."""
+        huge = {
+            "alerts": [
+                {"labels": {"alertname": f"a{i}"}} for i in range(webhook.MAX_QUEUED_SIGNALS + 50)
+            ]
+        }
+        accepted, _ = self._send(huge)
+        self.assertTrue(accepted)
+        self.assertLessEqual(webhook.queue_depth(), webhook.MAX_QUEUED_SIGNALS)
+
+    def test_the_flat_envelope_can_now_report_a_clearance(self) -> None:
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        self._send({"title": "it recovered", "state": "ok"})
+        self.assertEqual(webhook.drain()[0].state, models.STATE_OK)
+
+    def test_an_unparseable_state_does_not_manufacture_firing_work(self) -> None:
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        self._send({"title": "who knows", "state": "banana"})
+        self.assertEqual(webhook.drain()[0].state, models.STATE_UNKNOWN)
+
+
+class TestProviderSideSuppressionIsHonoured(_Env):
+    """Alertmanager publishes suppression two ways, and only one shape used to parse.
+
+    The v4 webhook envelope sends a scalar ``status``. Anything relaying
+    ``GET /api/v2/alerts`` sends the ``gettableAlert`` OBJECT
+    ``{"state": "suppressed", "silencedBy": [...]}``, which the previous scalar-only read
+    stringified — so it normalized to ``unknown`` and ``silencedBy`` was dropped entirely.
+    A sender being perfectly explicit about a human having parked the alert produced a
+    signal indistinguishable from garbage.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._enable()
+
+    def _send(self, payload: object) -> tuple[bool, str]:
+        raw = json.dumps(payload).encode("utf-8")
+        return webhook.enqueue(raw, _sign(raw))
+
+    def test_a_v2_status_object_is_read_as_suppressed(self) -> None:
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        self._send(
+            {
+                "alerts": [
+                    {
+                        "labels": {"alertname": "DiskFull"},
+                        "status": {"state": "suppressed", "silencedBy": ["7f3a"]},
+                    }
+                ]
+            }
+        )
+        signal = webhook.drain()[0]
+        self.assertEqual(signal.state, models.STATE_SUPPRESSED)
+
+    def test_silenced_by_survives_instead_of_being_stringified_away(self) -> None:
+        """The attribution is what tells 'we ignored it' from 'someone silenced it'."""
+        self._send(
+            {
+                "alerts": [
+                    {
+                        "labels": {"alertname": "DiskFull"},
+                        "status": {"state": "suppressed", "silencedBy": ["7f3a", "9c1b"]},
+                    }
+                ]
+            }
+        )
+        signal = webhook.drain()[0]
+        self.assertIn("7f3a", signal.suppressed_by)
+        self.assertIn("9c1b", signal.suppressed_by)
+        self.assertEqual(signal.suppressed_reason, "silenced")
+
+    def test_an_inhibition_is_reported_as_a_different_kind(self) -> None:
+        """A person's silence and an alert masking another alert need different next moves."""
+        self._send(
+            {
+                "alerts": [
+                    {
+                        "labels": {"alertname": "PodRestart"},
+                        "status": {"state": "suppressed", "inhibitedBy": ["ClusterDown"]},
+                    }
+                ]
+            }
+        )
+        signal = webhook.drain()[0]
+        self.assertEqual(signal.suppressed_reason, "inhibited")
+        self.assertEqual(signal.suppressed_by, "ClusterDown")
+
+    def test_a_v4_scalar_status_still_works(self) -> None:
+        """The object handling must not regress the shape Alertmanager's webhook sends."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        self._send({"status": "firing", "alerts": [{"labels": {"alertname": "A"}}]})
+        self.assertEqual(webhook.drain()[0].state, models.STATE_FIRING)
+
+    def test_a_status_object_with_no_attribution_admits_it(self) -> None:
+        """An invented owner is worse than a blank one."""
+        self._send({"alerts": [{"labels": {"alertname": "A"}, "status": {"state": "suppressed"}}]})
+        signal = webhook.drain()[0]
+        self.assertEqual(signal.suppressed_by, "")
+        self.assertEqual(signal.suppressed_reason, "")
+
+    def test_a_status_object_carrying_an_active_state_is_still_firing(self) -> None:
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        self._send({"alerts": [{"labels": {"alertname": "A"}, "status": {"state": "active"}}]})
+        self.assertEqual(webhook.drain()[0].state, models.STATE_FIRING)
+
+    def test_a_malformed_silenced_by_does_not_crash_the_ingress(self) -> None:
+        """Same rule as `_normalize_labels`: guard the type BEFORE indexing.
+
+        A hand-rolled forwarder sending a bare string, or nonsense, must not be able to
+        500 the one externally-reachable endpoint this app has.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        accepted, _ = self._send(
+            {
+                "alerts": [
+                    {"labels": {"alertname": "A"}, "status": {"state": "suppressed",
+                                                              "silencedBy": "bare-string"}},
+                    {"labels": {"alertname": "B"}, "status": {"state": "suppressed",
+                                                              "silencedBy": 17}},
+                    {"labels": {"alertname": "C"}, "status": "suppressed"},
+                ]
+            }
+        )
+        self.assertTrue(accepted)
+        by_title = {s.title: s for s in webhook.drain()}
+        self.assertEqual(by_title["A"].suppressed_by, "bare-string")
+        self.assertEqual(by_title["A"].state, models.STATE_SUPPRESSED)
+        self.assertEqual(by_title["B"].suppressed_by, "17")
+        self.assertEqual(by_title["C"].state, models.STATE_SUPPRESSED)
+        self.assertEqual(by_title["C"].suppressed_by, "")
+
+    def test_the_attribution_is_bounded(self) -> None:
+        """It reaches the board and a model prompt, so a sender must not send a novel."""
+        self._send(
+            {
+                "alerts": [
+                    {
+                        "labels": {"alertname": "A"},
+                        "status": {"state": "suppressed", "silencedBy": ["x" * 5000]},
+                    }
+                ]
+            }
+        )
+        self.assertLessEqual(len(webhook.drain()[0].suppressed_by), webhook.MAX_SUPPRESSION_TEXT)
+
+    def test_the_flat_envelope_can_also_report_a_suppression(self) -> None:
+        """Zabbix and Icinga do not speak Alertmanager's shape; a forwarder needs this door."""
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        self._send(
+            {
+                "title": "parked for maintenance",
+                "state": "suppressed",
+                "suppressed_by": "maintenance-window-4",
+                "suppressed_reason": "silenced",
+            }
+        )
+        signal = webhook.drain()[0]
+        self.assertEqual(signal.state, models.STATE_SUPPRESSED)
+        self.assertEqual(signal.suppressed_by, "maintenance-window-4")
+
+    def test_an_envelope_status_object_does_not_leak_into_every_alert(self) -> None:
+        """Per-alert status wins, and an alert with none falls back to the envelope TEXT.
+
+        Guards the shape of the fallback: the envelope status is read as a scalar string,
+        so an alert carrying no status of its own must not silently inherit a stringified
+        dict and become `unknown`.
+        """
+        from kiro_crew.apps.builtins.ops_mission_control.backend import models
+
+        self._send(
+            {
+                "status": "firing",
+                "alerts": [
+                    {"labels": {"alertname": "A"}},
+                    {"labels": {"alertname": "B"}, "status": {"state": "suppressed"}},
+                ],
+            }
+        )
+        by_title = {s.title: s.state for s in webhook.drain()}
+        self.assertEqual(by_title["A"], models.STATE_FIRING)
+        self.assertEqual(by_title["B"], models.STATE_SUPPRESSED)
+
+
 class TestRejectStatusMapping(unittest.TestCase):
     """A payload fault is not an auth failure.
 

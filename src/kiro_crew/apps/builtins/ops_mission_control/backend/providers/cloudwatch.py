@@ -196,6 +196,11 @@ class CloudWatchSignalSource:
                             "region": region,
                             "state": state,
                         },
+                        # The alarm ARN's stable part: region + name identifies this
+                        # alarm exactly, where the fingerprint only captures the shape
+                        # of its description (and strips the threshold digits, so two
+                        # alarms on the same metric at different thresholds collide).
+                        provider_key=f"{region}/{name}" if name else "",
                     )
                 )
         return signals

@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
-from kiro_crew.apps.builtins.ops_mission_control.backend.models import Signal
+from kiro_crew.apps.builtins.ops_mission_control.backend.models import Signal, utc_now_iso
 from kiro_crew.apps.builtins.ops_mission_control.backend.providers.base import (
+    DEFAULT_IS_SNAPSHOT,
     DEFAULT_POLL_LIMIT,
     DEFAULT_POLL_TIMEOUT_SECS,
     ActionSink,
@@ -41,6 +43,12 @@ logger = logging.getLogger(__name__)
 _REDACT_HEADROOM = 2
 
 
+#: Backoff applied to a source that failed without asking for a specific delay.
+#: Deliberately short — the goal is to stop hammering a provider that is shedding
+#: load, not to switch a source off after one bad cycle.
+DEFAULT_BACKOFF_SECS = 5 * 60
+
+
 class OpsProviderRegistry:
     """Holds the adapter sets and fans out across them."""
 
@@ -49,6 +57,16 @@ class OpsProviderRegistry:
         self._rotation_sources: dict[str, RotationSource] = {}
         self._action_sinks: dict[str, ActionSink] = {}
         self._evidence_sources: dict[str, EvidenceSource] = {}
+        #: source id -> monotonic deadline before which we will not poll it again.
+        #: Honours a provider's ``Retry-After`` when it sent one. Monotonic rather
+        #: than wall-clock so a clock adjustment cannot strand a source.
+        self._backoff_until: dict[str, float] = {}
+        #: source id -> whether its LAST poll attempt actually succeeded, and when.
+        #: This is the distinction reconcile depends on: "the signal is gone because
+        #: it cleared" and "the signal is gone because we could not look" are opposite
+        #: facts, and without this they were indistinguishable — so a 429 read as
+        #: "everything resolved" and closed live work.
+        self._poll_health: dict[str, dict[str, Any]] = {}
 
     # -- registration (ADD-only) ------------------------------------------
 
@@ -179,19 +197,48 @@ class OpsProviderRegistry:
         Returns ``(signals, errors)``. One unreachable provider must never stall
         the heartbeat or suppress the others, so each source gets its own timeout
         and its failure is reported rather than raised.
+
+        Two things happen around each poll, both of which exist because a failed poll
+        used to be indistinguishable from a quiet one:
+
+        1. **A source in backoff is skipped**, and says so in ``errors``. A provider
+           that returned 429 was previously re-polled at full rate on the very next
+           heartbeat, which is how a rate limit becomes a ban.
+        2. **The outcome is recorded in ``poll_health``.** Absence of a signal only
+           means "it cleared" if the poll that would have reported it actually
+           succeeded; callers that resolve work on absence MUST consult this.
         """
         sources = [s for s in self._signal_sources.values() if self._safe_configured(s)]
         if not sources:
             return [], {}
 
+        now = time.monotonic()
+
         async def _poll_one(src: SignalSource) -> tuple[str, list[Signal] | str]:
+            deadline = self._backoff_until.get(src.id, 0.0)
+            if deadline > now:
+                # Not an error the operator caused, but it IS a reason the source
+                # contributed nothing this cycle, so it belongs in `errors` where the
+                # Signals tab already renders per-source reasons.
+                return src.id, f"backing off for another {deadline - now:.0f}s after a prior failure"
             try:
                 signals = await asyncio.wait_for(src.poll(), timeout=timeout_secs)
                 return src.id, list(signals)[:limit]
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
+                # Backs off too, and the ordering of these two clauses is why it needed
+                # saying: ``asyncio.TimeoutError`` IS an ``Exception``, so this clause
+                # shadows the one below and a timing-out source was the one failure mode
+                # that never armed a window. It was also the most expensive one to leave
+                # unarmed — a failure that returns fast costs a socket, while a hung
+                # provider burns the FULL per-source timeout (15s) out of every heartbeat,
+                # for as long as it stays hung. Verified before fixing: three consecutive
+                # timing-out polls left ``_backoff_until`` empty.
+                logger.info("ops-mission-control: poll timed out for %r", src.id)
+                self._note_backoff(src.id, exc)
                 return src.id, f"timed out after {timeout_secs:.0f}s"
             except Exception as exc:  # noqa: BLE001 — surfaced as per-source health
                 logger.exception("ops-mission-control: poll failed for %r", src.id)
+                self._note_backoff(src.id, exc)
                 return src.id, str(exc) or exc.__class__.__name__
 
         results = await asyncio.gather(*(_poll_one(s) for s in sources))
@@ -201,9 +248,68 @@ class OpsProviderRegistry:
         for source_id, outcome in results:
             if isinstance(outcome, str):
                 errors[source_id] = outcome
+                self._poll_health[source_id] = {"ok": False, "detail": outcome, "at": utc_now_iso()}
             else:
                 signals.extend(outcome)
+                # A success clears any backoff: the provider is answering again.
+                self._backoff_until.pop(source_id, None)
+                self._poll_health[source_id] = {
+                    "ok": True,
+                    "detail": "",
+                    "at": utc_now_iso(),
+                    "signals": len(outcome),
+                    # Whether ABSENCE from this successful poll means anything. `ok` alone
+                    # answers "did we look", not "did we see everything" — and for the
+                    # webhook spool those differ, because a drain empties the queue so a
+                    # still-firing pushed signal is absent from every cycle after the one
+                    # that delivered it. Carried here rather than re-derived per consumer:
+                    # `verify_pending_actions` and the reconcile SOP both reason from
+                    # absence, and a second copy of this rule is a second place to forget
+                    # it.
+                    "snapshot": self._is_snapshot(source_id),
+                }
         return signals, errors
+
+    def _is_snapshot(self, source_id: str) -> bool:
+        """Whether absence from this source's successful poll is evidence of recovery.
+
+        Defaults TRUE for a source that does not declare the attribute, because every
+        polled provider API is a snapshot and only the exceptions (the push spool) need to
+        opt out — so a companion adapter written before this existed keeps its previous,
+        correct behaviour, and only one that genuinely drains a queue has to say so.
+        """
+        src = self._signal_sources.get(source_id)
+        return bool(getattr(src, "is_snapshot", DEFAULT_IS_SNAPSHOT))
+
+    def _note_backoff(self, source_id: str, exc: BaseException) -> None:
+        """Arm a backoff window for a source that just failed.
+
+        Honours the provider's own ``Retry-After`` when it sent one (already clamped in
+        ``http.py``), otherwise a flat default. EVERY failure backs off, not just a
+        retryable one: a source failing on a 401 every 120 seconds burns the heartbeat's
+        budget re-learning the same thing, and the operator has to fix the config either
+        way. What ``is_retryable`` buys is honouring the provider's *own* delay, which is
+        why only that path can exceed the default.
+        """
+        retry_after = int(getattr(exc, "retry_after", 0) or 0)
+        delay = float(retry_after) if retry_after > 0 else float(DEFAULT_BACKOFF_SECS)
+        self._backoff_until[source_id] = time.monotonic() + delay
+        logger.info(
+            "ops-mission-control: backing off %r for %.0fs (retry_after=%s)",
+            source_id,
+            delay,
+            retry_after,
+        )
+
+    def poll_health(self) -> dict[str, dict[str, Any]]:
+        """Per-source outcome of the LAST poll attempt this process made.
+
+        ``{source_id: {"ok": bool, "detail": str, "at": iso, "signals": int}}``. A
+        source absent from this map has not been polled since the process started,
+        which is NOT the same as healthy — a caller reasoning about absence must treat
+        "unknown" as "cannot conclude the signal cleared".
+        """
+        return {k: dict(v) for k, v in self._poll_health.items()}
 
     async def resolve_shift(self) -> ShiftStatus:
         """Resolve on-shift status across rotation sources.

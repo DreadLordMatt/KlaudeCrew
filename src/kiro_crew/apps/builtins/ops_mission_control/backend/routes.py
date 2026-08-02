@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any, Awaitable, Callable
 
@@ -30,16 +31,28 @@ from kiro_crew.apps.builtins.ops_mission_control.backend import (
     dispatch,
     handover,
     ledger,
+    notify_out,
     rotation,
     slack_out,
     slot_watch,
     store,
 )
 from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
+    DEFAULT_VERIFY_AFTER_SECS,
+    EXPIRING_ACTIONS,
     MODE_ORDER,
+    STATE_FIRING,
+    STATE_OK,
+    STATE_SUPPRESSED,
+    STATUS_NEEDS_HUMAN,
     VALID_ACTIONS,
+    VERIFIABLE_ACTIONS,
+    VERIFY_NOT_CHECKABLE,
+    VERIFY_PENDING,
     LedgerEntry,
     Signal,
+    resolve_silence_secs,
+    utc_now_iso,
 )
 from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
     merge_provider_config,
@@ -160,6 +173,12 @@ def _ledger_sync_status() -> dict[str, Any]:
     Deferred import for the same reason the hygiene handler defers it: ``ledger_sync``
     pulls in the git/sandbox machinery. Never raises — ``/state`` paints the whole
     board, so a probe of an optional feature must not be able to blank it.
+
+    The failure fallback carries the SAME key set as ``ledger_sync.status()``, not a
+    two-key subset. One shape means the UI can type every field as required and read it
+    straight; the narrower fallback meant a panel had to guard each field individually,
+    and the failure mode of forgetting one is rendering ``undefined`` as a remote URL —
+    which reads as "your team repo is called undefined" rather than as "we could not tell".
     """
     try:
         from kiro_crew.apps.builtins.ops_mission_control.backend import ledger_sync
@@ -167,7 +186,22 @@ def _ledger_sync_status() -> dict[str, Any]:
         return ledger_sync.status()
     except Exception:  # noqa: BLE001 — an optional feature must not 500 the board
         logger.exception("ops-mission-control: ledger sync status failed")
-        return {"enabled": False, "detail": "Sync status unavailable."}
+        return {
+            "enabled": False,
+            "remote": "",
+            "branch": "",
+            # The branch pair. ``branch_matches`` is True in the fallback because it gates a
+            # WARNING: we could not read the repo at all, so claiming a branch mismatch we
+            # did not observe would be the overstated claim in the other direction.
+            "local_branch": "",
+            "branch_matches": True,
+            "detached": False,
+            "initialized": False,
+            "ready": False,
+            "conflict": False,
+            "schedule_conflict": False,
+            "detail": "Sync status unavailable.",
+        }
 
 
 async def _handle_state(request: web.Request) -> web.StreamResponse:
@@ -200,8 +234,23 @@ async def _handle_state(request: web.Request) -> web.StreamResponse:
             # Shared-ledger git sync. ``ledger_sync.status()`` was written to be
             # "surfaced in Settings" — and then never returned by any route, so the
             # team memory-exchange repo was invisible as well as unsettable.
-            "ledger_sync": _ledger_sync_status(),
+            #
+            # Off the loop because the probe now reads three files (config, ledger.jsonl
+            # and rotation.yaml, the last two to detect conflict markers) and ``/state``
+            # is the dashboard's hot poll. ``_ledger_sync_status`` stays synchronous so
+            # the tests that call it directly do not have to care.
+            "ledger_sync": await asyncio.to_thread(_ledger_sync_status),
             "slack": slack_out.status(_slack_client(request)),
+            # Local desktop notifications. Rides on ``/state`` for the same reason
+            # Slack's status does: readiness depends on live gateway state (is there a
+            # notification bus in this process), not on config alone — so it cannot be
+            # answered from the unauthenticated config file the panel already has.
+            #
+            # Off the loop, unlike Slack's status: this one PARSES the installed
+            # manifest (to report the declared channels) on top of the config read, and
+            # `/state` is polled continuously by an open dashboard. Same treatment
+            # `_ledger_sync_status` already gets, and for the same reason.
+            "notify": await asyncio.to_thread(notify_out.status, request.app.get("state")),
             # What companion packages are INSTALLED. Reported separately from the
             # provider list because "no companion installed" and "companion
             # installed but rejected by admission" look identical in the provider
@@ -270,11 +319,38 @@ def _slack_client(request: web.Request) -> Any | None:
 
 
 async def _handle_incident(request: web.Request) -> web.StreamResponse:
+    """One incident plus its rendered postmortem.
+
+    ``log`` is the Markdown artifact ``store.write_log`` writes when the incident closes,
+    and ``log_path`` is where that file lives — reported so an operator can hand a
+    colleague the FILE rather than only a clipboard, without the UI guessing a path that
+    ``KIROCREW_HOME`` can move.
+
+    ``log_path`` is empty unless the file is really there. A path is a promise that
+    something is at the other end of it, and naming one for an open incident (or for
+    anything closed before the writer was wired up) would be the app asserting an artifact
+    it does not have. There is deliberately no download route: a second, non-JSON egress
+    boundary would need its own redaction and its own posture registration, and the JSON
+    field already makes the artifact readable.
+    """
     incident_id = request.query.get("id", "").strip()
     incident = store.get_incident(incident_id) if incident_id else None
     if incident is None:
         return web.json_response({"error": "unknown incident"}, status=404)
-    return web.json_response({"incident": incident.to_dict(), "log": store.read_log(incident_id)})
+    try:
+        log_file = store.incident_log_path(incident_id)
+        log_path = str(log_file) if log_file.is_file() else ""
+    except (OSError, ValueError):
+        # ``incident_log_path`` validates the id even though we generated it. A
+        # hand-edited index.json is the only way here, and it must not 500 the route.
+        log_path = ""
+    return web.json_response(
+        {
+            "incident": incident.to_dict(),
+            "log": store.read_log(incident_id),
+            "log_path": log_path,
+        }
+    )
 
 
 async def _handle_transition(request: web.Request) -> web.StreamResponse:
@@ -290,6 +366,13 @@ async def _handle_transition(request: web.Request) -> web.StreamResponse:
     for field_name in ("diagnosis", "resolution", "slot_key", "slack_thread_ts"):
         if field_name in body:
             updates[field_name] = str(body[field_name])
+    # Captured BEFORE the write, because the desktop notification below must fire on the
+    # EDGE into ``needs_human`` and not on every later write while it sits there.
+    # ``update_fields`` re-enters ``transition`` with the SAME status on an unrelated
+    # field edit, so without this an incident parked on an approval would re-toast on
+    # each one.
+    previous = store.get_incident(incident_id)
+    previous_status = previous.status if previous is not None else ""
     try:
         incident = await asyncio.to_thread(store.transition, incident_id, new_status, **updates)
     except KeyError:
@@ -309,7 +392,36 @@ async def _handle_transition(request: web.Request) -> web.StreamResponse:
     if detail:
         await slack_out.post_detail(incident, detail, client)
 
-    return web.json_response({"incident": incident.to_dict()})
+    # Make the board thread answerable. Done HERE rather than at claim time because the
+    # investigation slot does not exist yet when the incident is claimed — the dispatch
+    # SOP creates it immediately afterwards and reports the key on its first transition.
+    # Re-linking an already-linked thread is idempotent.
+    incident = store.get_incident(incident_id) or incident
+    thread_linked = await asyncio.to_thread(
+        slack_out.link_thread_to_investigation, incident, request.app.get("state")
+    )
+
+    # The one state change worth interrupting for: an incident now waiting on a person.
+    # Only on the EDGE — a transition that leaves the status where it already was is the
+    # unchanged condition the noise rule forbids re-notifying for. After Slack and after
+    # the write, so it can cost neither.
+    if new_status == STATUS_NEEDS_HUMAN and previous_status != STATUS_NEEDS_HUMAN:
+        await asyncio.to_thread(
+            notify_out.notify_needs_human,
+            request.app.get("state"),
+            incident.incident_id,
+            incident.signal.title,
+            incident.blocked_reason,
+        )
+
+    return web.json_response(
+        {
+            "incident": incident.to_dict(),
+            # Reported so a caller can tell whether a reply into the Slack thread will
+            # actually reach the investigation, instead of assuming it will.
+            "slack_thread_replyable": thread_linked,
+        }
+    )
 
 
 async def _handle_claim(request: web.Request) -> web.StreamResponse:
@@ -367,7 +479,12 @@ async def _handle_dispatch(request: web.Request) -> web.StreamResponse:
     dispatch by hand at once. That is a wasted turn, not a production change — the same
     trade the claim design already accepts (see ``store.claim``).
     """
-    result = await dispatch.run_cycle(slack_client=_slack_client(request))
+    result = await dispatch.run_cycle(
+        slack_client=_slack_client(request),
+        # Threaded in for the local notification bus, which lives on gateway state.
+        # Same explicit-dependency rule as the Slack client: no global accessor.
+        state=request.app.get("state"),
+    )
     payload = result.to_dict()
     # Give the caller a ready-to-use brief per claim so the investigating agent
     # does not spend its first turn re-fetching context Python already has.
@@ -413,22 +530,106 @@ async def _handle_action(request: web.Request) -> web.StreamResponse:
     if sink is None:
         return web.json_response({"error": "no action sink available"}, status=503)
 
-    result = await sink.execute(incident.signal, action, {"note": note})
+    payload: dict[str, Any] = {"note": note}
+    if action in EXPIRING_ACTIONS:
+        # Clamped HERE, not in the adapter. A suppression with no expiry is the one
+        # outcome the verb exists to prevent, so the bound is applied at the boundary
+        # every sink goes through rather than trusted to each sink separately — an
+        # adapter that forgot the check would silence a monitor forever.
+        payload["duration_secs"] = resolve_silence_secs(body.get("duration_secs"))
+
+    result = await sink.execute(incident.signal, action, payload)
     _audit(
         "incident_action",
-        f"{incident_id} {action} via {sink.id}",
+        f"{incident_id} {action} via {sink.id}"
+        + (f" for {payload['duration_secs']}s" if "duration_secs" in payload else ""),
         "success" if result.ok else "failed",
         error=result.error,
     )
+    verification = ""
+    verify_after = ""
+    # A SIMULATED result schedules nothing. ``ok=True`` from the observe-only sink means "we
+    # successfully did nothing", and the recheck cannot tell that from a real write: it read
+    # the still-firing alarm as the action having failed and charged a ``miss_count`` to
+    # every ledger entry the investigation cited. On a default install that is the ONLY
+    # path, because `cloudwatch` and `webhook` register no ActionSink and every action falls
+    # through to `noop` — so watching the proposal flow, which is exactly what an operator
+    # is told to do before granting real authority, demoted their own proven knowledge for
+    # a write nobody made. Verified before fixing: act mode plus one scoped cloudwatch rule
+    # took a verified/high/2-use entry to `miss_count=1` and off the fast path.
+    if result.ok and not result.simulated:
+        verification, verify_after = await asyncio.to_thread(
+            _schedule_verification, incident_id, action, payload.get("duration_secs")
+        )
     return web.json_response(
         {
             "ok": result.ok,
             "action": result.action,
             "detail": result.detail,
             "error": result.error,
+            # Echoed so a caller can see the window actually applied, which may be
+            # smaller than the one it asked for.
+            "duration_secs": payload.get("duration_secs"),
+            # What a 2xx from the provider now DOES and does not mean, reported in the
+            # same response that used to imply "applied". ``pending`` says a recheck is
+            # scheduled; ``not_checkable`` says this app cannot observe this verb's
+            # outcome; ``""`` says the call failed so nothing was scheduled.
+            "verification": verification,
+            "verify_after": verify_after,
         },
         status=200 if result.ok else 502,
     )
+
+
+def _schedule_verification(
+    incident_id: str, action: str, duration_secs: Any
+) -> tuple[str, str]:
+    """Record what was just done and when to re-read the signal. Returns (verdict, due).
+
+    Two schedules, and the difference is the point ``ACTION_SILENCE``'s mandatory expiry
+    buys. A ``silence`` is rechecked at the END of its own window — which is the
+    interesting moment, because a suppression that expires straight back into the same
+    firing condition is positive evidence nothing was fixed. Everything else is rechecked
+    after ``DEFAULT_VERIFY_AFTER_SECS``, long enough for a provider evaluating on a period
+    to catch up.
+
+    An action outside ``VERIFIABLE_ACTIONS`` is stamped ``not_checkable`` with NO due
+    date, so ``verify_pending_actions`` never picks it up. That is deliberate honesty
+    rather than a gap left open: an ack leaves an alert firing by design, so a verdict
+    derived from firing state would be a confident wrong answer about an unverifiable
+    write. The board says "not checked" instead.
+
+    Never raises: the provider write already happened and cannot be undone, so a failure
+    to record the bookkeeping must not turn a completed action into a 500. It degrades to
+    "no verification scheduled", which the response then reports honestly.
+    """
+    if action not in VERIFIABLE_ACTIONS:
+        verdict, due = VERIFY_NOT_CHECKABLE, ""
+    else:
+        verdict = VERIFY_PENDING
+        try:
+            wait = int(duration_secs) if duration_secs else DEFAULT_VERIFY_AFTER_SECS
+        except (TypeError, ValueError):
+            wait = DEFAULT_VERIFY_AFTER_SECS
+        due = (
+            datetime.now(timezone.utc) + timedelta(seconds=max(1, wait))
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = utc_now_iso()
+    try:
+        store.update_fields(
+            incident_id,
+            last_action=action,
+            last_action_at=now,
+            verify_after=due,
+            verification=verdict,
+            verification_detail="",
+        )
+    except (KeyError, ValueError, OSError):
+        logger.exception(
+            "ops-mission-control: could not schedule verification for %s", incident_id
+        )
+        return "", ""
+    return verdict, due
 
 
 # ---------------------------------------------------------------------------
@@ -437,14 +638,53 @@ async def _handle_action(request: web.Request) -> web.StreamResponse:
 
 
 async def _handle_signals(request: web.Request) -> web.StreamResponse:
+    """Current provider state: what is firing, what is unclaimed, and what we could not read.
+
+    ``firing`` is the list a caller should reason about, and it is filtered the same way
+    ``dispatch.run_cycle`` filters — previously this route returned every signal
+    regardless of state under the key ``signals``, while dispatch claimed only firing
+    ones. That was harmless while no adapter could emit ``ok``; once one can, an
+    already-cleared signal would appear in the very list the reconcile SOP reads as
+    "what is still firing", and in ``unclaimed`` as apparent work.
+
+    ``poll_health`` is the other half of that contract: absence from ``firing`` only
+    means "it cleared" for a source whose poll actually SUCCEEDED. Resolving an incident
+    because its signal is missing from a source that returned 429 closes live work with
+    a false resolution.
+
+    ``suppressed`` is the THIRD reason a signal can be absent from ``firing``, and it is
+    neither of the first two: a human parked it at the provider. So it must not be
+    resolved on absence (nothing was fixed) and must not be treated as ``cleared``
+    either (the provider is not reporting recovery, it is reporting that somebody asked
+    to stop hearing about it). It exists as its own bucket because that is the only way a
+    caller can say "parked" at all — ``signals`` alone would put it back in the raw list
+    where reconcile and the source table would both count it as live work.
+    """
     registry = get_registry()
     signals, errors = await registry.poll_all()
     claimed = {inc.signal.id for inc in store.read_index().values()}
+    firing = [s for s in signals if s.state == STATE_FIRING]
+    cleared = [s for s in signals if s.state == STATE_OK]
+    suppressed = [s for s in signals if s.state == STATE_SUPPRESSED]
+    health = registry.poll_health()
     return web.json_response(
         {
+            # Kept for compatibility: every signal the poll returned, any state.
             "signals": [s.to_dict() for s in signals],
-            "unclaimed": [s.to_dict() for s in signals if s.id not in claimed],
+            "firing": [s.to_dict() for s in firing],
+            # Signals a provider positively reports as recovered. A caller may resolve
+            # on these WITHOUT consulting poll_health — an explicit `ok` is evidence,
+            # unlike an absence.
+            "cleared": [s.to_dict() for s in cleared],
+            # Parked by a human at the provider. Carries `suppressed_by` /
+            # `suppressed_reason` when the provider published attribution, which is what
+            # separates "the app ignored my alarm" from "someone silenced it".
+            "suppressed": [s.to_dict() for s in suppressed],
+            "unclaimed": [s.to_dict() for s in firing if s.id not in claimed],
             "errors": errors,
+            "poll_health": health,
+            # The one boolean a caller needs before resolving anything on absence.
+            "all_sources_healthy": bool(health) and all(h.get("ok") for h in health.values()),
         }
     )
 
@@ -566,6 +806,13 @@ async def _handle_put_settings(request: web.Request) -> web.StreamResponse:
         await asyncio.to_thread(slack_out.set_settings, channel_id=chan)
         applied["slack_channel"] = chan
 
+    # Local desktop notifications. Nothing to configure beyond on/off — there is no
+    # destination and no credential, which is the whole point of this channel.
+    if "notify_enabled" in body:
+        flag = bool(body["notify_enabled"])
+        await asyncio.to_thread(notify_out.set_settings, enabled=flag)
+        applied["notify_enabled"] = flag
+
     # Shared-ledger git sync: the team's memory-exchange repo. A remote URL and a
     # branch name are not credentials (auth is the operator's own git/ssh/gh
     # config), so they belong in plain app config like the Slack channel above.
@@ -613,7 +860,15 @@ async def _handle_put_settings(request: web.Request) -> web.StreamResponse:
             if sync_value is not None:
                 applied[sync_key] = sync_value
 
-    for numeric_key in ("max_claims_per_cycle", "stale_after_secs"):
+    for numeric_key in (
+        "max_claims_per_cycle",
+        "stale_after_secs",
+        # Sits beside ``stale_after_secs`` because it is the same knob for the other
+        # sweepable class: how long an unanswered ``needs_human`` incident may hold its
+        # signal before the sweep releases it. Unset means "derive from
+        # ``stale_after_secs``" (see ``store.sweep_stale``).
+        "needs_human_stale_after_secs",
+    ):
         if numeric_key not in body:
             continue
         try:
@@ -699,6 +954,17 @@ async def _handle_ledger_contradictions(request: web.Request) -> web.StreamRespo
 
 
 async def _handle_post_ledger(request: web.Request) -> web.StreamResponse:
+    """Add or promote a learned pattern.
+
+    ``miss_count`` / ``last_miss`` / ``decayed_at_miss_count`` are deliberately NOT
+    accepted from a body, and this is the security-shaped half of §5.9's demotion path.
+    The hygiene SOP promotes ``observed`` → ``verified`` by re-POSTing the same
+    pattern+fix (ids are content-addressed, so it merges) — so an accepted
+    ``miss_count: 0`` on that route would make the promotion step double as a way to
+    erase every recorded failure, with one curl, on the exact entries most likely to
+    have them. Miss evidence is only ever produced by ``ledger.record_miss``, from an
+    observed recheck, and ``upsert`` takes the MAX so a merge cannot lower it either.
+    """
     body = await _json_body(request)
     if body is None:
         return web.json_response({"error": "request body must be a JSON object"}, status=400)
@@ -707,10 +973,14 @@ async def _handle_post_ledger(request: web.Request) -> web.StreamResponse:
     if not pattern or not fix:
         return web.json_response({"error": "pattern and fix are required"}, status=400)
     raw_fps = body.get("fingerprints")
+    raw_keys = body.get("provider_keys")
     entry = LedgerEntry.create(
         pattern=pattern,
         fix=fix,
         fingerprints=[str(f) for f in raw_fps] if isinstance(raw_fps, list) else [],
+        # Optional and additive: an entry with no provider key still matches by shape,
+        # which is every entry written before this field existed.
+        provider_keys=[str(k) for k in raw_keys] if isinstance(raw_keys, list) else [],
         confidence=str(body.get("confidence", "medium")),
         trust=str(body.get("trust", "observed")),
         source=str(body.get("source", "human")),

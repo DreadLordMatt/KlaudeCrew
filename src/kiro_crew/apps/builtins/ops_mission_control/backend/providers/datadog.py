@@ -14,16 +14,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from kiro_crew.apps.builtins.ops_mission_control.backend.models import (
     ACTION_COMMENT,
     ACTION_RESOLVE,
+    ACTION_SILENCE,
     SEVERITY_CRITICAL,
     SEVERITY_INFO,
     SEVERITY_WARNING,
     STATE_FIRING,
     Signal,
+    resolve_silence_secs,
 )
 from kiro_crew.apps.builtins.ops_mission_control.backend.providers import (
     config_list,
@@ -70,6 +73,13 @@ _STATE_SEVERITY: dict[str, str] = {
 
 #: Evidence window for metric queries, in seconds.
 _METRIC_LOOKBACK_SECS = 3600
+
+#: Datadog's mute endpoint takes an optional ``end`` epoch and treats its ABSENCE as
+#: "mute forever" — so posting ``body={}`` (what this adapter used to do) silenced a
+#: production monitor indefinitely, and the only way back was a human noticing and
+#: unmuting by hand. The window is now always sent, bounded by the shared
+#: ``resolve_silence_secs`` so every provider's suppression obeys one ceiling rather
+#: than each adapter inventing its own.
 
 
 def _api_base() -> str:
@@ -136,6 +146,9 @@ class DatadogAdapter:
                     fired_at=str(monitor.get("overall_state_modified", "")),
                     resource=str(monitor.get("query", ""))[:200],
                     url=self._monitor_url(monitor_id),
+                    # Datadog's own monitor id — the identity Datadog groups by, and
+                    # already carried in labels for the action path.
+                    provider_key=f"monitor/{monitor_id}" if monitor_id else "",
                     labels={
                         "dd_monitor_id": monitor_id,
                         "monitor_state": state,
@@ -157,10 +170,15 @@ class DatadogAdapter:
     # -- ActionSink --------------------------------------------------------
 
     def supported_actions(self) -> frozenset[str]:
-        # Datadog monitors are muted, not "resolved" — a monitor clears when its
-        # metric recovers. We map ``resolve`` onto mute and say so, rather than
-        # pretending to close something Datadog does not model as closable.
-        return frozenset({ACTION_RESOLVE, ACTION_COMMENT})
+        # Datadog monitors are muted, not "resolved" — a monitor clears when its metric
+        # recovers, so there is nothing here to close.
+        #
+        # ``silence`` is now the honest name for that, and it is the preferred verb.
+        # ``resolve`` is kept as an alias onto the same bounded mute for the operators and
+        # rules that already grant it: silently dropping it would revoke a granted
+        # capability on upgrade, and refusing it would break a working allowlist. Both
+        # paths now always carry an expiry.
+        return frozenset({ACTION_SILENCE, ACTION_RESOLVE, ACTION_COMMENT})
 
     async def execute(self, signal: Signal, action: str, payload: dict[str, Any]) -> ActionResult:
         if not self.configured():
@@ -172,17 +190,26 @@ class DatadogAdapter:
 
     def _execute_sync(self, monitor_id: str, action: str, payload: dict[str, Any]) -> ActionResult:
         try:
-            if action == ACTION_RESOLVE:
+            if action in (ACTION_SILENCE, ACTION_RESOLVE):
+                # ALWAYS send an ``end``. Datadog reads a missing ``end`` as "mute
+                # forever", so the previous ``body={}`` traded a firing monitor for a
+                # permanently silent one — strictly worse than doing nothing, because
+                # the board shows the incident resolved while the metric is still bad.
+                duration = resolve_silence_secs(payload.get("duration_secs"))
+                end_epoch = int(time.time()) + duration
                 request_json(
                     f"{_api_base()}/api/v1/monitor/{monitor_id}/mute",
                     method="POST",
                     headers=_headers(),
-                    body={},
+                    body={"end": end_epoch},
                 )
                 return ActionResult(
                     ok=True,
                     action=action,
-                    detail=f"datadog monitor {monitor_id} muted (Datadog clears on recovery)",
+                    detail=(
+                        f"datadog monitor {monitor_id} muted for {duration // 60}m "
+                        f"(expires at epoch {end_epoch}; Datadog clears on recovery)"
+                    ),
                 )
             request_json(
                 f"{_api_base()}/api/v1/events",

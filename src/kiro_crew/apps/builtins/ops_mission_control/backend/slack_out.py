@@ -59,6 +59,11 @@ from kiro_crew.security import redact
 
 logger = logging.getLogger(__name__)
 
+#: Slot-key prefix for an incident's investigation chat. MUST stay in lockstep with
+#: ``IncidentChat.tsx`` and the dispatch SOP: the dashboard panel polls this exact key,
+#: and the Slack reply link is registered against it.
+APP_NAME = "ops-mission-control"
+
 #: Config keys. Non-secret (a channel id is not a credential), so these live in
 #: the plain app config rather than the keystone secret store.
 _ENABLED_KEY = "slack_enabled"
@@ -244,6 +249,53 @@ async def publish(incident: Incident, client: Any | None) -> bool:
                 incident.incident_id,
                 exc,
             )
+    return True
+
+
+def link_thread_to_investigation(incident: Incident, state: Any | None) -> bool:
+    """Register the board message's ts with the host so a REPLY reaches the agent.
+
+    Without this the board is write-only. The app records ``slack_thread_ts`` on its own
+    incident record, but inbound Slack routing looks the thread up in the HOST's
+    session map (``DashboardState.link_slack`` → ``sessions.set_slack_link``), which
+    nothing here ever populated. So a reply into the thread resolved to no session and
+    was dropped **silently** — no error, no ephemeral — while the app store listing
+    advertised "replyable Slack threads". An operator who answered a question believed
+    they had answered it.
+
+    In-process through ``DashboardState`` for the same reasons ``_slot_state`` is: an
+    HTTP call to our own gateway would need an auth token and can deadlock the loop.
+
+    Returns whether the link was made. Never raises, and a host without the method (or
+    without the slot yet) is a no-op — the slot is created by the dispatch SOP after the
+    claim, so early calls are expected to miss and later ones succeed.
+    """
+    if state is None or not incident.slack_thread_ts or not configured():
+        return False
+    slot_key = incident.slot_key or f"{APP_NAME}-{incident.incident_id}"
+    linker = getattr(state, "link_slack", None)
+    if linker is None:
+        return False
+    # Only link a slot that exists: link_slack silently returns on an unknown slot, and
+    # we want to report honestly whether the thread is actually answerable.
+    getter = getattr(state, "get_slot", None)
+    try:
+        if getter is not None and getter(slot_key) is None:
+            return False
+        linker(slot_key, incident.slack_thread_ts, channel())
+    except Exception as exc:  # noqa: BLE001 — never fatal to a dispatch cycle
+        logger.warning(
+            "ops-mission-control: could not link Slack thread for %s: %s",
+            incident.incident_id,
+            exc,
+        )
+        return False
+    logger.info(
+        "ops-mission-control: linked Slack thread %s to slot %r — replies now reach the "
+        "investigation",
+        incident.slack_thread_ts,
+        slot_key,
+    )
     return True
 
 

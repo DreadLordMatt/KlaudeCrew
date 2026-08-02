@@ -85,6 +85,14 @@ _RULES_KEY = "autonomy_rules"
 _APP_MODE_KEY = "mode"
 _PRIMARY_KEY = "primary_instance"
 
+#: Heartbeat-pacing keys, duplicated from ``dispatch`` because importing them would close
+#: an import cycle (``dispatch`` imports this module). They are asserted equal to
+#: ``dispatch``'s own constants by ``test_store_and_gate.py``, so the duplication cannot
+#: drift silently — which is the only reason it is acceptable.
+_CONFIG_MAX_CLAIMS = "max_claims_per_cycle"
+_CONFIG_STALE_AFTER = "stale_after_secs"
+_CONFIG_NEEDS_HUMAN_STALE_AFTER = "needs_human_stale_after_secs"
+
 
 @dataclass(frozen=True)
 class AutonomyRule:
@@ -167,6 +175,49 @@ def load_rules() -> list[AutonomyRule]:
             if rule is not None:
                 rules.append(rule)
     return rules
+
+
+def sweep_windows() -> dict[str, Any]:
+    """The three heartbeat-pacing knobs, resolved exactly as ``run_cycle`` resolves them.
+
+    These are settable through ``PUT /settings`` and were readable back through NOTHING, so
+    an operator could change how long a dead investigation pins a signal and then had no
+    way to see the value they had set — or to discover the defaults they were living under.
+    That is this app's signature failure in miniature: the knob turns, and the dial that
+    would tell you where it points does not exist.
+
+    ``needs_human`` is reported as its RESOLVED number rather than as the stored ``0``,
+    because "unset" here does not mean "no window" — ``store.sweep_stale`` derives it from
+    the working threshold by a multiplier. Showing the raw config value would tell an
+    operator a question is never released, which is the opposite of what happens.
+
+    ``needs_human_derived`` keeps that honest: it says whether the number above is the
+    operator's own or one we computed for them, so the UI can offer "back to default"
+    without pretending the two cases are the same.
+    """
+    # Imported here, not at module scope: ``dispatch`` imports this module's ``resolve_mode``
+    # and ``describe``, so a top-level import would close a cycle. The defaults live beside
+    # the code that applies them, and duplicating them here is exactly the drift this
+    # function exists to close.
+    from kiro_crew.apps.builtins.ops_mission_control.backend.dispatch import (
+        DEFAULT_MAX_CLAIMS_PER_CYCLE,
+        DEFAULT_STALE_AFTER_SECS,
+        _config_int,
+    )
+    from kiro_crew.apps.builtins.ops_mission_control.backend.store import (
+        DEFAULT_NEEDS_HUMAN_STALE_MULTIPLIER,
+    )
+
+    stale_after = _config_int(_CONFIG_STALE_AFTER, DEFAULT_STALE_AFTER_SECS)
+    needs_human = _config_int(_CONFIG_NEEDS_HUMAN_STALE_AFTER, 0)
+    return {
+        "max_claims_per_cycle": _config_int(_CONFIG_MAX_CLAIMS, DEFAULT_MAX_CLAIMS_PER_CYCLE),
+        "stale_after_secs": stale_after,
+        "needs_human_stale_after_secs": (
+            needs_human or stale_after * DEFAULT_NEEDS_HUMAN_STALE_MULTIPLIER
+        ),
+        "needs_human_derived": not needs_human,
+    }
 
 
 def resolve_mode(signal: Signal) -> str:
@@ -394,6 +445,11 @@ def describe(shift: ShiftStatus) -> dict[str, Any]:
         # failure mode a shared schedule introduces. Empty dict when no schedule is in
         # use, so the UI simply renders nothing rather than an empty team.
         "roster": _roster_safely(),
+        # How fast the heartbeat claims, and how long it lets work sit before releasing it.
+        # On this response because it is already the payload Settings reads for `mode` and
+        # `primary` — the two other write-only-until-now knobs — and adding a route for
+        # three integers would buy nothing.
+        "sweep": sweep_windows(),
     }
 
 
