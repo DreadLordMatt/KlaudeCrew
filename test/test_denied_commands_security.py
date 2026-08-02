@@ -37,6 +37,83 @@ class TestCatalog:
         ids = [r.id for r in BUILTIN_DENIED_RULES]
         assert len(set(ids)) == 139
 
+    def test_token_mint_is_blocked_in_both_the_cli_and_module_forms(self):
+        """`kirocrew token` mints a signed dashboard token that authenticates to EVERY gateway
+        route — including the ops-mission-control autonomy-ceiling PUT — so a prompt-injected
+        agent that shells out to it raises its own security ceiling.
+
+        Asserted through `is_denied`, the real enforcement path, NOT against `rule.pattern`.
+        That distinction is the point: this rule is one of `_SELF_PROTECTION_FLOOR_RULE_IDS`,
+        so its regex is a human-auditable statement of intent while the actual matching is a
+        UNION of that regex and the argv-structural floor. An earlier version of this test
+        searched the pattern directly and would have gone green on a floor that had stopped
+        running at all.
+
+        The module form is why the union matters. `python -m kiro_crew token` mints the
+        identical token, but its argv PROGRAM is the interpreter and the underscored import
+        name is not a console-script spelling — so neither the command-position regex nor
+        `_is_self_program` saw it. `_is_self_module_invocation` closes it structurally.
+        """
+        from kiro_crew import security
+
+        effective = list(
+            security.compute_effective_denied(security.BUILTIN_DENIED_RULES, (), False, (), ())
+        )
+
+        for blocked in (
+            "kirocrew token",
+            "kirocrew token --port 6777",
+            'kirocrew "token"',
+            "kirocrew -v --no-jail token",
+            "kiro-crew token",
+            # The module form, in the spellings a shell accepts.
+            "python -m kiro_crew token",
+            "python3 -m kiro_crew token --port 6777",
+            "python -mkiro_crew token",
+            "python -m kiro_crew pod token",
+            # Interpreter flags that take a SEPARATE operand. The first version of the module
+            # check stopped at the first token not starting with `-`, so the operand (`dev`)
+            # ended the scan and the mint went through one flag deeper. Review caught it.
+            "python -X dev -m kiro_crew token",
+            "python -W ignore -m kiro_crew token",
+            "python -Q new -m kiro_crew token",
+            "python -X utf8 -X dev -m kiro_crew token",
+            "python3 -B -X dev -m kiro_crew pod token",
+            # ATTACHED operands are one token and need no skip — covered because the
+            # separate-operand fix must not break them.
+            "python -Xdev -m kiro_crew token",
+            "python -Wignore -m kiro_crew token",
+            # `-x` is a real flag that takes NO operand, and the skip set is lowercased (the
+            # floor sees an already-lowercased command, so `-X` arrives as `-x`). A bare `-m`
+            # after it must still register as the marker rather than be eaten as an operand.
+            "python -x -m kiro_crew token",
+        ):
+            assert security.is_denied(
+                blocked, denied_regexes=effective
+            ), f"token mint not blocked: {blocked!r}"
+
+        for allowed in (
+            "ls kirocrew",
+            "echo tokens",
+            "grep token app.log",
+            # Mentions the name AND the verb, but as another program's data.
+            "echo kirocrew token",
+            "pytest test/test_token_auth.py",
+            # The product as a module, but not the mint verb.
+            "python -m kiro_crew gateway",
+            "python -X dev -m kiro_crew gateway",
+            # A flag operand that happens to look like a path, and a script that is not the
+            # product: neither is a module invocation.
+            "python -X dev script.py token",
+            "python -c 'print(1)' token",
+            # `token` as an argument to something that is not the product.
+            "python script.py token",
+            "python -m pytest test_token.py",
+        ):
+            assert not security.is_denied(
+                allowed, denied_regexes=effective
+            ), f"false positive on {allowed!r}"
+
     def test_rules_are_frozen_dataclass_with_four_fields(self):
         rule = BUILTIN_DENIED_RULES[0]
         assert isinstance(rule, DeniedCommandRule)
@@ -370,18 +447,25 @@ class TestIsDeniedReDoSResistance:
     that bypass — see ``test_padded_single_segment_needle_not_bypassed``).
     """
 
-    # The fix resolves each of these in well under a millisecond locally. The
-    # ceiling only has to separate LINEAR from CATASTROPHIC: the pre-fix ReDoS
-    # took many seconds to minutes (exponential/polynomial). A wide 5s bound is
-    # deliberately load-tolerant — a shared CI runner under parallel xdist load
-    # can inflate a sub-ms scan to a few hundred ms, which is NOT a regression;
-    # only a return to seconds-scale would trip this.
+    # The ceiling only has to separate LINEAR from CATASTROPHIC: the pre-fix ReDoS
+    # took many seconds to minutes (exponential/polynomial), so a wide 5s bound is
+    # all the resolution this needs.
     _BUDGET_SECONDS = 5.0
 
     def _elapsed(self, command: str) -> float:
-        start = time.perf_counter()
+        """CPU time, not wall-clock — the property under test is algorithmic complexity.
+
+        Wall-clock measures this process's work PLUS however long the OS gave the core to
+        someone else, so on a loaded CI runner (four xdist workers over two vCPUs) a scan that
+        burns ~2s of CPU can report >5s elapsed and fail a test whose subject never regressed.
+        ``process_time`` counts only CPU consumed by this process, which is exactly what a
+        backtracking blow-up inflates: measured 1:1 against wall-clock when idle (2.228s vs
+        2.230s), and a genuinely catastrophic pattern burns CPU rather than waiting, so nothing
+        this test was built to catch can hide from it.
+        """
+        start = time.process_time()
         is_denied(command)
-        return time.perf_counter() - start
+        return time.process_time() - start
 
     def test_git_prefixed_flag_spam_returns_fast(self):
         # The historical regression input: whitespace/flag spam after ``git``.
