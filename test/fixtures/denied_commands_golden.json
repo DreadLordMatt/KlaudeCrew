@@ -45,7 +45,7 @@
     "id": "credential-exfil-kirocrew-token",
     "pattern": "(?:\\A|[;&|\\n`]|\\$\\()[\\s\"'(]*[\\w.:/\\\\-]*kiro[-.]?crew\\b[^|;&#>/*]*\\btoken\\b",
     "category": "credential-exfil",
-    "description": "Blocks the `kirocrew token` CLI, which mints a signed dashboard access token an attacker could use to authenticate to the gateway. Matches the CLI name and the token verb within one command segment -- including nested forms such as `kirocrew pod token` and the hyphenated `kiro-crew` spelling -- so an incidental mention of the word in a later command, a comment, or a file path is not a mint."
+    "description": "Blocks the `kirocrew token` CLI, which mints a signed dashboard access token an attacker could use to authenticate to the gateway. Matches the CLI name and the token verb within one command segment -- including nested forms such as `kirocrew pod token` and the hyphenated `kiro-crew` spelling -- so an incidental mention of the word in a later command, a comment, or a file path is not a mint. The argv floor additionally covers `python -m kiro_crew ... token`, which mints the same token through the interpreter rather than the console script."
   },
   {
     "id": "credential-exfil-env-grep-aws",
