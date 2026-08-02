@@ -1,7 +1,11 @@
 # Ops Mission Control
 
-Last Updated: 2026-07-30 (dispatch engine + manifest crons + Settings panel; initial
-revision same day — builtin app, provider seam, keystone secret store, autonomy gate)
+Last Updated: 2026-08-01 (post-action verification + the ledger's track record:
+contracts 2b and 3b — a fast-path floor, a mechanical demotion path, and a recheck that
+refuses to read a failed poll as success; local notification bus: three declared channels,
+`backend/notify_out.py`; provider-side suppression: `STATE_SUPPRESSED`, contract 1b;
+earlier revisions — dispatch engine + manifest crons + Settings panel; builtin app,
+provider seam, keystone secret store, autonomy gate)
 
 An autonomous ops first responder shipped as a **builtin app** (`origin: builtin`,
 `defaultEnabled: false`). It polls signal providers, claims what is firing,
@@ -26,6 +30,104 @@ This is load-bearing: a fingerprint that drifts per occurrence means a repeat
 failure never matches its ledger ancestor, and the app keeps working while
 silently no longer learning. Changing the normalization invalidates every stored
 `LedgerEntry.fingerprints` entry.
+
+**It also provably over-merges, and that is why it cannot be the only key.** Because
+every bare number is stripped, distinct failures on one resource collide — verified and
+pinned in `TestShapeHashOverMerges`:
+
+| title A | title B | shared fingerprint |
+|---|---|---|
+| `4xx error rate above 5` | `5xx error rate above 1` | `413280c6ee0b5afa` |
+| `p99 latency above 500ms` | `p50 latency above 100ms` | `c4dbf4e759b19ceb` |
+
+The stripping is deliberate (a DLQ at 500 and at 900 *should* match), so the fix is not
+to sharpen the hash — a fingerprint match means "looks like this", and a ledger that
+presents it as "is this" hands a responder a fix learned from a different problem, which
+is worse than no match. See contract 1a.
+
+### 1a. Provider identity (persisted, additive)
+
+`Signal.provider_key` carries the identity the **provider** computed — an Alertmanager
+`fingerprint`, a Datadog monitor id, a CloudWatch `region/alarm-name`, a `repo#number`.
+It is namespaced `"<source>:<key>"` so two providers cannot collide on a bare numeric id,
+and it is set from **explicit adapter input, never derived**: a derived value would be
+another heuristic wearing the word "exact".
+
+`LedgerEntry.provider_keys` stores them, unions on merge exactly as `fingerprints` does
+(preserving the git reconciliation property in contract 2), and is **bounded** by
+`MAX_KEYS_PER_ENTRY` keeping the newest. The bound is required, not tidiness: PagerDuty
+mints a new incident id per occurrence, so an unbounded list would grow one JSONL line
+forever in a file that is git-synced and read into a model prompt.
+
+`ledger.match(fingerprint, provider_key=...)` ranks exact hits **above** shape hits
+regardless of trust or use count, and `dispatch` reports which kind matched in the brief
+(`ClaimedIncident.exact_match_ids`) so the agent can weigh them differently.
+
+Both fields default empty, so every incident and ledger line written before they existed
+stays valid and keeps matching by shape alone.
+
+### 1b. Provider-side suppression (persisted, additive)
+
+`VALID_STATES` gains **`STATE_SUPPRESSED`** — *a human already parked this at the
+provider* (an Alertmanager silence or inhibition, a Zabbix maintenance window, an Icinga
+downtime, a Sentry archive). `normalize_state` maps
+`suppressed`/`silenced`/`inhibited`/`muted`/`snoozed`/`downtime`/`in downtime` onto it.
+
+**What its absence cost.** Every one of those words previously returned `unknown` —
+verified, `suppressed` and `banana` were indistinguishable. So an adapter facing
+`status.state = "suppressed"` had two options and both were wrong: report `firing`, and
+the app investigates something an operator explicitly parked (the fastest way to lose
+trust in an autonomous responder); or drop it, and "the app ignored my alarm" becomes
+indistinguishable from "someone silenced it".
+
+**A state, not a label**, argued against the two filters that consume state:
+
+- `dispatch.run_cycle` claims `state == firing` in ONE place, so a new state is unclaimable
+  by construction — no second predicate for a future edit to forget. A label would leave
+  `state == firing` and force `run_cycle` to grow a label-reading condition, which is the
+  *every adapter reimplements the filter privately* failure moved into core.
+- `/signals` splits buckets BY STATE, and the reconcile SOP is written against those
+  buckets. A label cannot produce a bucket, so a parked signal would keep arriving inside
+  `firing` and reconcile would keep treating it as live work.
+- `unknown` means "we could not read the state"; `suppressed` means "we read it and a human
+  parked it". Collapsing the two is the defect, not the fix.
+
+**Two decisions this does NOT reopen.** `acknowledged` still maps to `firing` — an
+acknowledged page is unresolved and the point is to be working it (`pagerduty.py`
+`_OPEN_STATUSES`). And no-data stays settled: CloudWatch `INSUFFICIENT_DATA` is an opt-in,
+default-off detection-*sensitivity* choice with the truth kept in `labels['state']`.
+Suppression is not a sensitivity knob — it is a fact about a person's action, and there is
+no honest default-off reading of "someone silenced this".
+
+**Distinct from `ACTION_SILENCE`.** That is a bounded suppression the app *issues*; this is
+one somebody else applied, which we *read*. One word for both would merge our intent with
+another party's decision.
+
+`Signal.suppressed_by` (the provider's own attribution — an Alertmanager `silencedBy` id,
+the alert in `inhibitedBy`) and `Signal.suppressed_reason` (`silenced` vs `inhibited`, since
+a person's silence and an alert masking another alert need different next moves) are
+**explicit adapter input, never derived**, and both **default empty** so every incident
+already on disk stays valid. Unlike `provider_key` they are NOT namespaced by source: they
+are display text for a human, not a match key.
+
+The webhook adapter reads both Alertmanager status shapes — the v4 scalar `status`, and the
+v2 `gettableAlert` OBJECT `{"state": "suppressed", "silencedBy": [...]}`. The previous
+scalar-only read stringified that object, so it normalized to `unknown` and dropped
+`silencedBy` entirely.
+
+`normalize_state` therefore covers the **whole** v2 `alertStatus.state` enum —
+`unprocessed` and `active` map to `firing`, `suppressed` to `suppressed`. Admitting only the
+parked value would have been worse than not reading the object at all: the v2 payload would
+parse a *silenced* alert correctly while dropping a *live* one into `unknown`, i.e. the app
+going quiet on real work in exchange for reading a mute. The flat native envelope accepts `suppressed_by`/`suppressed_reason`
+too, because Zabbix (`suppressed=1`) and Icinga (`downtime_depth`) do not speak
+Alertmanager's shape and a forwarder normalizing them needs somewhere to put the
+attribution.
+
+`CycleResult.suppressed` counts what a cycle saw and left alone. It is deliberately excluded
+from `changed` (a suppression is not news, and silence-by-default is a hard requirement) but
+present in the payload, because `polled` counts firing signals only — without the count a
+cycle reports a smaller world than it saw.
 
 ### 2. Ledger entry id (content-addressed, persisted)
 
@@ -53,6 +155,73 @@ not that git resolves them for you. Two things make it work:
 
 Measured end to end: two divergent ledgers → real `git merge` → conflicted file → 4 raw
 entries read as **3**, shared lesson collapsed with both fingerprints preserved.
+
+### 2b. The fast-path bar, and the track record behind it (persisted, additive)
+
+`ledger.is_fast_path` is what decides whether the investigation brief says **"KNOWN
+PATTERN — propose this fix"** or **"hypotheses to test"**. It now delegates per entry to
+`ledger.entry_unlocks_fast_path`, which requires FOUR things:
+
+| condition | constant | why |
+|---|---|---|
+| `trust == verified` | `FAST_PATH_TRUST` | a human saw it work |
+| `confidence == high` | `FAST_PATH_CONFIDENCE` | and was sure |
+| `use_count >= 2` | `MIN_USES_FOR_FAST_PATH` | some incident OTHER than this one used it |
+| `miss_count == 0` | `MAX_MISSES_FOR_FAST_PATH` | it has never been observed to fail |
+
+**Why the first two alone were not enough.** `POST /ledger` takes `confidence` and `trust`
+verbatim, so one hand-authored entry could arrive as `verified`/`high` and immediately
+unlock "propose this fix directly" for a production failure, having never been applied to
+anything. Contract 1a made that strictly worse rather than better: `record_use` **binds**
+the provider key on the first match, so from the second occurrence onward that same single
+piece of evidence presents as an *exact* match — a stronger-looking claim with nothing new
+behind it.
+
+**Why 1 would be vacuous.** `dispatch.attach_ledger_matches` calls `record_use` *before*
+`is_fast_path`, so at the moment of judgement `use_count` already counts the incident being
+judged. Every match whatsoever has `use_count >= 1`. 2 is the smallest floor that says
+anything, and it lands on the same line `handover.MIN_USES_TO_RECUR` already draws.
+
+**The accepted cost:** the fast path now unlocks on the third occurrence, not the second.
+A non-fast-path match is not withheld — the brief carries the full pattern and fix either
+way; the only difference is that the agent is told to confirm before proposing.
+
+**The mechanical downward path.** Two new persisted, default-zero fields plus a bookkeeping
+one:
+
+- `LedgerEntry.miss_count` / `.last_miss` — times the fix was cited and the failure came
+  back. Written by `ledger.record_miss`, whose **only** caller is
+  `dispatch._record_verification_misses` (see contract 3b), so the standard of evidence
+  lives in one place.
+- `LedgerEntry.decayed_at_miss_count` — the `miss_count` value hygiene last spent on a
+  demotion, so one failure costs exactly one confidence step. Required because hygiene runs
+  nightly and its demotion test is a *ratio*, which stays true once true: without it a
+  single miss would walk an entry `high → medium → low` across three nights on no new
+  evidence.
+
+All three take the **max** on every merge path (`_reconcile` on read, `upsert`, and
+hygiene's dedupe). That asymmetry against `confidence`'s strongest-wins is deliberate: a
+git pull, or a re-POST of the same pattern+fix, must not be able to launder away a
+teammate's evidence that the fix failed. The re-POST case is the sharp one — that is
+exactly how `ledger-hygiene.md` promotes `observed → verified`, so an accepted
+`miss_count: 0` there would clear every recorded failure with one curl, on precisely the
+entries most likely to have them. `POST /ledger` therefore does not read the three fields
+from a body at all.
+
+`hygiene()` demotes one confidence step when `miss_count >= max(1, use_count *
+MISS_RATIO_FOR_DECAY)` and reports `demoted` **separately from `decayed`**: "nobody needed
+this" and "this did not work" are opposite findings, and one number for both would let a
+staleness report and a correctness report arrive as the same sentence. `trust` is never
+rewritten — "somebody saw this work" stays true even after it failed elsewhere.
+
+The prune order changed from `-use_count` to `-(use_count - miss_count)`. Before, an entry
+that kept matching the *wrong* failure climbed the ranking on every mismatch and was
+therefore the **last** thing the cap dropped: the ledger preferentially kept its most
+misleading rows.
+
+`stats()` gains `proven` / `demoted` / `total_misses`. `verified` and `high_confidence` are
+each one HALF of the bar, so neither answers "how much of this ledger would an agent
+propose without checking" — showing only those two overstated the ledger's authority.
 
 ### 2a. The sync loop, and where it is driven from
 
@@ -90,6 +259,52 @@ every one of which the mocked-git tests passed** (`tests/test_ledger_sync_git.py
    alone, so the on-call schedule — un-ignored *specifically* so it could sync — would
    have reached nobody. `TRACKED_FILES` now names the whole shared set.
 
+A **fifth** was found later, and not by a test — by inspecting the owner's live install:
+
+5. **The local repo was never on the configured branch.** `git init` ran with no `-b`, so
+   git picked its own default (`master`), and `branch()` was used **only** inside refspecs:
+   `fetch origin <b>`, `merge origin/<b>`, `push HEAD:<b>`, `rev-list origin/<b>..HEAD`.
+   Nothing ever moved HEAD or wrote tracking config. Live install: config `main`,
+   `.git/HEAD` `master`, and **no `[branch]` section at all**. Sync worked *by accident of
+   those explicit refspecs* — the app's signature "machinery that looks deliberate" shape,
+   and the reason the real-git tests missed it: they only ever asked whether the content
+   arrived, and it did.
+
+   Four measured costs, none of them cosmetic. (a) `status()` reported "Syncing … on branch
+   main" while HEAD was `master` — an overstated claim on the one surface the operator
+   reads. (b) **Manual recovery was blocked**: with no upstream, `git pull` fails with "no
+   tracking information for the current branch" and `git push` with "the current branch
+   master has no upstream branch" — and a conflicted `rotation.yaml` is *refused* by push
+   precisely so a human fixes it by hand, in that directory. (c) Changing
+   `ledger_sync_branch` later re-pointed fetch/merge/push at a new remote ref while HEAD
+   kept accumulating on the old one, so the first push to the new branch is either rejected
+   non-fast-forward or publishes the old branch's history onto it. (d) `git status` and any
+   agent reading the branch name reported a branch nobody configured.
+
+   **Resolution: rename in place, then write tracking explicitly.** `_align_branch` runs
+   from `_ensure_repo`, so one call site covers pull, push, and the operator changing the
+   branch later. `git branch -m --` is the primitive because (verified against real git) it
+   succeeds on an *unborn* branch, keeps the same sha on a born one, leaves a dirty tree
+   untouched, and preserves an in-progress conflicted merge — none of which `checkout` /
+   `switch` do. It **refuses** on a detached HEAD (moving refs under one can lose the
+   operator's work) and when a *different* branch of that name already exists (`git branch
+   -M` would delete it and every commit only it holds — the exact lesson-stranding this
+   fixes). Tracking is written with `git config branch.<n>.remote/.merge`, **after** the
+   rename and **not** with `--set-upstream-to`: the rename migrates `.remote` but leaves
+   `.merge` on the old ref, and `--set-upstream-to` fails in both ordinary first-sync states
+   (no `origin/<b>` fetched yet; unborn local branch) — an empty remote is how a team
+   *starts*. A refusal is never a sync failure: publishing always worked through the
+   refspecs, so the reason is surfaced through `status()` instead of failing `_ensure_repo`.
+
+   `status()` therefore gained `local_branch` (what `.git/HEAD` points at, `""` when
+   detached or uninitialized), `branch_matches` (the only field a UI should gate a warning
+   on; **true** when uninitialized, since there is nothing yet to disagree with) and
+   `detached`. `branch` keeps meaning the *configured* branch. The detail sentence only
+   claims "Syncing … on branch b" when that is true of the local repo too. Rendered in
+   Settings as a `wrong local branch` / `detached HEAD` badge plus a row naming the branch
+   the repo actually sits on — shown only when they disagree, because two rows that usually
+   agree invite the very conflation that caused this.
+
 Also fixed: a clean tree is not proof everything is shared. A run that committed and then
 failed to reach the remote left `push` reporting "nothing to push" forever, stranding that
 lesson locally; `_has_unpushed` distinguishes the two and treats an unknown answer as
@@ -99,6 +314,36 @@ Verified live: A records → pushes → B pulls and sees it → B adds → A pul
 concurrent case — both write without seeing each other — the stale push is correctly
 **rejected**, the pull reconciles to 3 entries preserving both sides, and both instances
 converge on identical ledgers with no entry lost.
+
+#### Where an operator sets it, and what they are told
+
+Config keys (all non-secret, so plain `data/config.json`, same tier as the Slack channel):
+`ledger_sync_enabled`, `ledger_sync_remote`, `ledger_sync_branch`. Written through
+`PUT /settings`; read back through `ledger_sync.status()` on `GET /state` (`ledger_sync`).
+
+A remote URL is **not** a credential — auth is the operator's own SSH key, credential
+helper or `gh` login — which is what makes it eligible for that file at all. The converse
+constrains the UI: `config.json` is served **unauthenticated**, the write path only
+length-caps the remote, and `redact_tokens` has no pattern for a PAT inside a URL. So the
+Settings card asks for an SSH remote, states plainly that there is no credential to enter,
+and strips a `userinfo@` component before *displaying* a remote — which is about not being
+a second place a token is shown, **not** a claim that the stored value was sanitised.
+
+`status()` reports `conflict` (the ledger) and `schedule_conflict` (`rotation.yaml`)
+separately, because they are opposite severities:
+
+- A **ledger** conflict is reconcilable and sync keeps publishing (content-addressed ids,
+  `read_entries` skips markers, the next push rewrites the union).
+- A **schedule** conflict makes `push` **refuse outright**, so nothing new reaches the team
+  at all. That refusal previously existed only in the log and a SEL audit line —
+  `sync_safely` swallows it into a warning — while `status()` still said "Syncing …". An
+  operator therefore watched a card report a working sync through an indefinite publishing
+  outage, with the on-call file unparseable for everyone who pulled it. `status()` now names
+  the refusal, and Settings renders it as an error rather than a note.
+
+`_ledger_sync_status`'s failure fallback carries the **same key set** as a real status, so
+the UI can read every field instead of guarding each one; the two-key fallback it replaced
+made `undefined` a possible rendered remote.
 
 ### 3. Incident status grammar (persisted in the dispatch index)
 
@@ -175,7 +420,7 @@ Verified: 451 incidents / 301 KB / 43 ms per claim → prune → 101 / 67.5 KB /
 
 ```
 unclaimed → dispatched → investigating → {needs_human, resolved, escalated}
-dispatched|investigating → stale        (idle past the sweep window)
+dispatched|investigating|needs_human → stale   (idle past that status's window)
 dispatched → resolved                   (signal cleared before the first turn)
 stale → dispatched                      (re-claim, same incident id)
 stale → resolved                        (signal cleared while released)
@@ -199,6 +444,175 @@ without one when the underlying signal simply went away, which the SOP requires 
 stated in the `resolution` text rather than implying a fix. Both edges were found by
 exercising the reconcile SOP against a real cleared GitHub signal, and are pinned by
 `test_models.py::TestTransitionGrammar`.
+
+**`needs_human → stale` is now actually traversed.** The edge was legalised from the
+start, for a stated reason — "an incident nobody ever answers must not pin a signal as
+claimed forever" — and the sweep never used it: `needs_human` was absent from
+`store._SWEEPABLE_STATUSES`, and `run_cycle`'s pre-filter counts every non-stale
+non-terminal incident as owning its signal, so an unanswered question meant the alarm was
+never re-claimed. The only guard asserted the transition was *legal* and never ran the
+sweep, which is exactly why the gap survived — the same "test the outermost caller"
+lesson as above.
+
+It gets its **own, longer window** (`needs_human_stale_after_secs`, defaulting to
+`DEFAULT_NEEDS_HUMAN_STALE_MULTIPLIER` × the working one, so 12 h at the 2 h default).
+Waiting on a person is legitimately slower than an agent dying, and releasing a question
+discards the investigation's context — but an *abandoned* question must not hold the
+signal forever.
+
+#### Where an operator sees these, and in what unit
+
+`max_claims_per_cycle`, `stale_after_secs` and `needs_human_stale_after_secs` are written
+through `PUT /settings` and read back through `rotation.sweep_windows()` on
+`GET /rotation` (`sweep`). The read path was missing for the whole life of these keys, so
+an operator could set a window and never see it again, and the defaults governing every
+untouched install were reachable only by reading the source — the same
+looks-deliberate-does-nothing shape this module exists to prevent, in the settings layer.
+
+Two rules the response encodes, both load-bearing for the UI:
+
+- **`needs_human_stale_after_secs` is reported RESOLVED, never as the stored `0`.** Unset
+  does not mean "never released" — `store.sweep_stale` derives it from the working
+  threshold — so returning the raw value would state the opposite of what the sweep does.
+- **`needs_human_derived` says whose number it is.** A derived window moves when
+  `stale_after_secs` changes; a pinned one does not, and an operator choosing between them
+  needs to know which they currently have.
+
+`sweep` is optional on the client type: an older gateway omits it, and the Settings card
+then reports that the values were not sent rather than substituting the defaults, which
+would confidently display 2 h against an instance possibly running something else.
+`rotation` duplicates the three config-key strings (importing them from `dispatch` would
+close an import cycle); `test_store_and_gate.py` asserts them equal to `dispatch`'s own, so
+a rename cannot leave the panel displaying a default while the heartbeat uses a real value.
+
+### 3a. Suppression is always time-boxed (safety)
+
+`ACTION_SILENCE` exists because every low-risk provider write in the landscape is a
+time-boxed suppression (Alertmanager silence with a mandatory `endsAt`, Datadog mute with
+an `end`, PagerDuty snooze with a required `duration`, Sentry archive with an
+`ignoreDuration`), and the vocabulary had no word for it — so an adapter had to express a
+mute as `resolve`, asserting something false and hiding a live fault *permanently* rather
+than temporarily.
+
+The contract: **an action in `EXPIRING_ACTIONS` always carries a positive, bounded
+expiry**, clamped by `resolve_silence_secs` into `(0, MAX_SILENCE_SECS]` at the
+authorization boundary in `routes._handle_action` — not in each adapter. A sink must not
+be able to opt out of the bound by forgetting to check, because an unbounded suppression
+is the single outcome the verb exists to prevent. Unparseable or non-positive input
+yields the DEFAULT, never "no expiry".
+
+Why this matters beyond tidiness: **a wrong silence expires by itself.** That is what
+makes granting `act` a bounded bet rather than an all-or-nothing one, which is what
+"autonomy is earned per rule" requires in practice.
+
+Fixed in the same change: `datadog.py` posted `/mute` with `body={}`, and Datadog reads a
+missing `end` as *mute forever* — so the board showed an incident resolved while the
+metric stayed bad, recoverable only by a human noticing. `resolve` is retained as an
+alias onto the same bounded mute, because silently dropping it would revoke a capability
+an existing act-rule already grants. `github-issues` deliberately does **not** advertise
+`silence`: an issue tracker has no snooze, and claiming one would be a lie.
+
+### 3b. An executed action is re-read, and a failed poll is not a success (persisted, additive)
+
+`ActionResult.ok` means **"the provider returned 2xx"** and nothing more. That is not the
+claim the board was making. Checkmk dispatches commands asynchronously through Livestatus
+and its own docs warn a 2xx "only indicates whether the request was successfully
+transmitted, NOT whether it was in fact successfully executed"; Nagios's command pipe
+returns nothing at all. So the app could report a suppression or a resolve as applied while
+the alarm kept firing, with no code anywhere in a position to notice — the silent lie an
+ops agent must not tell, and the reason `use_count` meant "was shown" rather than "worked".
+
+**Five persisted, default-empty fields on `Incident`:** `last_action`, `last_action_at`,
+`verify_after`, `verification`, `verification_detail`. Empty `verification` means *no action
+was ever executed* — which is the truth for every incident already on disk, and is
+deliberately **not** back-filled to a verdict.
+
+**The verdict vocabulary** (`VALID_VERIFICATIONS`), and why each exists separately:
+
+| verdict | meaning |
+|---|---|
+| `pending` | an action landed a 2xx; the recheck is scheduled and has not run |
+| `cleared` | the recheck ran against a **successful** poll and the signal is gone |
+| `still_firing` | the recheck ran against a successful poll and it is **still firing** |
+| `unknown` | the recheck was due and **we could not look** |
+| `not_checkable` | executed, but its success is not observable here |
+
+`OPEN_VERIFICATIONS = {pending, unknown}` — `unknown` is **not terminal**. "We could not
+look" is a statement about us, not about the world, so a later cycle where the source
+answers replaces it. Freezing it would be the absence-is-evidence bug in a new place.
+
+**Absence is not evidence, restated at a second boundary.**
+`dispatch.verify_pending_actions` refuses to reach any verdict for a source whose
+`poll_health` entry is missing or `ok: false` — the same rule `reconcile.md` Pass 1 step 3
+states for resolving on absence. Here it is worse than a wrong board row: reading a failed
+poll as "the fix landed" would feed a **false positive** into the ledger's track record,
+making a fix that never worked look proven.
+
+**Three absences, not one — the other two also reach `unknown`.** A missing signal from a
+poll that SUCCEEDED still proves nothing in two further cases, and both originally reached
+`cleared`:
+
+- **A drained push spool** (`snapshot: false`, see § Absence is not evidence). Absence is
+  the steady state for the webhook source, so one cycle after any delivery an action
+  verified as `cleared` with the fault live.
+- **A signal now `suppressed`.** This is the worst of the three to misread, because after a
+  `silence` *this app itself issued*, "the provider reports it suppressed" is precisely what
+  SUCCESS looks like — so the recheck congratulated the app for muting a live fault, and
+  `use_count` grew on the entry that recommended it. `unknown` rather than `still_firing`
+  because the condition is genuinely unobservable while muted: the provider has stopped
+  evaluating it into a firing state, and only the suppression lifting can answer the
+  question. The attribution in the detail comes from **this poll**, not from
+  `Incident.signal` — that snapshot was taken at claim time, before anyone parked it, so it
+  names nobody in exactly the case that needs a name.
+
+**A SIMULATED action schedules no recheck at all.** `ActionResult.simulated` (default
+`False`) marks a sink that RECORDED the intent instead of performing it — `NoopActionSink`,
+the observe-only default. `ok=True` there means "we successfully did nothing", which the
+recheck cannot distinguish from a real write: it read the still-firing alarm as the action
+having failed and charged a `miss_count` to every entry in `ledger_matches`. On a default
+install that is the ONLY path, because `cloudwatch` and `webhook` register no `ActionSink`
+and every action falls through to `noop` — so exercising the proposal flow, which is exactly
+what an operator is told to do before granting real authority, **demoted their own proven
+knowledge for a write nobody made**. Verified: act mode plus one scoped cloudwatch rule took
+a verified/high/2-use entry to `miss_count=1` and off the fast path. `routes._handle_action`
+therefore gates on `result.ok and not result.simulated`.
+
+**Only some verbs are verifiable** (`VERIFIABLE_ACTIONS = {resolve, silence}`). An `ack`
+leaves an alert firing *by design* — `normalize_state` maps `acknowledged` onto `firing` on
+purpose (see `providers/pagerduty.py`) — so firing state carries no information about
+whether the ack landed. Those are stamped `not_checkable` with **no** due date rather than
+judged against the wrong evidence, and the board says "not checked" instead of leaving a
+blank that reads as success. That is an admitted gap: no adapter here reports
+acknowledgement state back.
+
+**Two schedules.** A `silence` is rechecked at the END of its own window — the schedule
+contract 3a's mandatory expiry buys, and the more interesting moment, because a suppression
+that expires straight back into the same firing condition is positive evidence nothing was
+fixed. Everything else waits `DEFAULT_VERIFY_AFTER_SECS` (5 minutes), long enough for a
+provider evaluating on a period to catch up.
+
+**No new cron.** The recheck rides on the poll `run_cycle` already made, so it costs zero
+extra provider calls and stays inside the heartbeat's flat cost. Verification is a **read**,
+so it sits entirely inside the read-only-by-default posture.
+
+`CycleResult.verifications` is `{incident_id: verdict}` for the incidents decided *this
+cycle only*; an empty map is the normal case and is **not** "every action worked". It feeds
+`changed` only for `still_firing` — the app discovering a claim it made was untrue is the
+most newsworthy thing a cycle can find, while announcing `cleared` would make the heartbeat
+congratulate itself and announcing `unknown` would broadcast a non-finding.
+
+**A `still_firing` verdict charges a miss** to every entry in `ledger_matches`, not to "the
+one we used": nothing records which match the investigation applied (`proposed_action` is
+declared and never assigned), and `MAX_MATCHES_PER_SIGNAL` is 3 so the blast radius is
+bounded. That join is what makes `use_count` mean "worked" (contract 2b).
+
+The postmortem carries the verdict too (`store._verification_line`), because that artifact
+is what a colleague reads with no access to the board, and "Actions taken: silenced the
+alarm" is the sentence most likely to be believed as an *outcome*. It renders nothing at
+all when no action was taken — a "not applicable" line on every incident would bury the
+cases where it matters. `verification_detail` goes through the redactor (it quotes a
+provider's poll-failure text); `verification` and `last_action` do not, being closed enums
+we assign.
 
 ### 4. Keystone secret path (security)
 
@@ -243,7 +657,7 @@ Four narrow Protocols, each with a shipped default, following the CPP pattern in
 |---|---|---|
 | `SignalSource` | What is firing? | `cloudwatch`, `pagerduty`, `datadog`, `github-issues`, `webhook` |
 | `RotationSource` | Who is on shift? | `pagerduty`, `always-on` (default) |
-| `ActionSink` | Ack / resolve / comment | `pagerduty`, `datadog`, `github-issues`, `noop` (default) |
+| `ActionSink` | Ack / resolve / comment / silence | `pagerduty`, `datadog`, `github-issues`, `noop` (default) |
 | `EvidenceSource` | Surrounding context | `cloudwatch-evidence`, `datadog-evidence` |
 
 Split four ways rather than one fat interface because real providers cover
@@ -396,6 +810,74 @@ companion. The core never imports a companion and never branches on edition.
 returns `(signals, errors)`. One unreachable provider yields a per-source error
 entry, never an exception — the heartbeat must survive a dead provider.
 
+### Absence is not evidence (`registry.poll_health`)
+
+**A signal missing from a poll means one of THREE opposite things: it cleared, we could
+not look, or this source structurally cannot tell us.** Nothing recorded which, so a 429, a
+timeout, an expired token, or a storm
+that pushed a signal off the first page all read exactly like "resolved" — and the
+reconcile SOP closed live incidents on that basis, into a *terminal* status carrying the
+resolution text "signal cleared at the provider". Recovery required the alarm to fire
+again as brand-new work.
+
+Two mechanisms, both in `registry`:
+
+- **`poll_health()`** — per source, whether the LAST poll attempt succeeded, with the
+  reason and timestamp. A source **absent** from the map has not been polled and must be
+  treated as "cannot conclude", not as healthy. Surfaced at `/signals` alongside
+  `all_sources_healthy`; `reconcile.md` now requires consulting it before resolving on
+  absence, and resolving directly only for signals in the new `cleared` list (an explicit
+  provider `ok` is positive evidence rather than an inference).
+- **`poll_health()[src]["snapshot"]`** — whether that successful poll was a COMPLETE
+  picture, i.e. whether absence from it is evidence at all. `ok` answers "did we look";
+  this answers "did we see everything", and for one source they differ. Read off
+  `SignalSource.is_snapshot`, defaulting `DEFAULT_IS_SNAPSHOT = True` so every polled
+  provider API — and every companion adapter written before the flag existed — keeps its
+  correct behaviour, and only a queue-draining source opts out.
+
+  `WebhookSignalSource.is_snapshot = False` is the sole exception and the reason the flag
+  exists: it is a **push spool**, so `poll` calls `drain` and a delivered signal appears in
+  exactly ONE cycle's result, absent from every cycle after it whether or not the fault is
+  still live at the sender. `poll_health` recorded that empty drain as
+  `{"ok": True, "signals": 0}` — which `dispatch.verify_pending_actions` reads as "the
+  source answered and the signal is gone". So one cycle after any webhook delivery, an
+  action against that signal verified as `cleared` ("the resolve held") with the fault
+  untouched. Same class as resolving on a failed poll, reached through a **successful**
+  one, which is exactly why the `ok` guard could not catch it. Both consumers now gate on
+  it: `verify_pending_actions` returns `unknown` (open, so a later cycle retries) and
+  `reconcile.md` Pass 1 step 3 requires `snapshot != false` on top of `ok`. Rendered on the
+  Signals source row and qualified into the "every source answered" banner, because that
+  banner is the line an operator reads before trusting a quiet board.
+- **Backoff.** A failed source is skipped for a window and says so in `errors`, honouring
+  the provider's own `Retry-After` when sent (clamped by `MAX_RETRY_AFTER_SECS`) and a
+  flat `DEFAULT_BACKOFF_SECS` otherwise. `HttpError` now carries `status` + `retry_after`
+  and `is_retryable`; previously `status` was assigned and **read nowhere**, so a
+  rate-limited provider was re-polled at full rate every 120 s — which is how a rate limit
+  becomes a ban. A success clears the backoff. Only `RETRYABLE_STATUSES` get the
+  provider's own delay: a 404 or 401 is a config fault that waiting will not fix.
+
+  **A TIMEOUT arms the window too**, and it originally did not: `asyncio.TimeoutError` *is*
+  an `Exception`, so its own `except` clause shadowed the generic one that calls
+  `_note_backoff`, leaving the single most expensive failure mode as the only unthrottled
+  one. A source that fails fast costs a socket; a hung one burns the full
+  `DEFAULT_POLL_TIMEOUT_SECS` (15 s) out of **every** 120 s heartbeat for as long as it
+  stays hung. Verified before fixing: three consecutive timing-out polls left
+  `_backoff_until` empty.
+
+Related boundary fix: `/signals` returned every signal regardless of state under
+`signals`, while `dispatch.run_cycle` claims only firing ones. Harmless while no adapter
+could emit `ok` — but the webhook now can, so the route exposes a state-filtered `firing`
+list (and `unclaimed` is derived from it), or an already-recovered signal would appear as
+apparent work in the very list reconcile reads as "still firing".
+
+`/signals` now carries a **third** bucket, `suppressed` (contract 1b) — the third reason a
+signal can be absent from `firing`, and neither of the other two: it did not clear, and we
+did look. It must not be resolved on absence (nothing was fixed) and must not be folded into
+`cleared` (which asserts recovery). The raw `signals` key is unchanged for compatibility,
+which is exactly why the bucket is required: a UI counting `signals` under a column headed
+"Firing" would render "3 firing" above an empty queue with no explanation. `reconcile.md`
+Pass 1 step 5 states the rule for the agent side.
+
 `gather_evidence` passes every body through `security.redact` **and**
 `secrets.redact_tokens` centrally, so an adapter author cannot leak a credential
 into a model prompt by forgetting to redact.
@@ -458,6 +940,33 @@ adapter declares in `config_fields`. Pinned by
 `PUT /settings` refuses an unrecognized `mode` rather than falling back — a typo
 must not quietly change what the agent is allowed to do.
 
+### The postmortem is a redaction sink
+
+`store.write_log` is a registered `security_posture` redaction sink alongside
+`slack_out.py` (the Slack board) and `registry.py` (provider evidence), and it runs
+**both** passes: core `security.redact` (credential + exfiltration-URL scanners) and
+the app's `secrets.redact_tokens` (provider-token shapes). Both are needed and it is
+worth naming why, because picking one looks sufficient: core alone leaves a bare-hex
+Datadog key and a prefix-less `Bearer` token in place, and the app pass alone leaves
+an AWS access key id. `registry.gather_evidence` composes them the same way, so the
+two paths provider text leaves this app sanitize to one standard.
+
+What is redacted: the signal title, id, source and resource (provider text), the
+model-authored `diagnosis` and `resolution`, and each matched ledger id. What is not:
+the incident id, severity, status, operating mode, `fired_at` and the fingerprint —
+our own identifiers, closed enums, a timestamp, and a hash we compute. Running the
+scanners over those is a verified no-op.
+
+**What this does and does not promise.** It masks credential *shapes*: recognized
+vendor key formats, the carrier forms (`Bearer …`, `token=…`, `DD-APPLICATION-KEY:
+…`), and exfiltration URLs. It does **not** understand meaning, so it will not remove
+an internal hostname, a customer identifier, a stack trace naming private code paths,
+or a secret with no recognizable shape. The artifact is safe to share in the sense
+that a credential is very unlikely to ride out inside it; it is **not** a
+declassification pass, and an operator sending it outside their organisation should
+still read it. That distinction matters here more than at any other sink, because
+this is the one output a human is expected to forward by hand.
+
 ### Subprocess spawn
 
 `github_issues._run_gh` is the app's only subprocess spawn and is routed through
@@ -485,6 +994,41 @@ signature → parse. Nothing unauthenticated is ever handed to `json.loads`, and
 oversized body is refused *before* it is hashed. `test_webhook.py` pins the order by
 asserting an unsigned malformed body is rejected for its **signature**, not its
 syntax.
+
+**Two accepted envelope shapes** (`signals_from_payload`), with the check order above
+untouched:
+
+- **Alertmanager / Grafana v4** — `{status, alerts: [...], commonLabels, ...}`. Each
+  entry of `alerts` becomes its **own** Signal. Previously a raw Alertmanager body was
+  rejected outright with 400 "payload has no title" — it carries no top-level
+  `title`/`summary`, only `annotations`/`labels` — while this module's docstring named
+  Alertmanager as a supported sender. Grafana *does* send a top-level `title`, so its
+  notification was accepted and then collapsed into **one** board row, losing every
+  per-alert instance in a group. Title falls back `annotations.summary` →
+  `description` → `labels.alertname`; resource from `instance`/`job`/`pod`; url from
+  `generatorURL`; `commonLabels` merge *under* per-alert labels; Grafana's per-alert
+  `values` (the actual breaching numbers) are kept as a label, which is free evidence
+  for a source that otherwise arrives with none. The provider's own `fingerprint`
+  becomes `provider_key` (contract 1a) and the `native_id`, so re-deliveries dedupe.
+  Fan-out is bounded by the existing `MAX_QUEUED_SIGNALS`, and one malformed entry is
+  skipped rather than failing the whole delivery — one bad alert in a group of forty
+  must not discard the thirty-nine that are fine.
+- **The flat native envelope** — unchanged, so every existing sender keeps working.
+
+**A sender can now report a clearance.** `state` was passed as the literal
+`STATE_FIRING` with no `state`/`status` key read, so a sender could create work but never
+retract it — leaving reconcile to infer recovery from absence, which is the inference that
+closes live work when a poll fails. Read through `normalize_state`, so an unrecognized
+value becomes `unknown` and cannot manufacture phantom firing work — and a *recognized
+suppression* vocabulary becomes `suppressed` rather than `unknown` (contract 1b), read from
+either the v4 scalar `status` or the v2 status OBJECT with its `silencedBy`/`inhibitedBy`.
+
+**Shape is necessary, not sufficient, for those two senders.** Alertmanager's
+`webhook_config` supports basic/bearer/authorization headers but **cannot** HMAC-sign the
+raw body, and Grafana signs into `X-Grafana-Alerting-Signature`, not `X-OMC-Signature`. So
+neither works out of the box against this fail-closed ingress without an accepted
+signature-header list or a bearer verification mode — a **security posture decision,
+deliberately not made here**. Both are reachable today via any forwarder that can sign.
 
 **Rejection status codes are differentiated** (`_webhook_reject_status`): 401 for
 trust failures (not enabled / no secret / signature mismatch), 413 for an oversized
@@ -579,6 +1123,12 @@ teammates' lessons. `ledger_sync`'s generated `.gitignore` therefore un-ignores
 `rotation.yaml` alongside `ledger.jsonl` — a schedule that never syncs is *worse* than
 none, because it looks configured while disagreeing with everyone else.
 
+Sharing the transport also means sharing its branch, and that is why bug 5 above mattered
+here specifically: both the ledger **and** `rotation.yaml` publish through a refspec, so a
+HEAD sitting on an unconfigured branch left the operator unable to `git pull` in the one
+directory where a *refused* conflicted schedule has to be resolved by hand. The exchange
+looked healthy the whole time.
+
 Two decisions worth keeping:
 
 - **A date-only `to` means through the END of that day.** `to: 2026-08-08` read as 00:00
@@ -631,7 +1181,11 @@ heartbeat's cost flat at a 2-minute cadence.
 1. Rotation gate: off-shift returns immediately with `skipped_reason`. This is
    checked here as well as by the cron tier, so a manual trigger cannot dispatch
    off-shift.
-2. `poll_all` across configured sources; drop `state != firing`.
+2. `poll_all` across configured sources; drop `state != firing`. Three distinct reasons a
+   signal is dropped, and they are not interchangeable: it is `ok` (the provider reports
+   recovery), it is `suppressed` (a human parked it — **counted** in
+   `CycleResult.suppressed` and deliberately never claimed, see contract 1b), or it is
+   `unknown` (we could not read its state).
 3. Diff against the dispatch index by `Signal.id` (a `stale` incident is
    re-claimable).
 4. Claim up to `max_claims_per_cycle` (default 3) — `store.claim` takes an
@@ -643,14 +1197,26 @@ heartbeat's cost flat at a 2-minute cadence.
    second occurrence of a failure cheaper than the first; without it the ledger is
    decorative. `record_use` returns the UPDATED entry so a brief cannot report
    "used 0×" for a pattern the same incident just used.
-6. Sweep incidents idle past the window back to `stale` for re-pickup.
-7. **If nothing changed, `CycleResult.changed` is false and the cron emits
+6. **`verify_pending_actions`** — for every incident whose post-action recheck has come
+   due, re-read whether its signal is still firing, using the poll THIS cycle already
+   made (so no extra provider call) and the same `poll_health` map. A source that did not
+   answer yields `unknown`, never a success. See contract 3b; a `still_firing` verdict
+   charges a `miss_count` to every entry the incident cited, which is the join that makes
+   `use_count` mean "worked".
+7. Sweep incidents idle past the window back to `stale` for re-pickup.
+8. **If nothing changed, `CycleResult.changed` is false and the cron emits
    nothing.** Silence-by-default is a hard requirement, not an optimization — it
-   is why the modeled channel stayed readable.
+   is why the modeled channel stayed readable. `changed` counts a `still_firing`
+   verification (the app retracting a claim it made) and deliberately not a `cleared`
+   or `unknown` one.
 
 `investigation_brief()` renders the claim's facts (signal, mode, matched patterns,
 fast-path flag, authority reminder) deterministically, so an investigating agent
-does not spend its first turn re-fetching context Python already has.
+does not spend its first turn re-fetching context Python already has. A match with a
+non-zero `miss_count` carries an explicit `WARNING` line naming how many times the fix was
+applied while the signal kept firing — stated separately because a ranked list reads as an
+endorsement, and an agent told only "used 4×" reads the count as corroboration when part of
+it is the record of the fix not holding.
 
 `POST /dispatch` is the endpoint the cron calls; the board's **Check now** button
 calls the same cycle so a user who just entered a token can verify it immediately
@@ -794,6 +1360,110 @@ Wired at three call sites: new claims in `dispatch.run_cycle`, manual claims in
 a new `diagnosis`/`resolution` into the thread). The investigate SOP therefore tells
 the agent **not** to hand-post to Slack — doing so would duplicate the finding.
 
+## Local notifications (`backend/notify_out.py`)
+
+The second output channel, and the only one that needs **no credential and no inbound
+URL**. `app.json` declared the `notification` event permission from the app's first
+commit and the app produced nothing, so this was inert machinery: every operator-facing
+fact the app computes required an open dashboard tab or a Slack workspace it holds no
+token for.
+
+**Three declared channels** (`app.json` → `notifications.channels`; the cap is 8). This
+is a manifest contract — `register_builtin_apps` persists `app.json` into the data home
+and the bus refuses an id the persisted manifest does not declare:
+
+| id | default priority | fires on |
+|---|---|---|
+| `waiting-on-you` | `critical` | the transition INTO `needs_human` |
+| `source-health` | `default` | the poll where a source flips ok → failing |
+| `incident-released` | `passive` (24 h TTL) | each id `sweep_stale` released |
+
+`critical` on `waiting-on-you` is defensible — it is the one state in this app that
+blocks an agent turn — but it is **not** `system.approval` and is deliberately NOT in
+`notifications.settings.PROTECTED_CHANNELS`: an app must not be able to hand itself a
+channel the operator cannot mute.
+
+**In-process, and therefore both HTTP guards replicated.** `POST
+/api/notifications/push` is unreachable here, twice over. It authenticates with an app
+token whose secret lives at `~/.kiro/crew/apps/<name>/.app_secret`, and
+`register_builtin_apps` writes that file only for a manifest declaring
+`backend.entryPoint`; this app declares `backend.routes`, so no secret exists (verified
+on disk — `dev-fleet`/`file-explorer`/`workflows` have one, this app does not). And even
+with a secret, a handler that HTTP-calls its own gateway needs an auth token and can
+deadlock the loop — the same reason `routes._slot_state` and
+`slack_out.link_thread_to_investigation` read through `DashboardState`.
+
+So `notify_out._push` re-implements what the handler owns, in the handler's order:
+enablement (`is_app_enabled`) → the channel is declared in the installed manifest → lazy
+one-time `register_channel` → `payload.validate()` **before** the limiter (an invalid
+payload delivers nothing and must not drain the budget) → `state.notification_rate_limiter`
+→ `bus.push`. The limiter is the **state-owned instance**, not a fresh one, so the
+in-process path and any future HTTP push share one 30-per-300 s budget instead of two. A
+local-first app must not gain an unthrottled notification path.
+
+**One push per STATE CHANGE, never per tick.** `dispatch.run_cycle` snapshots
+`registry.poll_health()` **before** `poll_all` and diffs; a source that was already
+failing pushes nothing, because at a 120-second heartbeat an hour of downtime would
+otherwise be 30 identical toasts — the unchanged condition `SKILL.md`'s noise discipline
+forbids. A source absent from the *before* map counts as "was ok" on purpose: its first
+failure is news, and it is usually a provider the operator has just configured.
+`routes._handle_transition` captures the pre-transition status for the same reason —
+`update_fields` re-enters `transition` with the same status.
+
+**Nothing is pushed on a claim.** A claim is the heartbeat working correctly and already
+shows on the board and in Slack; notifying it would make this the heartbeat feed the
+design refuses. Recorded in the module docstring and pinned by a test so it does not read
+as an omission to a later reader.
+
+**`group_key`** is the incident id (the source id for `source-health`, since consecutive
+failures of one source are one condition), so repeats collapse into one feed row instead
+of a column of near-identical notes. **`url`** is `/ops-mission-control` — path-only,
+which is all `bus._validate_internal_url` accepts, and deliberately not a per-incident
+deep link: the page selects an incident from React state and reads no query parameter, so
+`?id=` would promise a jump the UI cannot make.
+
+**Default off.** `notify_enabled` absent reads as False, so every existing install stays
+silent until an operator flips the toggle. Not a credential, so it lives in plain
+`config.json` alongside the Slack channel id.
+
+**Redacted at the producer, both passes**, matching `store.write_log` and
+`registry.gather_evidence` rather than `slack_out` (which runs core only). Measured, not
+assumed: core `security.redact` leaves `401 from https://api.datadoghq.com?api_key=<hex>`
+untouched and `secrets.redact_tokens` catches it. `DashboardState._deliver_note` also
+redacts centrally, so this is belt-and-braces — and it is what earns the row in
+`security_posture._REDACTION_SINKS`, which is mandatory rather than optional: the posture
+drift guard walks every module matching the redactor regex and fails on one that is
+neither a registered sink nor allowlisted.
+
+**A discovery fix landed with this.** `apps/discovery._manifest_to_builtin_dict` copied
+name/permissions/ui/backend/crons/dependencies/setup/publishProvider and `manifest.extra`
+but had **no `notifications` branch** — and because `notifications` is a `_KNOWN_FIELDS`
+member it did not survive in `extra` either. Since `register_builtin_apps` persists that
+dict as the app's on-disk `app.json`, and `get_app_manifest` reads that file, a builtin's
+declared channels were silently dropped for every consumer: `_resolve_app_channels`, `GET
+/api/notifications/channels`, the Settings rail, and our own manifest check. Nothing
+caught it because no builtin had ever declared a channel. Builtin manifests now carry
+`notifications` through.
+
+**No persisted-schema change.** Nothing new is stored on an `Incident` or a
+`LedgerEntry`; the only new persisted key is the `notify_enabled` config flag, whose
+absence is False.
+
+### Where an operator sees it
+
+`/state` returns `notify` beside `slack` (readiness depends on live gateway state, not
+config alone, so it cannot be answered from the unauthenticated config file). The Settings
+tab's "Desktop notifications" card owns the app-level on/off and lists the DECLARED
+channels with what each fires on.
+
+It deliberately has **no per-channel mute**: KiroCrew renders that centrally (`GET
+/api/notifications/channels` → `pages/settings/NotificationsPanel.tsx`, one row per
+channel with a mute switch and a priority override, grouped under an app-badged header),
+and a second copy would be two controls that can disagree about one stored setting. The
+card names that location instead — and lists the declaration precisely because the central
+rail cannot: it shows channels that are *registered*, and registration is lazy, so a
+freshly installed app appears there only after its first notification fires.
+
 ## Shift handover (`backend/handover.py`)
 
 `GET /handover` returns a digest of what an incoming responder needs: the one-line
@@ -884,13 +1554,56 @@ returns to paused after a disable→enable cycle.
 <crew_home>/apps/ops-mission-control/data/
 ├── config.json            # NON-SECRET only (served unauthenticated)
 ├── incidents/index.json   # dispatch index — {incident_id: Incident}
-├── incidents/<id>.md      # investigation log (human-readable, git-friendly)
+├── incidents/<id>.md      # postmortem, written when the incident CLOSES (0o600)
 └── ledger.jsonl           # append-only LedgerEntry stream
 <crew_home>/ops_mission_control_secrets.json   # KEYSTONE (see contract 4)
 ```
 
 All writes go through `atomic_write`. File locking goes through
 `platform_compat` (never raw `fcntl` — Windows support).
+
+### The per-incident postmortem (`store.write_log`)
+
+Written by `store.transition` when the resulting status is in `TERMINAL_STATUSES`,
+and only then — an open incident has no artifact, which is a different fact from an
+artifact that is blank. `transition` is the only door to a terminal status
+(`sweep_stale` writes only `stale`, and `slot_watch.derive_status` never returns a
+terminal one), so that single call site covers every close there is.
+
+**It is the only thing this app produces for a reader who does not run KiroCrew** —
+attachable to a ticket, pasteable into a review. Its content is sourced from the
+persisted `Incident` (`diagnosis`, `resolution`), never from the closing call's
+kwargs, so an unrelated later field update cannot blank a finished record. The
+`Next steps` section renders `_none_` on purpose: no `Incident` field carries one
+(`proposed_action` is declared and never assigned), and a postmortem that invents its
+own follow-ups is worse than one that admits it has none.
+
+Failing to write it can never fail the close. The index write is already durable by
+that point, so an `OSError` is logged and swallowed — the same rule the Slack mirror
+in `_handle_transition` already follows: a record of a state change must not be able
+to fail the state change.
+
+It also carries a **verification** line when an action was executed (contract 3b), because
+"Actions taken: silenced the alarm" is the sentence in this file most likely to be believed
+as an *outcome* by a colleague with no access to the board. It renders nothing at all when
+no action was taken.
+
+Readable over HTTP through `GET /incident`, which returns `log` (the text) and
+`log_path` (where the file is, `""` when there is none). There is deliberately **no
+download route**: a non-JSON response would be a second egress boundary needing its
+own redaction pass and its own `security_posture` row, and the JSON field already
+makes the artifact readable.
+
+**It never git-syncs.** `ledger_sync` tracks exactly `.gitignore`, `ledger.jsonl` and
+`rotation.yaml` — the shared *lessons* and the schedule, not one team's raw incident
+narratives. So the artifact is local-only, and a postmortem reaches a colleague
+because a human sent it, not because a repo replicated it.
+
+`prune_closed` bounds the dispatch INDEX and deliberately leaves these files alone.
+That means a flapping alarm accumulates one file per flap, which is a real (small,
+bounded, owner-only) disk cost accepted knowingly: pruning an index row must not
+destroy the written record, least of all when a long history is what someone is
+looking through.
 
 ### Windows compatibility (`TestCrossPlatform`)
 
@@ -923,13 +1636,17 @@ review time, not to simulate the platform.
   PACKAGE, not `backend.routes`; without it routes silently never register)
 - `.../backend/models.py` — `Signal`, `Incident`, `LedgerEntry`, transition grammar,
   fingerprinting, `effective_mode`
-- `.../backend/store.py` — dispatch index, atomic claim, transitions, stale sweep
-- `.../backend/ledger.py` — append-only ledger, matching, fast path, hygiene
+- `.../backend/store.py` — dispatch index, atomic claim, transitions, stale sweep, the
+  closing postmortem (redacted, incl. its verification line)
+- `.../backend/ledger.py` — append-only ledger, matching, the four-condition fast-path bar,
+  `record_miss`, hygiene (decay + evidence-based demotion + prune)
 - `.../backend/secrets.py` — keystone token store, `SecretBackend` seam, redaction
 - `.../backend/registry.py` — ADD-only registry, fan-out
 - `.../backend/rotation.py` — autonomy gate, tier arming
 - `.../backend/dispatch.py` — **the cycle**: poll → claim → ledger-match → sweep,
   plus `investigation_brief`
+- `.../backend/notify_out.py` — the local notification bus as an output channel: three
+  declared channels, the replicated manifest + rate-limit guards, edge-triggered pushes
 - `.../backend/routes.py` — HTTP surface (`register_routes(app)`, full paths)
 - `.../backend/providers/` — the four Protocols + public adapters; the package
   `__init__` also owns config read/merge (`merge_provider_config`, `set_top_level`)
@@ -1086,7 +1803,7 @@ line-anchored so a genuinely internal reference in that file is still caught.
 
 ## Tests
 
-`src/kiro_crew/apps/builtins/ops_mission_control/tests/` — 145 tests:
+`src/kiro_crew/apps/builtins/ops_mission_control/tests/` — 647 tests:
 
 - `test_models.py` — fingerprint stability, normalization fallbacks, transition
   grammar, mode algebra
@@ -1100,10 +1817,20 @@ line-anchored so a genuinely internal reference in that file is still caught.
 - `test_dispatch.py` — cycle silence (an unchanged firing signal must not
   re-announce), claim cap under a 50-alarm storm, ledger matching + fast path +
   post-increment use count, recurrence-matches-ancestor, rotation gate, one broken
-  provider not fatal
+  provider not fatal, and **post-action verification** (contract 3b): a still-firing
+  recheck charges a miss, a cleared one does not, and a FAILED poll charges nothing and
+  reaches no verdict. That last one is the important guard — the property is invisible in
+  the code, so a later "simplify the health check" would look harmless and would start
+  reporting every unreachable source as a confirmed fix.
+- `test_store_and_gate.py::TestLedger` also pins the **track record** (contract 2b): the
+  use floor, one-miss re-lock, and the three laundering doors — a re-POST, a simulated real
+  `git merge` producing duplicate ids, and hygiene's own dedupe — each of which must take
+  the MAX rather than the incoming value.
 - `test_config_routes.py` — **secret field refused on the config route**, unknown
   field/provider refused, merge preserves untouched fields, invalid mode refused,
   and manifest-cron assertions (all four present, all paused, all silent and
   stateless, exactly one schedule each)
 
-Frontend: `website/src/test/opsMissionControl.test.ts` (route registration + shape).
+Frontend: `website/src/test/opsMissionControl.test.ts` (route registration, panel-parity
+assertions read from the .tsx source, and the pure helpers `describeSourceHealth` /
+`describeVerification` / `entryIsProven` exercised directly).

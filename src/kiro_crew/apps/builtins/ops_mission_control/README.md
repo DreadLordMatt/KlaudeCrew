@@ -23,7 +23,7 @@ If nothing happens, the board and the dispatch response both say why. "Quiet" an
 | Tab | Answers |
 |---|---|
 | **Board** | What is being worked right now, its status, and the live investigation chat |
-| **Signals** | Per-source health, what the *last poll actually returned* (including errors), and firing signals not yet claimed |
+| **Signals** | Per-source health, what the *last poll actually returned* (including errors), firing signals not yet claimed, and signals a human **parked at the provider** (an Alertmanager silence or inhibition) — listed with who parked them, because otherwise "the app ignored my alarm" and "someone silenced it" look identical. A source that failed its last poll is shown as failed, never as quiet — the app will not resolve work on a signal it could not read |
 | **Handover** | What an incoming responder needs: what is waiting on a person, what stopped without a diagnosis, and what keeps recurring |
 | **Settings** | Providers, credentials, autonomy, Slack, instance role |
 
@@ -34,8 +34,13 @@ Three modes, and `act` is deliberately hard to reach:
 | Mode | What it does |
 |---|---|
 | `observe` | Reads and investigates. Writes nothing anywhere. **Default.** |
-| `propose` | Drafts the acknowledge/resolve/comment and asks first. |
+| `propose` | Drafts the acknowledge/resolve/comment/silence and asks first. |
 | `act` | Executes — but only for signal patterns you allowlisted with a rule. |
+
+Four verbs are available to a sink: `ack`, `comment`, `silence`, `resolve`. **`silence`
+is the one to grant first** — it always carries a bounded expiry (4h default, 24h
+ceiling), so a wrong silence undoes itself, where a wrong `resolve` hides a live fault
+until somebody notices. `comment` is next safest: append-only and attributed.
 
 `act` requires **both** the app-level mode *and* a rule matching that specific signal. A
 rule must name a source plus a resource glob or label match, so "act on everything" is
@@ -62,16 +67,45 @@ updates in place, diagnosis in the thread. It uses the Slack connection **KiroCr
 already has** and stores no token of its own — so if Slack is not set up for KiroCrew,
 this channel is unavailable and Settings says so.
 
+**Replies reach the investigation.** Once an incident has a chat slot, its board thread is
+registered with KiroCrew's session map, so answering in the thread steers the running
+agent. `POST /incident/transition` reports `slack_thread_replyable` so you can tell
+whether that link is live rather than assuming it — before this the ts was recorded only
+on the app's own record, and a reply resolved to no session and was dropped in silence.
+
 ## The knowledge ledger
 
-Each investigation that finds a reusable fix records it. A repeat failure matches by
-*fingerprint* (a normalized signal shape that strips timestamps, ids, and bare numbers,
-so a recurrence matches its ancestor) and the investigation starts from what you already
-know instead of re-deriving it.
+Each investigation that finds a reusable fix records it, and a repeat failure starts from
+what you already know instead of re-deriving it. Matching uses two keys:
 
-Entries carry `confidence` and `trust`. Only `verified` + `high` unlocks the fast path
-where the agent proposes a remembered fix directly — anything weaker is presented as a
-hypothesis to test. A knowledge base that overstates itself does harm.
+- **The provider's own identity** (`provider_key`) when it publishes one — an
+  Alertmanager fingerprint, a Datadog monitor id, a CloudWatch alarm name. A hit here is
+  *exact*: the system that owns the grouping says this is the same failure.
+- **A shape fingerprint** otherwise — a normalized signal shape that strips timestamps,
+  ids, and bare numbers so a recurrence matches its ancestor.
+
+Exact matches rank above shape matches, and the investigation brief says which kind it
+found. That distinction matters: because the shape hash strips every bare number, a
+"4xx rate above 5" alarm and a "5xx rate above 1" alarm on one resource hash identically,
+so a shape match means *looks like this*, not *is this*.
+
+Entries carry `confidence` and `trust`, and they carry a **track record**. The fast path —
+where the agent proposes a remembered fix directly instead of re-deriving it — needs all
+four of `verified`, `high`, at least two uses, and no recorded failure. Anything weaker is
+still handed to the agent in full, just framed as a hypothesis to test. A knowledge base
+that overstates itself does harm.
+
+`verified` and `high` alone were not enough because both are hand-settable: an entry could
+claim them having never been applied to anything. And the record moves DOWN as well as up —
+when an action this app took is followed by the signal still firing, every entry it cited
+gets a `miss_count`, the nightly hygiene pass demotes one confidence step, and the board
+and the handover digest both say the fix was tried and did not hold. A fix that failed is
+never deleted (it may still work sometimes) but it stops being presented as the answer.
+
+That downward path only means anything because actions are **verified**: after this app
+resolves or silences something, the next heartbeat re-reads the signal and records whether
+it actually cleared. A provider's 2xx means "your request arrived", not "it worked" — and a
+recheck against a source that did not answer records "could not check", never "it worked".
 
 ## Extending it: the companion contract
 
@@ -132,6 +166,7 @@ backend/
   slot_watch.py           derives "waiting on a person" from the live chat
   handover.py             the shift digest
   slack_out.py            the Slack pin board
+  notify_out.py           local desktop notifications (no credential, no inbound URL)
   secrets.py              keystone credential store
   providers/              cloudwatch, pagerduty, datadog, github_issues, webhook, noop
 tests/                    unit + contract tests

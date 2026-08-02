@@ -6,6 +6,79 @@ Working doc. Durable behavior lives in
 
 ---
 
+## Gap research + the first seven fixes from it (2026-08-01)
+
+Researched the error-emitter and comms landscape against the shipped app
+(`planning/emitters-comms-gap-research.md`, 854 lines: 5 landscape sweeps, 4 code
+analyses, 20 candidate gaps adversarially refuted → 19 survived). Then fixed the top
+correctness and safety items. **504 tests pass (was 463); isort/flake8/mypy/tsc clean.**
+
+**The answer to "what is safely auto-resolvable":** only three emitter classes, and the
+gating property is not "is this repetitive" but *does the provider hand me an identity I
+did not guess and a state transition I did not infer from absence* — (A)
+provider-fingerprinted exception groups (Sentry/GlitchTip/Datadog ET), (B) rule-based
+threshold alerts with a server-stable rule id (Alertmanager/Grafana/Zabbix/Icinga/Azure),
+(C) synthetic checks with a debounce. Log-search alerts, mutating-title correlation
+engines, and platform-owned lifecycles are **not**. All of A and B were blocked on the
+ledger having no exact-identity layer — fix 3 below.
+
+Fixed, in the order the report recommended (correctness before reach):
+
+1. **`needs_human` is now swept** — `store.py`. `LEGAL_TRANSITIONS` legalised
+   `needs_human → stale` from the start *because* "an incident nobody ever answers must
+   not pin a signal as claimed forever", and `_SWEEPABLE_STATUSES` omitted it, so the edge
+   was never traversed and the alarm was never re-claimed. The only guard asserted the
+   move was *legal* and never ran the sweep — the same "test the outermost caller" lesson
+   as the `run_cycle` pre-filter bug. Own longer window (6× default) because waiting on a
+   person is legitimately slower than an agent dying.
+2. **Reconcile can no longer resolve live work on a failed poll** — `registry.poll_health`
+   + backoff + `/signals` state filtering + `reconcile.md`. A 429, timeout, expired token,
+   or a storm pushing a signal off page 1 all read exactly like "cleared", and `resolved`
+   is terminal. Also fixed the 429 blindness behind it: `HttpError.status` was assigned and
+   **read nowhere**, so a rate-limited provider was re-polled at full rate every 120 s.
+   Now `Retry-After` is honoured (clamped), only retryable statuses get the provider's
+   delay, and a success clears the backoff.
+3. **Exact provider-identity match layer** — `Signal.provider_key` +
+   `LedgerEntry.provider_keys`, additive and bounded. Every shipped adapter already carried
+   a stable id and `ledger.match` could not see any of it. The shape hash provably
+   over-merges (pinned: `4xx above 5` and `5xx above 1` on one resource both hash
+   `413280c6ee0b5afa`), so a fast-path match could hand a responder a fix learned from a
+   different failure. Exact ranks above shape and the brief now says which it found.
+4. **Webhook accepts Alertmanager-shaped bodies and can report a clearance** —
+   `webhook.py`. Was single-shape (raw Alertmanager 400'd for "no title"), single-signal
+   (a Grafana group collapsed to one board row), firing-only (a sender could create work
+   but never retract it). Now `alerts[]` fans out one incident per alert, bounded, skipping
+   one malformed entry rather than failing the delivery, keeping Grafana's `values` as free
+   evidence and the provider's `fingerprint` as the exact key. **Highest reach per line in
+   the whole report.**
+5. **`ACTION_SILENCE` with a mandatory bounded expiry** — clamped at the authorization
+   boundary, not per-adapter. The safest write-back verb in the landscape had no word in
+   the vocabulary, so adapters expressed a mute as `resolve`. Concretely: `datadog.py`
+   posted `/mute` with `body={}` and Datadog reads a missing `end` as **mute forever** —
+   the board said resolved while the metric stayed bad. PagerDuty maps it to its real
+   snooze; GitHub deliberately does not advertise it.
+6. **The Slack board thread is actually replyable** — `slack_out.link_thread_to_investigation`.
+   `app.json` sold "replyable Slack threads"; nothing registered the ts with the host
+   session map, so a reply resolved to no session and was **dropped in silence**. Now
+   linked in-process on transition, reported as `slack_thread_replyable`, and the vague
+   prose instruction in `dispatch.md` ("link it to the ops channel", no endpoint named) is
+   replaced by the mechanism.
+7. **`ACTION_COMMENT` has a caller** — `investigate.md` Phase 4. It was implemented in
+   three sinks, correctly gated, and invoked by nothing, so the diagnosis never reached the
+   system the alert came from. The SOP now attempts it and is told a 403 refusal is the
+   system working — explicitly *not* to route around it. Least-privilege posture intact:
+   wiring a caller is not the same as exercising a write path against a real tenant.
+
+**Not done, deliberately** (all in §5–7 of the report): post-action verification +
+`miss_count` trust demotion, `STATE_SUPPRESSED`, the local notification bus, the dead
+`store.write_log` postmortem export, flap debounce, storm correlation, and every new
+source adapter. Teams/Discord parity stays **refuted** — `MessagingTransport` has no edit
+primitive, so it would degrade the edit-in-place board into a feed; that is a core
+messaging change, not an ops one. The webhook auth-header question (Alertmanager cannot
+HMAC-sign; Grafana signs a different header) is a **posture decision left open**.
+
+---
+
 ## Source-material re-review: agent-sops (2026-07-31)
 
 The earlier coverage review audited the 15 *mission* files and found them all to be

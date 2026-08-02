@@ -39,9 +39,20 @@ app proposes; the human applies.
 
 The incident arrives with `ledger_matches` already populated from its fingerprint.
 
-- A match with `trust: verified` and `confidence: high` is the **fast path**.
-  Confirm it still applies, then go straight to a proposal citing it.
+- **Read the brief's own framing rather than judging the entries yourself.** It says
+  either `KNOWN PATTERN` or `Possible prior patterns`, and that line is computed by the
+  same predicate the engine uses. Four things have to hold for the fast path:
+  `trust: verified`, `confidence: high`, `use_count` of at least 2, and **no recorded
+  failure**. Verified+high alone is not enough — anyone can POST an entry claiming both,
+  so a `use_count` of 1 means "this has never been applied to anything but the incident
+  in front of you".
+- On the fast path: confirm it still applies, then go straight to a proposal citing it.
 - Weaker matches are hypotheses, not answers. Say which one you are testing.
+- **A match carrying `WARNING: this fix was applied and the signal was still firing
+  afterwards` has already been tried and lost.** That is a stronger statement than "not
+  proven" — an untested guess is worth more than a refuted one. Do not propose it as the
+  answer. Either establish why it failed before, or say plainly in your diagnosis that
+  you are retrying something that has already failed and what you changed.
 - No match means this is new. That is fine — your job includes writing the entry
   that makes the next occurrence cheap.
 
@@ -126,11 +137,36 @@ diagnosis" while a complete root-cause analysis was one scroll away.
      -H 'Content-Type: application/json' \
      -d '{"pattern": "<observable symptom>", "fix": "<specific fix + any trap>",
           "fingerprints": ["<this incident'"'"'s fingerprint>"],
+          "provider_keys": ["<this incident'"'"'s provider_key, if it has one>"],
           "confidence": "high", "trust": "observed"}'
    ```
 
    Bind the incident's own `fingerprint` (it is in your brief) or the entry will
    never match the recurrence it was written for.
+
+   **Also bind `provider_key` when the signal has one.** The fingerprint is a hash of
+   the alarm's *wording* with every bare number stripped, so two genuinely different
+   alarms on one resource can share it — a 4xx-rate alarm and a 5xx-rate alarm do. The
+   `provider_key` is the identity the provider itself assigned, so binding it is what
+   makes the next occurrence an exact match rather than a guess that happens to rhyme.
+
+5. **Write the diagnosis back to the system the alert came from**, when the incident
+   came from a tracker a colleague reads (PagerDuty, GitHub, Datadog). A comment is the
+   safest write there is: append-only, attributed, reversible, zero blast radius — and
+   it is the only way your finding reaches someone who lives in the ticket rather than
+   in KiroCrew.
+
+   ```bash
+   curl -sS -X POST "$GATEWAY/api/apps/ops-mission-control/incident/action" \
+     -H 'Content-Type: application/json' \
+     -d '{"id": "INV-7", "action": "comment",
+          "note": "<one paragraph: what broke, why, what to do next>"}'
+   ```
+
+   **Always attempt it; never work around a refusal.** Under `observe`/`propose`, or
+   without a matching rule, this returns `403` with the reason and the refusal is
+   audited — which is the system working, not an obstacle. Do not then post the same
+   text by another route, and do not ask the operator to widen a rule so it lands.
 
 **If a prior ledger entry turned out to be wrong or incomplete, say so in a new
 entry.** That has already happened once: an entry blamed a missing caller

@@ -42,10 +42,14 @@ port and never hunt for a token elsewhere — see SKILL.md § Calling the API fo
       `ops-mission-control-<incident_id>`** (e.g. `ops-mission-control-INV-7`) —
       the dashboard's incident panel polls that key to show the user what you are
       doing, so any other key leaves them staring at an empty conversation beside
-      a live investigation. Title it `<incident_id> — <signal title>`, link it to
-      the ops channel so the Slack thread is replyable, and post the investigation
-      kickoff referencing the `ops-mission-control` skill. Include the operating
-      mode in the kickoff so the investigator knows its authority on turn one.
+      a live investigation. Title it `<incident_id> — <signal title>`, then post the
+      investigation kickoff referencing the `ops-mission-control` skill. Include the
+      operating mode in the kickoff so the investigator knows its authority on turn one.
+
+      **You do not link the Slack thread yourself.** Step (d) below does it: recording
+      `slot_key` registers the board thread with the session map, which is what makes a
+      reply in that thread reach the investigation. The response reports
+      `slack_thread_replyable` so you can see whether it took.
 
       ```bash
       curl -sS -X POST "$GATEWAY/api/chat/slots" \
@@ -60,11 +64,14 @@ port and never hunt for a token elsewhere — see SKILL.md § Calling the API fo
 
    d. `POST /api/apps/ops-mission-control/incident/transition` to
       `investigating`, attaching `slot_key` (the same
-      `ops-mission-control-<incident_id>`) and `slack_thread_ts`.
+      `ops-mission-control-<incident_id>`) and `slack_thread_ts`. Do this even when you
+      have nothing else to record: it is what makes the Slack thread answerable.
 
 3. Stale sweep: incidents idle beyond the stale window are released back to
    `stale` for re-pickup. This is what stops a dead investigation from holding a
-   signal claimed and therefore unworked forever.
+   signal claimed and therefore unworked forever — **including one parked at
+   `needs_human`**, which gets a longer window (6× by default) because waiting on a
+   person is legitimately slower than an agent dying, but must not wait forever.
 
 4. If nothing was claimed and nothing went stale: **exit silently.** No message,
    no notification, no channel post.

@@ -34,15 +34,23 @@ port and never hunt for a token elsewhere — see SKILL.md § Calling the API fo
    curl -sS -X POST "$GATEWAY/api/apps/ops-mission-control/ledger/hygiene"
    ```
 
-   It returns `{"summary": {"deduped": N, "decayed": N, "pruned": N}, ...}` and
-   performs three things deterministically, so no judgement is needed here:
+   It returns `{"summary": {"deduped": N, "decayed": N, "demoted": N, "pruned": N}, ...}`
+   and performs four things deterministically, so no judgement is needed here:
    - **Dedupe** by content-addressed id, merging fingerprints and keeping the
      highest use count. Duplicates arrive when two people learn the same lesson.
    - **Decay** confidence one step for entries unused past the decay window. An
      entry nobody has needed in three months should not still claim `high`.
-   - **Prune** to the entry cap, dropping least-used / weakest / oldest first.
-     The cap exists because matched entries are read into an investigation's
-     context — an unbounded ledger is an unbounded token cost.
+   - **Demote** confidence one step for entries whose `miss_count` has outgrown their
+     `use_count` ratio — a fix that was applied and the signal kept firing.
+   - **Prune** to the entry cap, dropping weakest first, now ordered by
+     `use_count - miss_count` so an entry that keeps matching the wrong failure is not
+     the last thing kept. The cap exists because matched entries are read into an
+     investigation's context — an unbounded ledger is an unbounded token cost.
+
+   **`decayed` and `demoted` are opposite findings and must not be reported as one
+   number.** `decayed` means the estate moved on and nobody needed these; `demoted` means
+   these were tried and did not work. If `demoted` is non-zero, say WHICH entries — that
+   is the only line in this job's output an operator will act on tonight.
 
 2. Resolve contradictions. Do NOT scan the ledger by eye — the pass already found them
    for you, and `summary.contradictions` in step 1's response is the count:
@@ -63,8 +71,19 @@ port and never hunt for a token elsewhere — see SKILL.md § Calling the API fo
    and I could not separate them" is worth more than a confident wrong merge.
 
 3. Promote `observed` → `verified` for any entry whose fix has now been applied
-   successfully more than once. That promotion is what unlocks the fast path, so it
-   is worth doing deliberately.
+   successfully more than once. That promotion is one of FOUR conditions for the fast
+   path — the others are `confidence: high`, `use_count >= 2`, and `miss_count == 0` — so
+   it is worth doing deliberately, and it does not on its own make an entry an answer.
+
+   **Never promote an entry with a non-zero `miss_count`.** That entry has been applied
+   and the signal kept firing; marking it `verified` asserts you saw it work, about the
+   one entry there is recorded evidence against. If you believe the failure has more than
+   one cause, that is step 2's job — split the patterns — not this one's.
+
+   You cannot post `miss_count` and must not try: the field is only ever written by an
+   observed recheck, and the route ignores it. Re-posting an entry therefore cannot clear
+   its recorded failures, deliberately — otherwise this promotion step would double as a
+   way to erase them.
 
    There is no separate "update" route: re-post the entry with its **exact same
    `pattern` and `fix`**. Ids are content-addressed over those two fields, so this

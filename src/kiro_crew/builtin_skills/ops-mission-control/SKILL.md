@@ -137,6 +137,10 @@ needs to act on:
 - Do not re-notify for an unchanged condition. Check what was already said in the
   thread before posting.
 - One incident, one thread. Discussion belongs in the thread, not a new message.
+- **Never push a desktop notification by hand.** The same rule as "do not hand-post to
+  Slack": the gateway pushes on a state change — an incident entering `needs_human`, a
+  source that stops answering, work released — so a manual push double-notifies the one
+  event the operator was already told about, at critical priority.
 
 The channel is the dashboard. It stays useful only if it stays quiet.
 
