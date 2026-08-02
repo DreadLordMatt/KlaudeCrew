@@ -247,6 +247,13 @@ export default [
               // whitespace is not a shape UI copy takes, and enumerating URL characters
               // is what produced the hole. Known false negative, stated: a one-word
               // slash-prefixed string (`'/Delete'`) is exempt.
+              // NOTE: this branch and `main` found the same full-match hole independently.
+              // `main`'s repair (above) is the general one — it fixes both broken prefix
+              // patterns for every URL/path shape — and it subsumes the narrower
+              // `'^/[\\w./-]*\\*?$'` this branch had added for the ops app's API-scope
+              // strings (`'/api/apps/ops-mission-control/*'`), so that entry is dropped
+              // rather than kept alongside. Verified after the merge: the ops permission
+              // scopes are still exempt under `'^[.~]?/\\S*$'`.
               '^https?://\\S*$',
               '^[.~]?/\\S*$',
               // Tokens with no letters at all: separators, punctuation, symbols, numbers.
@@ -283,6 +290,16 @@ export default [
           // Callee-based exemptions: the argument is not user-visible copy.
           callees: {
             exclude: [
+              // NOTE: this branch's own `'(startsWith|endsWith)$'` entry was REMOVED here.
+              // `main` (#1290) reached the same need independently and solved it properly,
+              // with the anchored receiver-chain pattern further down. Keeping both was
+              // actively harmful, not merely redundant: a callee exemption suppresses the
+              // WHOLE call subtree, and an unanchored bare name lets `withDottedPrefix`'s
+              // `(?:.*\.)?` absorb any receiver — so
+              // `(c ? 'Save changes' : 'Delete item').startsWith(s)` went unreported, which
+              // is exactly the hole `main`'s anchoring closed and which
+              // `i18nLintExemptions.test.ts` pins. The anchored pattern below covers
+              // `startsWith`/`endsWith` (and four more comparison methods) already.
               // Diagnostics and dev-only output.
               '^console\\.\\w+$', '^(Type)?Error$', '^URL(SearchParams)?$',
               // Style and test helpers.
@@ -297,6 +314,11 @@ export default [
               // Config PATCH takes a dotted config path (`telemetry.beacon_enabled`),
               // a machine key that must never be translated.
               'patchConfig',
+              // `save(key, value, clear)` in the ops-mission-control SettingsPanel is the
+              // same shape: the first arg is a config key (`stale_after_secs`) forwarded to
+              // `onSave({ [key]: value })`, not copy. Anchored so it cannot match a longer
+              // callee that merely ends in "save".
+              '^save$',
               'querySelector(All)?', 'getElementById', 'createElement',
               'addEventListener', 'removeEventListener', 'matchMedia',
               // WebGL/DOM capability lookups take registry identifiers
@@ -314,6 +336,9 @@ export default [
               // same class as `fetch` directly above. Uniquely named so the
               // exclusion cannot mask a `call(...)`/`vq(...)` callee elsewhere.
               '^mdnbCall$', '^mdnbVaultQuery$',
+              // The ops-mission-control API client's request helper takes an endpoint path
+              // (`/incident?id=…`), a machine value like `fetch`'s. Anchored.
+              '^req$',
               'setAttribute', 'getAttribute', 'removeAttribute', 'classList\\.\\w+',
               // STRING COMPARISON. The argument is the value being compared AGAINST,
               // so that call cannot render it — the same reason the plugin already
@@ -430,6 +455,11 @@ export default [
               // for — `aliases` moves _total 1842 -> 1840 and changes no other file's
               // entry, so it hands nothing back.
               'aliases',
+              // A discriminated-union tag (`state: 'not_polled'`), matched by `===` and
+              // never displayed — the visible text lives in a sibling `label`. Snake_case
+              // tags carry an underscore, so they escape the camelCase-identifier exemption
+              // and would otherwise be flagged as copy.
+              'state',
             ],
           },
 
