@@ -166,3 +166,15 @@ src/kiro_crew/agent.py:.*pkg / "\.aim"
 src/kiro_crew/slack/handler.py:.*~/\.aim/cc-plugins
 src/kiro_crew/slack/handler.py:.*Path.home() / "\.aim" / "cc-plugins"
 src/kiro_crew/dashboard/handlers/files.py:.*"\.kirocrew", "\.kiro", "\.aim"
+#     (a file-indexer exclusion), so it is an inert name, not a coupling.
+src/kiro_crew/slack/handler.py:.*~/\.aim/cc-plugins
+src/kiro_crew/slack/handler.py:.*Path.home() / "\.aim" / "cc-plugins"
+src/kiro_crew/dashboard/handlers/files.py:.*"\.kirocrew", "\.kiro", "\.aim"
+
+# Public AWS console deep-link in the Ops Mission Control CloudWatch adapter.
+# ``<region>.console.aws.amazon.com`` is the PUBLIC AWS console — the same domain
+# any external AWS customer uses — and is matched only because INTERNAL_PATTERN
+# carries a broad ``amazon\.com`` alternative. Allowlisted line-anchored to the
+# console host so a genuinely internal ``*.amazon.com`` reference added to this
+# file is still caught.
+src/kiro_crew/apps/builtins/ops_mission_control/backend/providers/cloudwatch.py:.*console\.aws\.amazon\.com
