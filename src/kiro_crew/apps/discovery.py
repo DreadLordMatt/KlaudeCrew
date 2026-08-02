@@ -90,6 +90,14 @@ def _manifest_to_builtin_dict(manifest: AppManifest) -> dict[str, Any]:
         d["sops"] = list(manifest.sops)
     if manifest.jobFamilies:
         d["jobFamilies"] = list(manifest.jobFamilies)
+    # ``notifications`` (RFC local notification bus, Phase 2) is the instance of this class
+    # that was found independently, and its absence was invisible because no builtin had
+    # ever declared a channel. It is a ``_KNOWN_FIELDS`` member, so it does not fall
+    # through into ``manifest.extra`` either — it was simply dropped. The cost: an app
+    # could pass manifest validation with channels, register, push, and then be refused as
+    # "channel not declared in app manifest" against a manifest it never got to keep —
+    # ``_resolve_app_channels``, ``GET /api/notifications/channels`` and the
+    # Settings → Notifications rail would all have seen zero declared channels.
     notif_d = manifest.notifications.to_dict()
     if notif_d:
         d["notifications"] = notif_d
