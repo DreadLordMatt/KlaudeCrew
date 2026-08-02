@@ -2505,6 +2505,31 @@ _CREW_SECRET_LEAVES: list[str] = [
     # handler is the only writer and it opens the path directly, not through this
     # gate, so the operator's Settings toggle still works.
     "computer_use.json",
+    # Ops Mission Control's third-party provider tokens (PagerDuty / Datadog
+    # API + application keys). These are live credentials against a user's
+    # production incident tooling: a leaked one can acknowledge or resolve real
+    # pages. They are here rather than in ``config.json`` for two concrete
+    # reasons — an app's ``data/config.json`` is served over
+    # ``/api/apps/<name>/config`` WITHOUT session auth, and ``config.json``
+    # itself is writable by any auto-approved agent shell. The read+write
+    # keystone floor is the only placement where the agent can neither read the
+    # tokens nor overwrite them. The authenticated dashboard PUT handler is the
+    # sole writer and opens the path directly, so Settings still works.
+    "ops_mission_control_secrets.json",
+    # Ops Mission Control's AUTONOMY CEILING: the app mode (observe/propose/act) and
+    # the per-signal act-rules. This is the exact same class of control as
+    # ``computer_use.json`` above — flipping ``mode`` to ``act`` plus adding a matching
+    # rule is what authorizes a write against the user's production incident tooling —
+    # and it was living in the agent-writable ``data/config.json``. A prompt-injected
+    # agent could therefore mint the dashboard token, PUT ``mode=act`` with a rule
+    # matching a signal, and unlock provider actions the operator never granted, which
+    # defeats the app's central safety property (``effective = min(app_mode, rule_mode)``
+    # is only a ceiling if the agent cannot raise it). Found in review. Here for the same
+    # reasons as the secrets leaf directly above — served unauthenticated over
+    # ``/config`` and writable by any auto-approved shell in ``config.json`` — so it moves
+    # to the read+write keystone floor. Dashboard PUT is the sole writer and opens the
+    # path directly.
+    "ops_mission_control_policy.json",
     "token_signing.key",
     "refresh_chains.json",
     ".local_secret",
