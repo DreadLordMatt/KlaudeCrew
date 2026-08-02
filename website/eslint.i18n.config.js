@@ -176,6 +176,11 @@ export default [
               // Config PATCH takes a dotted config path (`telemetry.beacon_enabled`),
               // a machine key that must never be translated.
               'patchConfig',
+              // `save(key, value, clear)` in the ops-mission-control SettingsPanel is the
+              // same shape: the first arg is a config key (`stale_after_secs`) forwarded to
+              // `onSave({ [key]: value })`, not copy. Anchored so it cannot match a longer
+              // callee that merely ends in "save".
+              '^save$',
               'querySelector(All)?', 'getElementById', 'createElement',
               'addEventListener', 'removeEventListener', 'matchMedia',
               // WebGL/DOM capability lookups take registry identifiers
@@ -188,6 +193,9 @@ export default [
               '^RegExp$',
               // HTTP and serialisation: header names, endpoints, content types.
               'fetch', '\\w*[Hh]eaders?\\.\\w+', 'JSON\\.\\w+', 'encodeURI(Component)?',
+              // The ops-mission-control API client's request helper takes an endpoint path
+              // (`/incident?id=…`), a machine value like `fetch`'s. Anchored.
+              '^req$',
               'setAttribute', 'getAttribute', 'removeAttribute', 'classList\\.\\w+',
               // The translate functions themselves. Anchored: these are matched as
               // regexes, so a bare 't' would exclude every callee whose name contains
@@ -248,6 +256,11 @@ export default [
               // for — `aliases` moves _total 1842 -> 1840 and changes no other file's
               // entry, so it hands nothing back.
               'aliases',
+              // A discriminated-union tag (`state: 'not_polled'`), matched by `===` and
+              // never displayed — the visible text lives in a sibling `label`. Snake_case
+              // tags carry an underscore, so they escape the camelCase-identifier exemption
+              // and would otherwise be flagged as copy.
+              'state',
             ],
           },
 
