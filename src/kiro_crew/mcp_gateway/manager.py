@@ -23,7 +23,6 @@ import json
 import logging
 import os
 import signal
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -301,7 +300,7 @@ class GatewayManager:
         if extra_dirs:
             env["PATH"] = os.pathsep.join([*extra_dirs, existing_path]) if existing_path else os.pathsep.join(extra_dirs)
         argv = [
-            sys.executable,
+            platform_compat.daemon_executable(),
             "-m", _GATEWAYD_MODULE,
             "--socket", str(self._spec.socket_path),
             "--idle-timeout-secs", str(self._spec.idle_timeout_secs),

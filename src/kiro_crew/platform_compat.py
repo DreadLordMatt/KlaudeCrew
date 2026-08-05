@@ -2362,6 +2362,24 @@ def _is_windows_store_python_stub(path: str) -> bool:
     return "\\microsoft\\windowsapps\\" in norm
 
 
+def daemon_executable() -> str:
+    """Return the real Python interpreter path for spawning long-lived daemons.
+
+    On Windows a virtualenv's ``Scripts/python.exe`` is a **launcher stub** that
+    starts the base interpreter as a child process. If we spawn that stub as the
+    gateway daemon, our process handle points at the launcher — not the
+    interpreter actually running ``gatewayd.main()`` — so signals and
+    ``proc.wait()`` miss the real daemon entirely (see issue #1575).
+
+    ``sys._base_executable`` resolves straight to the underlying interpreter on
+    every platform. On POSIX (where the venv ``bin/python`` IS the interpreter
+    via symlink) it equals ``sys.executable``; on Windows it skips the launcher
+    shim. Falls back to ``sys.executable`` if the private attribute is absent
+    (should never happen on CPython ≥ 3.3, but defensive).
+    """
+    return getattr(sys, "_base_executable", sys.executable)
+
+
 def find_python_interpreter(reject: Optional[Callable[[str], bool]] = None) -> str | None:
     """Resolve a real CPython >= 3.10 interpreter, or None.
 
