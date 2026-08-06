@@ -95,6 +95,22 @@ complete the device-code flow in the browser. The dashboard opens automatically
 after `kiro-cli whoami` succeeds. This setup runs on the gateway machine, which
 may be different from the computer running the browser.
 
+If your default drive is low on space, redirect KiroCrew's config/data home and
+workspace before running `setup`:
+
+```powershell
+$env:KIROCREW_HOME = "D:\kiro-crew-home"
+$env:KIROCREW_WORKSPACE = "D:\kirocrew-workspace"
+kirocrew setup
+```
+
+Note: the `kirocrew setup` workspace-path prompt does not read
+`KIROCREW_WORKSPACE` when computing its *displayed default* — pressing Enter
+on that prompt still falls back to the platform default under your home
+directory. Type the desired path explicitly at the prompt (or pass it via
+`KIROCREW_WORKSPACE` and confirm it matches before accepting). The env var is
+otherwise honored everywhere else at runtime.
+
 `kirocrew` lands in `.venv\Scripts\`. If a launched (non-shell)
 gateway can't find the built-in `kirocrew-cron` / `kirocrew-core` MCP servers,
 that dir is appended to the MCP spawn `PATH` automatically
