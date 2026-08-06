@@ -18,10 +18,11 @@ import {
   setSlotRunning, startLocalTurn, syncSlotRunningFromServer, setPendingInput, resolveByApprovalId, clearPendingPermissions, cancelQueuedMessage, editQueuedMessage,
   selectComposerBusy,
   selectContinuable,
+  selectTurnInterrupted,
   setVoiceAudio,
   toggleActivity, openActivityPanel, openActivityToTab,
   setActiveSlot, truncateAfterIndex, replaceMessages,
-  requestStop, pendingQuestionFor, clearFollowupCard, dismissFollowupItem,
+  requestStop, pendingQuestionFor, clearFollowupCard, dismissFollowupItem, clearFolderSuggestion,
   mcpAppKey,
 } from '../store/chatSlice'
 import { addNotification, removeNotificationByTs } from '../store/notificationsSlice'
@@ -81,6 +82,8 @@ import SessionGridView from '../components/SessionGridView'
 import { anchorForSlot, loadLayout, sessionSlots } from '../hooks/splitLayoutStore'
 import { modelSupportsEffort } from '../lib/effort'
 import FollowUpCard from '../components/FollowUpCard'
+import FolderSuggestionCard from './chat/FolderSuggestionCard'
+import { useMoveSlotToFolder } from '../hooks/useMoveSlotToFolder'
 import PendingQuestionCard from '../components/PendingQuestionCard'
 import type { FollowupItem } from '../store/chatSlice'
 
@@ -596,6 +599,7 @@ const EMPTY_APP_ID_SET: ReadonlySet<string> = new Set()
 
 export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync }: { mode?: string; embedded?: boolean; embedMode?: 'chat' | 'sessions'; popout?: boolean; noUrlSync?: boolean } = {}) {
   const dispatch = useAppDispatch()
+  const moveSlotToFolder = useMoveSlotToFolder()
   const navigate = useNavigate()
   const navigationType = useNavigationType()
   const location = useLocation()
@@ -735,6 +739,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const slotLoading = useAppSelector(s => s.chat.slotLoading)
   const pendingQuestion = useAppSelector(s => pendingQuestionFor(s.chat.pendingQuestions, s.chat.activeSlot))
   const pendingFollowup = useAppSelector(s => (s.chat.activeSlot ? s.chat.followups?.[s.chat.activeSlot] : undefined))
+  const folderSuggestion = useAppSelector(s => (s.chat.activeSlot ? s.chat.folderSuggestions?.[s.chat.activeSlot] : undefined))
   const followupTsBySlot = useAppSelector(s => s.chat.followups) ?? EMPTY_FOLLOWUPS
   // The ambient tip yields to functional surfaces that own the above-composer band
   const tipSuppressed = useAppSelector(s =>
@@ -747,6 +752,12 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // slot-keyed, so read only the ACTIVE slot's entry — a card parked in
     // another session must not suppress tips here.
     (!!s.chat.activeSlot && !!s.chat.followups?.[s.chat.activeSlot]) ||
+    // The folder-suggestion card takes the same slot inside the composer box the
+    // tip does, and it can land on the FIRST turn — exactly when a tip is most
+    // likely to be offered. It is actionable and one-shot where the tip is
+    // ambient and re-offered, so the tip yields. Slot-keyed like the follow-up
+    // card, so a card parked in another session must not suppress tips here.
+    (!!s.chat.activeSlot && !!s.chat.folderSuggestions?.[s.chat.activeSlot]) ||
     // Active subagents render the progress bar in the same above-composer
     // zone the floating tip occupies — the tip always yields: never crowd
     // the queue/subagent surfaces.
@@ -2024,7 +2035,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // The `ok` flag gates whether the file is recorded in history — 404s and
   // other HTTP failures show a placeholder in the panel but should NOT
   // pollute the history list with files that don't exist on disk.
-  const handleFileOpen = useCallback(async (filePath: string, opts?: { replaceId?: string; line?: number }) => {
+  const handleFileOpen = useCallback(async (filePath: string, opts?: { replaceId?: string; line?: number; endLine?: number }) => {
     // One editor per path: if this file is already open INLINE in the Files tab,
     // route back to that inline editor (focus the Files view) instead of
     // spawning a competing document tab — two live editors for one on-disk file
@@ -3401,6 +3412,24 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     dispatch(clearFollowupCard({ slot: activeSlot, ts: followupTsRef.current[activeSlot]?.ts }))
   }, [dispatch, activeSlot])
 
+  // Folder suggestion: accepting reuses the ONE move path every other surface
+  // (row menu, drag-to-folder, new-chat-in-folder) already funnels through, so
+  // the optimistic update and its guarded rollback are inherited rather than
+  // re-implemented here. Both answers clear the card by the ts it rendered with,
+  // for the same reason the follow-up actions do.
+  const folderSuggestionAccept = useCallback(() => {
+    if (!activeSlot || !folderSuggestion) return
+    moveSlotToFolder(activeSlot, folderSuggestion.folderId)
+    dispatch(clearFolderSuggestion({ slot: activeSlot, ts: folderSuggestion.ts }))
+  }, [activeSlot, folderSuggestion, moveSlotToFolder, dispatch])
+
+  const folderSuggestionDecline = useCallback(() => {
+    if (!activeSlot || !folderSuggestion) return
+    // Nothing to tell the backend: it already spent its one offer for this slot,
+    // so declining is purely "take the card away".
+    dispatch(clearFolderSuggestion({ slot: activeSlot, ts: folderSuggestion.ts }))
+  }, [activeSlot, folderSuggestion, dispatch])
+
   // Fallback branch name when the agent did not supply one: slugify the title
   // under FOLLOWUP_BRANCH_RE's grammar (the server re-validates, so a slug that
   // degenerates to empty is replaced rather than sent and rejected).
@@ -3811,13 +3840,26 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     })
   }, [activeSlot, regenerating, slotRunning, messages, lastTextIdx, dispatch])
 
-  // ---- Continue an interrupted turn ------------------------------------------
+  // ---- Continue the thread ---------------------------------------------------
   // A turn can end without the assistant handing the floor back: the connection
-  // dropped, the gateway restarted during an app update, or the runner's own
-  // recovery ladder gave up. The transcript is left either with an unanswered
-  // user message or with a trailing error card, and until now the only way
-  // forward was to retype the prompt.
+  // dropped, the gateway restarted during an app update, the app was force-quit,
+  // or the runner's own recovery ladder gave up. Some of those leave evidence (an
+  // unanswered user row, a trailing error card) and some leave none at all — a
+  // force-quit runs no cleanup, so its transcript is indistinguishable from a
+  // clean finish. Continue is therefore offered on any idle slot with a
+  // conversation, and `interrupted` only decides how the button describes itself.
+  //
+  // The two COMPOSE at the ErrorCard; neither alone is right. `continuable` is the
+  // availability half (running, stopping, pending turn, autopilot, subagents,
+  // queue) and `interrupted` is the placement half — `i === lastErrorIdx` means
+  // "newest error row", never "the transcript ends badly", so on
+  // `[user, error, user, assistant]` availability alone would put a Continue
+  // button on a superseded failure card that acts on a LATER request. Dropping
+  // `continuable` instead is the mirror-image bug: `selectTurnInterrupted` carries
+  // none of the busy checks, so a card would offer a Continue that `handleContinue`
+  // early-returns on — a dead control in the one place recovery is promised.
   const continuable = useAppSelector(selectContinuable)
+  const interrupted = useAppSelector(selectTurnInterrupted)
   const [continuing, setContinuing] = useState(false)
   useEffect(() => { setContinuing(false) }, [activeSlot])
   // The turn taking over is the success signal; clear the spinner then.
@@ -4435,7 +4477,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       <ErrorCard
         key={key}
         content={m.content}
-        onContinue={continuable && i === lastErrorIdx ? handleContinue : undefined}
+        onContinue={continuable && interrupted && i === lastErrorIdx ? handleContinue : undefined}
         continuing={continuing}
       />
     )
@@ -5188,8 +5230,17 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                    thinking/output; queue and question card keep priority via
                    tipSuppressed). */
                 <AnimatePresence>
-                  {activeTip && (
-                    <div className="pb-1.5">
+                  {folderSuggestion && activeSlot ? (
+                    <div className="pb-1.5" key="folder-suggestion">
+                      <FolderSuggestionCard
+                        folderName={folderSuggestion.folderName}
+                        breadcrumb={folderSuggestion.breadcrumb}
+                        onAccept={folderSuggestionAccept}
+                        onDecline={folderSuggestionDecline}
+                      />
+                    </div>
+                  ) : activeTip && (
+                    <div className="pb-1.5" key="tip">
                       <TipCard tip={activeTip} onDismiss={dismissTip} />
                     </div>
                   )}
@@ -5259,6 +5310,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               showContextPct={chatConfig.showContextPct}
               isRunning={composerBusy}
               continuable={continuable}
+              continueIsRecovery={interrupted}
               onContinue={handleContinue}
               continuing={continuing}
               onStop={() => {

@@ -825,25 +825,20 @@ export interface TunnelStatus {
   reconnect_attempt: number
 }
 
-export interface KiroPrerequisiteOperation {
-  kind: '' | 'install' | 'login'
-  status: 'idle' | 'running' | 'succeeded' | 'failed'
-  message: string
-  detail: string
-  url: string
-  error: string
-}
-
 export interface KiroPrerequisiteStatus {
   platform: string
   installed: boolean
   authenticated: boolean
   ready: boolean
   initial_setup_complete: boolean
-  can_auto_install: boolean
-  can_login: boolean
   repair_required: boolean
   docs_url: string
+  /**
+   * The command the USER runs to sign in (`kiro-cli login`). Supplied by the
+   * gateway and rendered verbatim in a `<code>` — never a catalog value, because
+   * a translated command cannot be typed.
+   */
+  login_command: string
   setup_allowed: boolean
   /**
    * True when the CLI binary is present and executable but could not be
@@ -870,7 +865,6 @@ export interface KiroPrerequisiteStatus {
    * untranslated: it names the failing install step.
    */
   agent_spec_repair_error: string
-  operation: KiroPrerequisiteOperation
 }
 
 export interface AgentImportCategory {
@@ -943,14 +937,24 @@ export const api = {
   // Background polls read the gateway's latched state (no kiro-cli subprocess).
   // `refresh` is the explicit user action (Refresh / Check again) that forces a
   // real host probe.
-  kiroPrerequisite: (refresh = false) =>
-    get(`/api/kiro-prerequisite${refresh ? '?refresh=1' : ''}`).then(
+  /**
+   * `refresh` picks the probe mode, and the two are deliberately different:
+   * `'explicit'` is the human Check again and always probes the host, `'auto'` is
+   * the blocking gate's poll and is coalesced server-side behind a short floor so
+   * several open tabs cannot multiply the `kiro-cli` spawns. `false` reads the
+   * gateway's latched state and spawns nothing.
+   */
+  kiroPrerequisite: (refresh: false | 'auto' | 'explicit' = false) => {
+    // Built with URLSearchParams like every other query here (see artifacts
+    // below): the mode is its own wire value, so there is no query-string
+    // literal for the i18n gate to mistake for user-visible copy.
+    const params = new URLSearchParams()
+    if (refresh) params.set('refresh', refresh)
+    const s = params.toString()
+    return get(`/api/kiro-prerequisite${s ? `?${s}` : ''}`).then(
       j,
-    ) as Promise<KiroPrerequisiteStatus>,
-  installKiroPrerequisite: () =>
-    post('/api/kiro-prerequisite/install').then(j) as Promise<KiroPrerequisiteStatus>,
-  loginKiroPrerequisite: () =>
-    post('/api/kiro-prerequisite/login').then(j) as Promise<KiroPrerequisiteStatus>,
+    ) as Promise<KiroPrerequisiteStatus>
+  },
   // A POST, not a flag on the status GET: the gateway's CSRF check and its SEL
   // audit are both method-scoped, so a spec rewrite reached from a GET would be
   // cross-site triggerable and would leave no audit record.
@@ -1045,6 +1049,24 @@ export const api = {
   consolidateMemory: (key: string, includeHistory: boolean) => post('/api/memory/consolidate', { key, include_history: includeHistory }).then(j),
   restartSessions: () => post('/api/sessions/restart').then(j),
   sessionsContext: () => fetch('/api/sessions/context').then(j),
+  sessionsMemory: () => fetch('/api/sessions/memory').then(j) as Promise<{
+    sessions: {
+      key: string; title: string; slot_key: string; untitled: boolean
+      agent: string; pid: number | null; owns_runtime: boolean; prompts: number
+      rss_mb: number | null; procs: number | null; mcp: number | null
+      cpu_cores: number | null; uptime_s: number | null
+    }[]
+    tasks: {
+      id: string; task: string; agent: string; parent: string
+      rss_mb: number; peak_rss_mb: number; cpu_cores: number
+      started_at: number; shared: boolean; pid: number | null; sampled: boolean
+    }[]
+    totals: {
+      rss_mb: number; runtimes: number; host_mb: number | null
+      host_pct: number | null; rss_is_upper_bound: boolean
+    }
+    history: { t: number; mb: number }[]
+  }>,
   sessionsUsage: () => fetch('/api/sessions/usage').then(j),
   providerUsage: () => fetch('/api/usage').then(j),
   mcpProbeCache: () => fetch('/api/mcp/probe').then(j),
@@ -1332,9 +1354,8 @@ export const api = {
   // Folders
   chatFolders: () => fetch('/api/chat/folders', { headers: { ..._sk } }).then(j),
   /** `config` carries the folder settings the create modal collects. Each is
-   *  omitted when empty so the backend applies its own default — notably an
-   *  absent `icon` leaves the LLM emoji auto-generation in place. */
-  createChatFolder: (name: string, parentId?: string, config?: { project_dir?: string; default_agent?: string; icon?: string }) =>
+   *  omitted when empty so the backend applies its own default. */
+  createChatFolder: (name: string, parentId?: string, config?: { project_dir?: string; default_agent?: string; color?: string }) =>
     post('/api/chat/folders', { name, parent_id: parentId || '', ...(config ?? {}) }).then(j),
   updateChatFolder: (id: string, body: object) => patch('/api/chat/folders/' + encodeURIComponent(id), body).then(j),
   deleteChatFolder: (id: string) => del('/api/chat/folders/' + encodeURIComponent(id)).then(j),

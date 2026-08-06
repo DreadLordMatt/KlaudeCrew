@@ -105,6 +105,15 @@ class PostureControl:
 # Where a sink runs only ONE of the two scanners, its detail text says so.
 _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
     (
+        "Session & task memory panel",
+        "dashboard/session_memory.py",
+        "Chat titles served by `GET /api/sessions/memory`. Titles are generated from "
+        "user content, and the resume path in `chat_handlers` assigns a "
+        "client-supplied `body[\"title\"]` to the slot with no scan of its own, so this "
+        "serializer is the boundary that guarantees the scan — the same "
+        "output-boundary reason as the sibling subagent-task text.",
+    ),
+    (
         "Mochi notify + pin egress",
         "apps/builtins/mochi/hooks.py",
         "Agent-authored notify text (perform_pet_action summary/chatMessage) crosses to "
@@ -306,15 +315,19 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
     (
         "Slack session mirror",
         "dashboard/chat_slack.py",
-        "Thread titles and mirrored message bodies posted to Slack, via "
-        "redact_and_truncate (redaction BEFORE truncation, so a truncation "
-        "boundary cannot split and hide a credential).",
+        "Thread titles and the conversation history seeded into a newly linked "
+        "thread. Titles go through redact_and_truncate (redaction BEFORE "
+        "truncation, so a truncation boundary cannot split and hide a "
+        "credential); history goes through redact_via_context BEFORE mrkdwn "
+        "conversion, because to_slack_mrkdwn self-truncates at 39k and would "
+        "otherwise cut a credential into an unmatchable prefix.",
     ),
     (
         "Configured-channel session mirror",
         "dashboard/chat_mirror.py",
         "Recent dashboard context posted while linking a configured non-Slack "
-        "destination, via redact_and_truncate before transport dispatch.",
+        "destination, via redact_via_context before transport dispatch, then "
+        "chunked to the channel's own message limit rather than truncated.",
     ),
     (
         "Slack Block Kit views",

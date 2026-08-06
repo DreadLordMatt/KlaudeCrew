@@ -5,7 +5,7 @@ import { useZoomCtx } from '../../hooks/ZoomProvider'
 import { useTheme } from '../../hooks/useTheme'
 import type { ColorTheme } from '../../hooks/useTheme'
 import { useUIMode } from '../../hooks/useUIMode'
-import { SettingsSection, SettingsCard, SettingsSelect, SettingsStepper, SettingsButtonGroup } from '../../components/settings'
+import { SettingsSection, SettingsCard, SettingsSelect, SettingsStepper, SettingsButtonGroup, SettingsInput } from '../../components/settings'
 import { useThemeEditor, ThemeEditorPanel } from '../../components/themeEditor'
 import Clickable from '../../components/Clickable'
 import { useAppSelector, useAppDispatch } from '../../store'
@@ -18,6 +18,12 @@ import { api } from '../../api/client'
 import { clampTintCount, RECENT_TINT_COUNT } from '../../utils/recencyTint'
 import { useLanguage } from '../../i18n/LanguageProvider'
 import { AUTO_LANGUAGE, PICKABLE_LANGUAGES, languageLabel } from '../../i18n/languages'
+import {
+  useTerminalFont,
+  setTerminalFontFamily,
+  setTerminalFontSize,
+  DEFAULT_TERMINAL_FONT_SIZE,
+} from '../../hooks/useTerminalFont'
 
 import { i18nT } from '../../i18n/t'
 import ErrorNotice from '../../components/ErrorNotice'
@@ -62,6 +68,7 @@ export function DisplayPanel() {
   const { preference, setTheme, colorTheme, setColorTheme, allThemes, loadCustomThemes, themeSwitching } = useTheme()
   const { uiMode, setUIMode } = useUIMode()
   const editor = useThemeEditor()
+  const termFont = useTerminalFont()
 
   const dispatch = useAppDispatch()
   const { paletteColors: colors, colorMode, paletteName, intensity, boost } = useSessionPalette()
@@ -192,6 +199,34 @@ export function DisplayPanel() {
           <SettingsButtonGroup label={i18nT('pages.settings.displayPanel.font_family')} description={i18nT('pages.settings.displayPanel.ui_font_family_for_the_dashboard')} value={family}
             options={[{ value: 'sans', label: 'Sans' }, { value: 'mono', label: 'Mono' }, { value: 'system', label: 'System' }]}
             onChange={v => setFontFamily(v as 'sans' | 'mono' | 'system')} />
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title={i18nT('pages.settings.displayPanel.terminal')}>
+        <SettingsCard>
+          {/* Free-text family: the browser cannot enumerate OS-installed fonts, so
+              the user names the font (a monospace / Nerd Font they have installed).
+              resolveTerminalFontFamily quotes multi-word names and appends a
+              monospace fallback, and the change is pushed live onto open terminals
+              by CliPanel's font subscription. No placeholder or unit suffix: a raw
+              font stack / "px" is Latin the en-XA i18n-render gate flags as
+              untranslated, and neither is translatable copy that could be a catalog
+              value — the descriptions carry the guidance and the unit instead. */}
+          <SettingsInput
+            label={i18nT('pages.settings.displayPanel.terminal_font_family')}
+            description={i18nT('pages.settings.displayPanel.terminal_font_family_desc')}
+            value={termFont.fontFamily}
+            onChange={setTerminalFontFamily}
+            aria-label={i18nT('pages.settings.displayPanel.terminal_font_family')}
+          />
+          <SettingsStepper
+            label={i18nT('pages.settings.displayPanel.terminal_font_size')}
+            description={i18nT('pages.settings.displayPanel.terminal_font_size_desc')}
+            value={termFont.fontSize}
+            onIncrement={() => setTerminalFontSize(termFont.fontSize + 1)}
+            onDecrement={() => setTerminalFontSize(termFont.fontSize - 1)}
+            onReset={() => setTerminalFontSize(DEFAULT_TERMINAL_FONT_SIZE)}
+          />
         </SettingsCard>
       </SettingsSection>
 

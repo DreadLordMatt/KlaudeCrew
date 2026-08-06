@@ -7,10 +7,12 @@ import ChatInput from '../components/ChatInput'
 /**
  * Sixth state of the composer's primary button. The first five are send / stop /
  * queue / steer / disabled; this one claims the one state that was previously
- * dead weight — an empty composer on a slot whose last turn was cut short.
+ * dead weight — an empty composer on an idle slot that already holds a
+ * conversation.
  *
- * The invariant these tests defend: the control never carries two meanings at
- * once. Empty + resumable = Continue; anything typed = Send.
+ * Two invariants these tests defend: the control never carries two meanings at
+ * once (empty = Continue, anything typed = Send), and its copy never asserts an
+ * interruption the transcript did not show (`continueIsRecovery`).
  */
 const defaultProps = {
   value: '',
@@ -67,13 +69,30 @@ describe('ChatInput continue affordance', () => {
     expect(onContinue).not.toHaveBeenCalled()
   })
 
-  it('explains the state in the placeholder, since an icon swap announces nothing', () => {
+  it('keeps the sigil hint in the placeholder when nothing proves an interruption', () => {
+    // The default placeholder teaches `/command · @file · $skill` and is the only
+    // surface that does. Continue is offered on every idle slot with history, so
+    // overriding it unconditionally would delete that hint for every returning
+    // chat. The ▶ button plus its label carries the affordance instead.
     renderWithProviders(<ChatInput {...defaultProps} continuable onContinue={vi.fn()} />)
+    expect(screen.getByPlaceholderText(/\/command/)).toBeInTheDocument()
+    expect(screen.queryByPlaceholderText(/interrupted/i)).toBeNull()
+    expect(screen.getByLabelText('Ask the agent to continue')).toBeInTheDocument()
+  })
+
+  it('names the interruption only when the transcript actually showed one', () => {
+    // A visibly-broken turn is rare and needs the explanation more than the hint,
+    // so this is the one case that overrides the placeholder.
+    renderWithProviders(
+      <ChatInput {...defaultProps} continuable continueIsRecovery onContinue={vi.fn()} />,
+    )
     expect(screen.getByPlaceholderText(/interrupted/i)).toBeInTheDocument()
+    expect(screen.getByLabelText('Continue the interrupted turn')).toBeInTheDocument()
   })
 
   it('keeps the ordinary placeholder when the turn is not resumable', () => {
     renderWithProviders(<ChatInput {...defaultProps} />)
+    expect(screen.getByPlaceholderText(/\/command/)).toBeInTheDocument()
     expect(screen.queryByPlaceholderText(/interrupted/i)).toBeNull()
   })
 

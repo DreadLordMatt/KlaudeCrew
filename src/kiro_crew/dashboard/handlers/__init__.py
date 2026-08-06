@@ -159,8 +159,6 @@ from kiro_crew.dashboard.handlers.hooks import (  # noqa: E402, F401
     api_kiro_hooks,
 )
 from kiro_crew.dashboard.handlers.kiro_prerequisite import (  # noqa: E402, F401
-    api_kiro_prerequisite_install,
-    api_kiro_prerequisite_login,
     api_kiro_prerequisite_repair_specs,
     api_kiro_prerequisite_status,
 )
@@ -309,6 +307,7 @@ from kiro_crew.dashboard.handlers.sessions import (  # noqa: E402, F401
     api_sessions_clear,
     api_sessions_context,
     api_sessions_health,
+    api_sessions_memory,
     api_sessions_restart,
     api_sessions_search,
     api_sessions_summarize,
@@ -394,7 +393,7 @@ from kiro_crew.dashboard.handlers.updates import (  # noqa: E402, F401
     _QueueLogHandler,
     _RingLogHandler,
     _update_info,
-    _version_tuple,
+    _version_key,
     api_changelog,
     api_log_level,
     api_log_level_get,

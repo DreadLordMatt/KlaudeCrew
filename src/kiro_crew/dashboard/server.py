@@ -1929,14 +1929,6 @@ async def start_dashboard(
         "/api/kiro-prerequisite",
         handlers.api_kiro_prerequisite_status,
     )
-    app.router.add_post(
-        "/api/kiro-prerequisite/install",
-        handlers.api_kiro_prerequisite_install,
-    )
-    app.router.add_post(
-        "/api/kiro-prerequisite/login",
-        handlers.api_kiro_prerequisite_login,
-    )
     # POST, not a flag on the status GET: csrf_middleware skips check_origin for
     # safe methods and sel_audit_middleware logs only mutating ones, so a spec
     # rewrite reached from the GET would be cross-site triggerable and unaudited.
@@ -2434,6 +2426,7 @@ async def start_dashboard(
     app.router.add_get("/api/sessions", handlers.api_sessions)
     app.router.add_delete("/api/sessions", handlers.api_sessions_clear)
     app.router.add_get("/api/sessions/context", handlers.api_sessions_context)
+    app.router.add_get("/api/sessions/memory", handlers.api_sessions_memory)
     app.router.add_get("/api/sessions/health", handlers.api_sessions_health)
     app.router.add_get("/api/sessions/usage", handlers.api_sessions_usage)
     app.router.add_get("/api/usage/kiro", handlers.api_kiro_usage)
