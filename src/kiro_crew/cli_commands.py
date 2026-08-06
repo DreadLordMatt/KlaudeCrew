@@ -53,6 +53,7 @@ from kiro_crew.eval.runner import EvalRunner, format_results, score_by_dimension
 from kiro_crew.eval.scenario import AssertionType, load_scenario, load_scenarios
 from kiro_crew.hooks import safe_read_file
 from kiro_crew.learn import Lesson, LessonStore
+from kiro_crew.mcp_core import _resolve_session_key
 from kiro_crew.security import (
     BUILTIN_DENY_PATTERNS,
     is_sensitive_path,
@@ -1290,6 +1291,76 @@ async def _run_eval(args: argparse.Namespace) -> None:
     print(f"\nResults saved to:\n  {report_path}\n  {json_path}")
 
 
+def _gateway_add_lesson(rule: str, category: str, negative: str | None = None) -> bool:
+    """Best-effort: have a RUNNING gateway write the lesson so it gets embedded.
+
+    The CLI deliberately never loads the 610MB GGUF itself -- ``make_sync_embed_fn``
+    is non-blocking and returns None until the model is resident, so a one-shot
+    process would either pay a full model load on every invocation or persist
+    embedding=NULL (invisible to vector retrieval; keyword-only at weight 0.4 in
+    hybrid search). Delegating puts the write in the process that already holds the
+    model, which additionally runs ``write_lesson``'s >0.85-cosine semantic dedup
+    and a background contradiction sweep -- both of which a vector-less local write
+    silently skips.
+
+    Returns True ONLY if the gateway accepted the write. Every failure path --
+    gateway not running, stale ``dashboard.url``, no resolvable session key,
+    non-2xx, or an error body -- returns False so the caller degrades to an
+    unembedded local write plus a warning.
+
+    ponytail: no retry/backoff. Best-effort by design; the local write is the
+    fallback, so an unhealthy gateway costs at most the 2s probe + 10s post.
+    """
+    try:
+        cfg = KiroCrewConfig.load()
+        _host, port = parse_dashboard_url(cfg.dashboard.url)
+        secret = (config_dir() / ".local_secret").read_text().strip()
+    except Exception:
+        return False
+    if not secret:
+        return False
+    # POST /api/lessons rejects anonymous writes (400 "missing X-Session-Key") and
+    # validates the key against live slots / restricted keys / persisted history.
+    # Reuse the hardened resolver (env var, then PID-file ancestor walk) rather than
+    # sending the UI's literal "dashboard:ui" -- impersonating it would misattribute
+    # the write in the security event log. A plain terminal has no session, so it
+    # correctly falls through to the local path.
+    try:
+        session_key = _resolve_session_key()
+    except Exception:
+        session_key = os.environ.get("KIROCREW_SESSION_KEY", "")
+    if not session_key:
+        return False
+    base = f"http://localhost:{port}"
+    try:  # liveness probe first: a dead port fails in ms, so the CLI never stalls
+        with urllib.request.urlopen(f"{base}/api/health", timeout=2) as resp:
+            if resp.status != 200:
+                return False
+    except Exception:
+        return False
+    body: dict[str, str] = {"rule": rule, "category": category}
+    if negative:
+        body["negative"] = negative
+    req = urllib.request.Request(
+        f"{base}/api/lessons",
+        data=json.dumps(body).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "X-Internal-Secret": secret,
+            "X-Session-Key": session_key,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status not in (200, 201):
+                return False
+            payload = json.loads(resp.read() or b"{}")
+    except Exception:
+        return False
+    return not (isinstance(payload, dict) and payload.get("error"))
+
+
 def _learn(args: argparse.Namespace) -> None:
     """Save, list, or remove learned corrections."""
 
@@ -1304,8 +1375,21 @@ def _learn(args: argparse.Namespace) -> None:
             rule = args.rule
             category = args.category
             negative = getattr(args, "negative", None)
-            if vs.write_lesson(rule, category, negative):
-                neg = f" ({negative})" if negative else ""
+            neg = f" ({negative})" if negative else ""
+            # Best-effort embedding: delegate to a running gateway, which holds the
+            # model resident; otherwise write locally WITHOUT a vector and say so.
+            # Delegation is unconditional -- the REST route now passes ``negative``
+            # through to write_lesson (it previously hardcoded None and dropped the
+            # clause), so nothing is lost by preferring the embedded path.
+            if _gateway_add_lesson(rule, category, negative):
+                print(f"Saved: {rule}{neg} [{category}] (embedded via gateway)")
+            elif vs.write_lesson(rule, category, negative):
+                print(
+                    "Warning: gateway not running -- saved WITHOUT an embedding, so "
+                    "this lesson will not be found by semantic search until it is "
+                    "backfilled.",
+                    file=sys.stderr,
+                )
                 print(f"Saved: {rule}{neg} [{category}]")
             else:
                 lesson = Lesson(
