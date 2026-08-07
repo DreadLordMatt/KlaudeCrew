@@ -8597,7 +8597,10 @@ class TestForkSlot:
         app = _make_app(state)
         async with TestClient(TestServer(app)) as client:
             with patch(
-                "kiro_crew.dashboard.chat_fork.save_slot_off_loop", failing_save
+                # The source flush now lives in chat_persistence, which owns the
+                # boundary bookkeeping the snapshot depends on.
+                "kiro_crew.dashboard.chat_persistence.save_slot_off_loop",
+                failing_save,
             ):
                 resp = await client.post("/api/chat/slots/src/fork", json={})
                 assert resp.status == 503
@@ -9092,18 +9095,28 @@ class TestForkSlot:
 
     @pytest.mark.asyncio
     async def test_fork_reads_full_history_from_disk_when_memory_capped(self, tmp_path):
-        """M12: when in-memory snapshot is smaller than full history, fork reads from disk."""
+        """M12: when the in-memory window is smaller than the full history, the
+        fork must still copy the whole conversation from disk.
+
+        The restore cap is 500 messages and sets ``_disk_older_count`` to
+        ``len - 500`` in the SAME step, so a genuinely capped slot needs more
+        than 500 messages. Capping a 250-message slot by hand would leave
+        ``_disk_older_count`` at 0 — telling the save there is no frozen prefix,
+        which no restore path can produce.
+        """
         state = _make_state(tmp_path)
         slot = state.get_or_create_slot("src")
-        for i in range(250):
+        for i in range(600):
             slot.append("user" if i % 2 == 0 else "assistant", f"m{i}", "msg")
         slot.drain()
         from kiro_crew.dashboard.chat import _save_slot_to_history
 
         _save_slot_to_history(state, slot)
-        # Simulate restore cap: keep only last 50 in memory.
-        # Clear _dirty so the endpoint's flush-if-dirty path doesn't overwrite disk.
-        slot.messages = slot.messages[-50:]
+        # Restore cap: window of 500, frozen prefix of 100, counters in step.
+        slot.messages = slot.messages[-500:]
+        slot._resumed_count = len(slot.messages)
+        slot._disk_window_len = len(slot.messages)
+        slot._disk_older_count = 100
         slot._dirty = False
 
         app = _make_app(state)
@@ -9113,29 +9126,36 @@ class TestForkSlot:
             data = await resp.json()
 
         assert (
-            data["messages"] == 250
+            data["messages"] == 600
         ), f"fork should read full history from disk, got {data['messages']}"
         new_slot = state._slots.get(data["key"])
         visible = [m for m in new_slot.messages if m["role"] in ("user", "assistant")]
-        assert len(visible) == 250
+        assert len(visible) == 600
         assert visible[0]["content"] == "m0"
-        assert visible[-1]["content"] == "m249"
+        assert visible[-1]["content"] == "m599"
 
     @pytest.mark.asyncio
     async def test_fork_preserves_full_history_when_dirty_and_capped(self, tmp_path):
-        """A1 regression: _dirty=True + capped in-memory must NOT truncate disk history."""
+        """A1 regression: _dirty=True + capped in-memory must NOT truncate disk.
+
+        Uses a reachable capped state (>500 messages, ``_disk_older_count`` set
+        alongside the window) so the save can see its frozen prefix. With the
+        counters in step, flushing the dirty tail extends the file instead of
+        rewriting the whole thing.
+        """
         state = _make_state(tmp_path)
         slot = state.get_or_create_slot("src")
-        for i in range(250):
+        for i in range(600):
             slot.append("user" if i % 2 == 0 else "assistant", f"m{i}", "msg")
         slot.drain()
         from kiro_crew.dashboard.chat import _save_slot_to_history
 
         _save_slot_to_history(state, slot)
-        # Simulate restore with cap: real path caps messages then sets
-        # _resumed_count to the capped length. User then sends new messages.
-        slot.messages = slot.messages[-50:]
+        # Restore cap, then the user sends new messages.
+        slot.messages = slot.messages[-500:]
         slot._resumed_count = len(slot.messages)
+        slot._disk_window_len = len(slot.messages)
+        slot._disk_older_count = 100
         slot.append("user", "new1", "msg")
         slot.append("assistant", "new2", "msg")
         slot.drain()
@@ -9147,9 +9167,9 @@ class TestForkSlot:
             assert resp.status == 200
             data = await resp.json()
 
-        # Full 250 on disk + 2 new dirty messages = 252 total.
+        # Full 600 on disk + 2 new dirty messages = 602 total.
         assert (
-            data["messages"] == 252
+            data["messages"] == 602
         ), f"fork must preserve full disk history + dirty tail, got {data['messages']}"
         new_slot = state._slots.get(data["key"])
         visible = [m for m in new_slot.messages if m["role"] in ("user", "assistant")]

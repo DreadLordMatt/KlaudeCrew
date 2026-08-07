@@ -134,6 +134,42 @@ no longer destroy older turns.
   into the frozen prefix (`_disk_older_count += …`) only for messages actually
   persisted (`min(excess, _disk_window_len)`); an unpersisted overflow is logged
   rather than silently counted as on-disk.
+- **Consistent transcript snapshot** (`snapshot_slot_transcript`): the single
+  supported way for a copy-style feature (fork, cross-instance transfer) to
+  obtain a slot's full conversation. It returns a frozen `SlotSnapshot`
+  (`messages`, `history_key`, `title`, `agent`) holding the on-disk transcript
+  followed by the unpersisted tail, each turn exactly once, pinned to one
+  instant. Callers MUST NOT re-derive this from the boundary fields: those are
+  private to `chat_persistence`, and splicing on the wrong one duplicates the
+  flushed prefix (the periodic flush advances `_disk_window_len` but never
+  `_resumed_count`, so a slot created in the current run reports `0` and its
+  whole window gets appended on top of itself).
+  - Reading is blocking I/O and is offloaded, so the slot may change across the
+    await. Four mutations matter and no single field reveals all of them: an
+    append moves the count; an **in-place** edit (variant switch) moves only
+    `_dirty_gen`; a completed flush advances `_disk_window_len` without marking
+    dirty; a rewind flips `_pending_rewrite` with the boundary unmoved. The
+    snapshot pins `_dirty_gen` (primary), the boundary, and the count, re-checks
+    after every await, and retries on any movement.
+  - A dirty slot is flushed **first, on every attempt** (`best_effort=False`).
+    The tail splice cannot see an in-place edit below the boundary, so that edit
+    must come from disk — which means disk has to be current. Flushing only once
+    up front is insufficient: a retry happens precisely because the slot changed,
+    and that change is unpersisted.
+  - `_disk_window_len` exceeding the resident count is **not** an error. It has
+    two causes that look identical, and the flush separates them: a mid-stream
+    flush (`_flush_segment` drops the trailing chunk run and appends the finalized
+    turn without adjusting the boundary) always leaves the slot dirty, so the
+    flush re-syncs it; a memory-trimmed slot leaves disk complete, making an empty
+    tail splice correct. Refusing on the comparison alone would make every long
+    session uncopyable.
+  - Raises `SnapshotUnstable` when the slot will not settle, cannot be persisted,
+    or has a rewrite pending. There is deliberately **no inline-read fallback**:
+    that trades a lossy transcript for a blocking one, and on a large active
+    session the blocking read is what starves the heartbeat into a
+    watchdog-triggered exit. Every caller is a copy, so the source is untouched
+    and a retry costs the user nothing. Snapshots of one slot are serialised by
+    `slot._snapshot_lock`.
 - **Single-file only**: the save touches `_path(history_key)` and never reads or
   writes sibling files. `tab_id` is 1:1 with a file (fork creates a fresh slot
   with its own file), so chaining is untouched and legacy no-tab_id sessions are

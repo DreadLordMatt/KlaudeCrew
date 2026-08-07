@@ -11,6 +11,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Iterator
+from dataclasses import dataclass
 
 from kiro_crew import model_registry
 from kiro_crew.agent import kiro_agents_dir_path
@@ -1759,6 +1760,193 @@ async def save_slot_off_loop(
     # Non-best-effort: propagate so the caller can roll back (do NOT remove the
     # session until the durable write is confirmed).
     await loop.run_in_executor(None, _do)
+
+
+class SnapshotUnstable(RuntimeError):
+    """A consistent view of the slot's transcript could not be obtained.
+
+    Raised rather than returning a transcript that may be missing turns, carrying
+    superseded ones, or duplicating a prefix. Callers should surface a retryable
+    failure: every caller is a COPY operation (fork, transfer), so the source is
+    untouched and retrying costs the user nothing.
+    """
+
+
+# A flush would have to land inside every one of these for the snapshot to fail,
+# which the 5s flush cadence makes effectively impossible.
+_SNAPSHOT_ATTEMPTS = 4
+
+
+@dataclass(frozen=True)
+class SlotSnapshot:
+    """One slot's full transcript, pinned to a single consistent instant.
+
+    ``messages`` is the frozen on-disk prefix followed by the resident window,
+    in order and without duplication. Plain data: once returned it cannot go
+    stale, so callers may hand it to a thread or mutate their own copy freely.
+    """
+
+    messages: list[dict]
+    history_key: str
+    title: str
+    """The slot's title, or ``""`` when the slot was never titled."""
+    agent: str
+
+
+def _assert_snapshot_readable(slot: _ChatSlot) -> None:
+    """Refuse to snapshot a slot whose on-disk view cannot be trusted.
+
+    Runs before AND after every awaited step, because the condition can arise
+    from work that lands while the caller is off the loop.
+
+    A rewind/regenerate marks the slot ``_pending_rewrite`` and clears it only
+    once the TRUNCATING rewrite is written. While it is set, disk still holds the
+    PRE-EDIT transcript and is LONGER than the resident window, so a tail splice
+    appends nothing and the snapshot would carry turns the user explicitly rewound
+    away. Nothing here can fix that, so refuse.
+
+    Note what is deliberately NOT an error: ``_disk_window_len`` exceeding
+    ``len(slot.messages)``. That has two causes which look identical but are not
+    equally harmful, and the flush separates them:
+
+    * **A mid-stream flush.** ``_save_slot_to_history`` sets the boundary over the
+      RAW window (streaming ``chunk`` rows included); ``_flush_segment`` then
+      reassigns ``slot.messages`` to drop that trailing chunk run and append the
+      finalized assistant message, without adjusting the boundary. Disk is then
+      missing a turn memory holds, so an empty tail splice WOULD lose it — but
+      ``_flush_segment`` appends, and ``append`` marks the slot dirty, so this
+      state is always dirty and the flush re-syncs the boundary before we read.
+    * **A memory-trimmed slot.** Trimming leaves disk complete and memory holding
+      only a recent window. The boundary legitimately exceeds the resident count,
+      an empty tail splice is the CORRECT answer, and refusing here would make
+      every long session uncopyable.
+
+    So by the time the boundary is compared, a dirty slot has been flushed and any
+    remaining excess is the benign trimmed case.
+    """
+    if slot._pending_rewrite:
+        raise SnapshotUnstable("a pending rewrite means the on-disk transcript is stale")
+
+
+async def snapshot_slot_transcript(state: DashboardState, slot: _ChatSlot) -> SlotSnapshot:
+    """Pin ``slot``'s full transcript to a consistent instant and return it.
+
+    Every copy-style feature needs the same thing: the complete conversation,
+    exactly once, as of one moment. Assembling that requires reconciling the
+    on-disk transcript with the unpersisted in-memory tail, and the fields that
+    describe where one ends and the other begins are private to this module. This
+    function is where that reconciliation lives, so callers never re-derive it.
+
+    Reading the transcript is blocking I/O and is therefore offloaded, which
+    introduces an await — and the slot is free to change across it. Four distinct
+    mutations matter, and no single field reveals all of them:
+
+    * a new turn appended — moves ``len(slot.messages)`` and marks dirty
+    * an IN-PLACE edit (a variant switch replacing an already-persisted turn) —
+      moves NEITHER the boundary nor the count, only ``_dirty_gen``
+    * a completed flush — advances ``_disk_window_len`` WITHOUT marking dirty
+    * a rewind — flips ``_pending_rewrite`` with the boundary unmoved
+
+    So the snapshot pins ``_dirty_gen`` (primary: the ``_dirty`` setter bumps it
+    centrally, so any dirty-marking mutation moves it), the boundary (the one
+    mutation gen misses), and the count (a backstop for any path that mutates
+    ``messages`` without marking dirty), and re-runs the readability guards after
+    every await. Any movement retries against the new state.
+
+    A dirty slot is flushed FIRST, on every attempt. The splice can only see
+    messages at or past the boundary, so an in-place edit BELOW it is invisible
+    to the splice and must come from disk — which means disk has to be current.
+    Flushing on every attempt (not once up front) matters because a retry happens
+    precisely BECAUSE the slot changed, and that change is unpersisted: re-reading
+    disk without flushing again would serialize the superseded content.
+
+    The flush uses ``best_effort=False``, so an unpersistable slot fails here
+    rather than silently yielding a stale transcript. It does not alter the
+    conversation — it writes what is already in memory.
+
+    :raises SnapshotUnstable: the slot would not settle, or its on-disk view is
+        untrustworthy. Deliberately no inline-read fallback: that trades a lossy
+        transcript for a blocking one, and on a large active session the blocking
+        read is what starves the heartbeat into a watchdog-triggered exit.
+    """
+    # slot_history_key, NOT effective_session_key: this addresses a TRANSCRIPT
+    # PATH. For a channel-born slot the dashboard could not bind, the session key
+    # resolves to ``dashboard:<stem>`` — a file no read path uses — and reading it
+    # would yield only the resident window, silently dropping every older turn.
+    # chat_utils documents the split.
+    history_key = slot_history_key(slot)
+    # Serialise snapshots of the same slot: two concurrent callers would otherwise
+    # each flush and read, and one can observe the other's flush as instability.
+    async with slot._snapshot_lock:
+        for _attempt in range(_SNAPSHOT_ATTEMPTS):
+            _assert_snapshot_readable(slot)
+            if slot._dirty:
+                # The flush is itself an await, so an edit can land INSIDE it: the
+                # save writes the snapshot it captured on entry, leaving disk on
+                # the earlier content while the slot is already newer. Pin the
+                # generation across it and spend an attempt rather than trust it.
+                gen_before_save = slot._dirty_gen
+                try:
+                    await save_slot_off_loop(state, slot, best_effort=False)
+                except Exception as exc:
+                    logger.warning(
+                        "snapshot_slot_transcript: could not persist slot=%s",
+                        slot.key,
+                        exc_info=True,
+                    )
+                    raise SnapshotUnstable(
+                        "the session could not be persisted before copying"
+                    ) from exc
+                if slot._dirty_gen != gen_before_save:
+                    continue
+                _assert_snapshot_readable(slot)
+            boundary = slot._disk_window_len
+            gen_before = slot._dirty_gen
+            count_before = len(slot.messages)
+            # Slice the unpersisted tail ON THE LOOP so the thread below never
+            # touches the slot while the loop could be mutating it. Copy each
+            # message: the caller owns the result and must not alias slot state.
+            tail = [dict(m) for m in slot.messages[boundary:]]
+            title = slot.title if slot._titled else ""
+            agent = slot.agent
+            history = await asyncio.to_thread(_read_transcript, state, history_key)
+            # Re-check AFTER the await, not only before it.
+            _assert_snapshot_readable(slot)
+            if (
+                slot._dirty_gen == gen_before
+                and slot._disk_window_len == boundary
+                and len(slot.messages) == count_before
+            ):
+                # ``history`` is everything on disk, which by the unchanged
+                # boundary is exactly ``messages[:boundary]``; ``tail`` is the
+                # rest. Concatenating covers the conversation once.
+                return SlotSnapshot(
+                    messages=history + tail if history else list(slot.messages),
+                    history_key=history_key,
+                    title=title,
+                    agent=agent,
+                )
+            logger.debug(
+                "snapshot_slot_transcript: slot %s changed during the read; retrying",
+                slot.key,
+            )
+    raise SnapshotUnstable(
+        f"transcript snapshot did not settle in {_SNAPSHOT_ATTEMPTS} attempts"
+    )
+
+
+def _read_transcript(state: DashboardState, history_key: str) -> list[dict]:
+    """Read the full on-disk transcript. Blocking — callers offload it.
+
+    Chained read so the index space matches what the frontend renders against:
+    slot detail uses ``read_messages_chained`` too, and ``visibleIndexMap`` is
+    built off that. A non-chained read makes indices past the current session
+    file's boundary fail as "out of range" for a message the user can see.
+    """
+    if not state.conversation_log:
+        return []
+    # Copy: the log may hand back its own cached list, and the caller owns this.
+    return [dict(m) for m in state.conversation_log.read_messages_chained(history_key)]
 
 
 def _build_history_prefix(slot: _ChatSlot) -> str:

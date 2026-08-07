@@ -7,11 +7,14 @@ import logging
 from aiohttp import web
 
 from kiro_crew.config.loader import KiroCrewConfig
-from kiro_crew.dashboard.chat_persistence import save_slot_off_loop
+from kiro_crew.dashboard.chat_persistence import (
+    SnapshotUnstable,
+    save_slot_off_loop,
+    snapshot_slot_transcript,
+)
 from kiro_crew.dashboard.chat_utils import (
     _sync_dashboard_slots,
     effective_session_key,
-    slot_history_key,
 )
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.history import carry_provenance
@@ -130,47 +133,27 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
             {"error": "prompt too long (max 32768 chars)"}, status=400,
         )
 
-    # Read disk FIRST (full history). Use chained read so the index space
-    # matches what the frontend renders against — slot detail (chat_handlers)
-    # also uses read_messages_chained, and visibleIndexMap is built off that.
-    # Without this, indices past the current session-file boundary error out
-    # with `out of range` even though the user clicked a visible message.
-    async with slot._fork_lock:
-        all_messages: list[dict] = []
-        if state.conversation_log:
-            all_messages = state.conversation_log.read_messages_chained(slot_history_key(slot))
-        if all_messages and slot._dirty:
-            new_msgs = slot.messages[slot._resumed_count:]
-            if new_msgs:
-                all_messages.extend(new_msgs)
-        if slot._dirty:
-            # Persist with best_effort=False so a lock timeout / I/O failure
-            # PROPAGATES instead of being swallowed. The fork treats disk as the
-            # source of truth (it re-reads the full history above) and clears
-            # ``_dirty`` below — which also disables the periodic retry that
-            # would otherwise re-flush the slot. Clearing ``_dirty`` after a
-            # silently-dropped save would strand the unwritten source messages
-            # and lose them permanently on the next gateway restart. Only mark
-            # the slot clean once the durable write is CONFIRMED; on failure,
-            # abort the fork (leaving ``_dirty`` set) rather than fork from a
-            # partially-persisted source.
-            try:
-                await save_slot_off_loop(state, slot, best_effort=False)
-            except Exception:
-                logger.warning(
-                    "chat_fork: durable save of source slot=%s failed; "
-                    "aborting fork to avoid losing unwritten messages",
-                    slot.key, exc_info=True,
-                )
-                return web.json_response(
-                    {"error": "could not persist source session before fork; "
-                              "please retry"},
-                    status=503,
-                )
-            slot._resumed_count = len(slot.messages)
-            slot._dirty = False
-        if not all_messages:
-            all_messages = list(slot.messages)
+    # Take a consistent snapshot of the source transcript. chat_persistence owns
+    # the reconciliation of on-disk content with the unpersisted in-memory tail:
+    # the boundary fields are private to it, and splicing on the wrong one
+    # DUPLICATES the flushed prefix (the periodic flush advances
+    # ``_disk_window_len`` but never ``_resumed_count``, so a slot created in this
+    # run reports 0 and the whole window gets appended on top of itself).
+    try:
+        snapshot = await snapshot_slot_transcript(state, slot)
+    except SnapshotUnstable:
+        logger.warning(
+            "chat_fork: could not pin a consistent transcript for slot=%s; "
+            "aborting the fork rather than copying a damaged one",
+            slot.key, exc_info=True,
+        )
+        return web.json_response(
+            {"error": "could not read a consistent copy of the source session; "
+                      "please retry",
+             "code": "fork_snapshot_unstable"},
+            status=503,
+        )
+    all_messages = snapshot.messages
     visible = [m for m in all_messages if m.get("role") in ("user", "assistant")]
     if not visible:
         return web.json_response({"error": "no messages to fork"}, status=400)

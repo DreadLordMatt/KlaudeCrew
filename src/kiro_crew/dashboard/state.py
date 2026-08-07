@@ -871,7 +871,7 @@ class _ChatSlot:
         "_pending_variants",
         "_lock",
         "forked_from",
-        "_fork_lock",
+        "_snapshot_lock",
         "_tab_id",
         "_channel_window_mtime",
         "_disk_older_count",
@@ -1079,7 +1079,7 @@ class _ChatSlot:
         self._pending_variants: list[dict] = []
         self._lock = asyncio.Lock()
         self.forked_from: str | None = None  # parent slot key if this is a fork
-        self._fork_lock: asyncio.Lock = asyncio.Lock()  # serialises concurrent forks on this slot
+        self._snapshot_lock: asyncio.Lock = asyncio.Lock()  # serialises transcript snapshots of this slot
         self._tab_id: str = ""  # permanent tab identity for cross-restart session chaining
         # Transcript mtime the in-memory window was last brought up to date
         # against. Only meaningful for a slot bound to a channel session, whose
