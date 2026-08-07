@@ -300,7 +300,16 @@ class TestTrustRootRecovery:
             session_pid_sig, "_sel_hmac_key_bytes", return_value=b"\x01" * 32
         ), caplog.at_level("ERROR", logger="kiro_crew.session_pid_sig"):
             session_pid_sig.publish_session_pid(4242, SESSION_KEY)
-        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        # Filtered by LOGGER as well as level: `caplog.at_level` above scopes the
+        # level to this logger but `caplog.records` still collects everything, so a
+        # stray ERROR from elsewhere (a leaked asyncio task being destroyed, seen in
+        # CI) would be counted as one of ours and this assertion would fail for a
+        # reason that has nothing to do with what it is testing.
+        errors = [
+            r
+            for r in caplog.records
+            if r.levelname == "ERROR" and r.name == "kiro_crew.session_pid_sig"
+        ]
         assert len(errors) == 1
         message = errors[0].getMessage()
         assert str(cfg / "sel_hmac.key") in message
@@ -381,7 +390,16 @@ class TestSigningUnavailableReport:
             session_pid_sig.publish_session_pid(1, SESSION_KEY)
             session_pid_sig.publish_session_pid(2, SESSION_KEY)
             session_pid_sig.publish_session_pid(3, SESSION_KEY)
-        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        # Filtered by LOGGER as well as level: `caplog.at_level` above scopes the
+        # level to this logger but `caplog.records` still collects everything, so a
+        # stray ERROR from elsewhere (a leaked asyncio task being destroyed, seen in
+        # CI) would be counted as one of ours and this assertion would fail for a
+        # reason that has nothing to do with what it is testing.
+        errors = [
+            r
+            for r in caplog.records
+            if r.levelname == "ERROR" and r.name == "kiro_crew.session_pid_sig"
+        ]
         assert len(errors) == 1
         debugs = [
             r
