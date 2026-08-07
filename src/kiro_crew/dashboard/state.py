@@ -2843,38 +2843,6 @@ class DashboardState:
         """Look up a slot by name without creating it. Returns None if absent."""
         return self._slots.get(name)
 
-    def spend_slot_by_session(self) -> dict[str, str]:
-        """Map each live slot's SESSION key to the SLOT key its spend is filed under.
-
-        Per-turn usage is persisted under ``slot.key``
-        (``chat_runner.persist_token_record_async``), while a session is addressed
-        by :func:`effective_session_key`. For an ordinary dashboard slot those are
-        the same string modulo the ``dashboard:`` prefix, so a prefix rule is
-        enough. For a slot bound to a channel or cron conversation they are
-        UNRELATED: the turns run under ``linked_session_key`` while the spend rows
-        still carry the dashboard slot key, so a consumer joining spend by session
-        key finds nothing and renders "unknown" for a session that did spend.
-
-        This is the reverse index that closes that gap. It lives here because
-        DashboardState owns the slots and the identity rule; a consumer rebuilding
-        it would be a second owner of the rule, which is how the two sides drifted
-        apart in the first place.
-        """
-        # Local import: chat_utils imports FROM state at module level, so a
-        # top-level import here is a cycle. state.py already defers
-        # `dashboard_slot_key` the same way.
-        from kiro_crew.dashboard.chat_utils import effective_session_key
-
-        out: dict[str, str] = {}
-        for slot in list(self._slots.values()):
-            try:
-                session_key = effective_session_key(slot)
-            except Exception:  # pragma: no cover - defensive; a slot mid-teardown
-                continue
-            if session_key:
-                out[session_key] = slot.key
-        return out
-
     def native_subagent_snapshots(
         self,
         terminal_limit: int = NATIVE_SUBAGENT_TERMINAL_KEEP,

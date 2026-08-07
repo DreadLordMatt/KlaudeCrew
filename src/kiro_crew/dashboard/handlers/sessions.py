@@ -67,20 +67,10 @@ _memory_sampler = SessionMemorySampler()
 async def api_sessions_memory(request: web.Request) -> web.Response:
     """GET /api/sessions/memory — per-session and per-task memory footprint."""
     state: DashboardState = request.app["state"]
-    # Built on the loop, not in the sampling thread: it walks live slot objects.
-    # Pure dict work, so it costs nothing here. Guarded because `state` is a
-    # MagicMock in much of the suite, whose attribute call returns a mock rather
-    # than a dict — the sampler must receive a real mapping or nothing.
-    # Built on the loop, not in the sampling thread: it walks live slot objects,
-    # and it is pure dict work. `hasattr` because a stub state in the suite may not
-    # carry the method at all; validating the VALUE is `_spend_for_session`'s job,
-    # so it is not repeated here — one owner for that rule.
-    aliases = state.spend_slot_by_session() if hasattr(state, "spend_slot_by_session") else None
     payload = await _memory_sampler.sample(
         state.sessions,
         getattr(state, "subagents", None),
         get_slot=state.get_slot,
-        spend_slot_by_session=aliases,
     )
     return web.json_response(payload)
 

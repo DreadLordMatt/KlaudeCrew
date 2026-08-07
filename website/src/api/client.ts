@@ -1160,10 +1160,8 @@ export const api = {
     sessions: {
       key: string; title: string; slot_key: string; untitled: boolean
       agent: string; pid: number | null; owns_runtime: boolean; prompts: number
-      channel: string
       rss_mb: number | null; procs: number | null; mcp: number | null
       cpu_cores: number | null; uptime_s: number | null
-      credits: number | null; turns: number | null
     }[]
     tasks: {
       id: string; task: string; agent: string; parent: string
@@ -1174,9 +1172,6 @@ export const api = {
       rss_mb: number; runtimes: number; host_mb: number | null
       host_pct: number | null; rss_is_upper_bound: boolean
     }
-    unattributed: {
-      procs: number; rss_mb: number | null; oldest_uptime_s: number | null
-    } | null
     history: { t: number; mb: number }[]
   }>,
   sessionsUsage: () => fetch('/api/sessions/usage').then(j),
