@@ -167,7 +167,7 @@ class TestWrapArgvDockerGuidance:
         monkeypatch.setattr(
             sandbox,
             "_last_unshare_failure",
-            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)"),
+            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)", ""),
         )
         # Stub SEL so no real I/O happens.
         fake_sel = MagicMock()
@@ -246,7 +246,7 @@ class TestWrapArgvDockerGuidance:
         monkeypatch.setattr(
             sandbox,
             "_last_unshare_failure",
-            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)"),
+            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)", ""),
         )
         fake_sel = MagicMock()
         fake_sel.return_value = fake_sel
@@ -281,7 +281,7 @@ class TestWrapArgvDockerGuidance:
         monkeypatch.setattr(
             sandbox,
             "_last_unshare_failure",
-            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)"),
+            (False, "unshare(CLONE_NEWUSER) failed with errno 1 (EPERM)", ""),
         )
         fake_sel = MagicMock()
         fake_sel.return_value = fake_sel
