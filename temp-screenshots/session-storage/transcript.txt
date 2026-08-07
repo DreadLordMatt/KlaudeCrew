@@ -1,0 +1,221 @@
+=== SEED (the pod's own isolated stores) ===
+  aaaa1111  40d   both halves
+  bbbb2222  65d   both halves
+  cccc3333 120d   both halves
+  dddd4444 0.2d   both halves  <- inside the 1-day freshness floor
+  eeee5555  90d   both halves  <- MAPPED, so the product can still resume it
+  ffff6666 200d   replay only  <- what most of the real 28 GB looks like
+
+=== 1. GET report — what sessions cost on disk ===
+$ GET /api/system/session-storage
+  -> 200
+  {
+    "total_bytes": 8567428,
+    "total_sessions": 13,
+    "active_sessions": 1,
+    "active_bytes": 634500,
+    "reclaimable_sessions": 7,
+    "reclaimable_bytes": 7548300,
+    "reclaim_blocked_reason": "",
+    "buckets": [
+      {
+        "label": "under_7d",
+        "sessions": 0,
+        "bytes": 0
+      },
+      {
+        "label": "7_30d",
+        "sessions": 0,
+        "bytes": 0
+      },
+      {
+        "label": "30_90d",
+        "sessions": 4,
+        "bytes": 2918700
+      },
+      {
+        "label": "over_90d",
+        "sessions": 3,
+        "bytes": 4629600
+      }
+    ],
+    "trash": {
+      "bytes": 0,
+      "still_on_disk": true,
+      "instant": true,
+      "batches": []
+    }
+  }
+
+  total=8.6 MB / 13 sessions · reclaimable=7.5 MB · trash=0.0 MB in 0 batch(es)
+  reclaim_blocked_reason=''   (empty: this pod isolates BOTH homes, so it owns its store)
+
+=== 2. POST cleanup dry_run — preview only, nothing moves ===
+$ POST /api/system/session-storage/cleanup  {"older_than_days": 30, "dry_run": true}
+  -> 200
+  {
+    "dry_run": true,
+    "sessions": 7,
+    "bytes": 7548300,
+    "remaining": 0
+  }
+
+$ GET /api/system/session-storage
+  -> 200
+  {"total_bytes": 8567428, "total_sessions": 13, "active_sessions": 1, "active_bytes": 634500, "reclaimable_sessions": 7, "reclaimable_bytes": 7548300, "reclaim_blocked_reason": "", "buckets": [{"label": "under_7d", "sessions": 0, "bytes": 0}, {"label": "7_30d", "sessions": 0, "bytes": 0}, {"label": "30_90d", "sessions": 4, "bytes": 2918700}, {"label": "over_90d", "sessions": 3, "bytes": 4629600}], "trash": {"bytes": 0, "still_on_disk": true, "instant": true, "batches": []}}
+
+  after: total=8.6 MB / 13 sessions · reclaimable=7.5 MB · trash=0.0 MB in 0 batch(es)
+
+=== 3. A threshold JSON allows but float() cannot hold -> 400, not a 500 ===
+$ POST /api/system/session-storage/cleanup  {"older_than_days": "9\u20269 (400 digits)"}
+  -> 400
+  {
+    "error": "older_than_days is out of range.",
+    "code": "invalid_threshold"
+  }
+
+=== 4. empty with no explicit intent destroys nothing -> 400 ===
+$ POST /api/system/session-storage/empty  {}
+  -> 400
+  {
+    "error": "Specify batch_ids, or all=true to empty the whole trash.",
+    "code": "nothing_specified"
+  }
+
+=== 5. POST cleanup for real — both halves move together into the trash ===
+$ POST /api/system/session-storage/cleanup  {"older_than_days": 30}
+  -> 200
+  {
+    "sessions": 7,
+    "bytes": 7548300,
+    "batch_id": "20260807T234831-a3d3674a",
+    "remaining": 0
+  }
+
+$ GET /api/system/session-storage
+  -> 200
+  {
+    "total_bytes": 1019128,
+    "total_sessions": 6,
+    "active_sessions": 1,
+    "active_bytes": 634500,
+    "reclaimable_sessions": 0,
+    "reclaimable_bytes": 0,
+    "reclaim_blocked_reason": "",
+    "buckets": [
+      {
+        "label": "under_7d",
+        "sessions": 0,
+        "bytes": 0
+      },
+      {
+        "label": "7_30d",
+        "sessions": 0,
+        "bytes": 0
+      },
+      {
+        "label": "30_90d",
+        "sessions": 0,
+        "bytes": 0
+      },
+      {
+        "label": "over_90d",
+        "sessions": 0,
+        "bytes": 0
+      }
+    ],
+    "trash": {
+      "bytes": 7548300,
+      "still_on_disk": true,
+      "instant": true,
+      "batches": [
+        {
+          "batch_id": "20260807T234831-a3d3674a",
+          "created_at": 1786146511.9282365,
+          "reason": "policy",
+          "sessions": 7,
+          "bytes": 7548300
+        }
+      ]
+    }
+  }
+
+  total=1.0 MB / 6 sessions · reclaimable=0.0 MB · trash=7.5 MB in 1 batch(es)
+
+=== 6. POST restore — the staged sessions come back ===
+$ POST /api/system/session-storage/restore  {"batch_id": "20260807T234831-a3d3674a"}
+  -> 200
+  {
+    "restored": 7
+  }
+
+$ GET /api/system/session-storage
+  -> 200
+  {"total_bytes": 8567428, "total_sessions": 13, "active_sessions": 1, "active_bytes": 634500, "reclaimable_sessions": 7, "reclaimable_bytes": 7548300, "reclaim_blocked_reason": "", "buckets": [{"label": "under_7d", "sessions": 0, "bytes": 0}, {"label": "7_30d", "sessions": 0, "bytes": 0}, {"label": "30_90d", "sessions": 4, "bytes": 2918700}, {"label": "over_90d", "sessions": 3, "bytes": 4629600}], "trash": {"bytes": 0, "still_on_disk": true, "instant": true, "batches": []}}
+
+  after: total=8.6 MB / 13 sessions · reclaimable=7.5 MB · trash=0.0 MB in 0 batch(es)
+
+=== 7. Stage again, then POST empty for that batch — space actually freed ===
+$ POST /api/system/session-storage/cleanup  {"older_than_days": 30}
+  -> 200
+  {
+    "sessions": 7,
+    "bytes": 7548300,
+    "batch_id": "20260807T234831-38f118c0",
+    "remaining": 0
+  }
+
+$ POST /api/system/session-storage/empty  {"batch_ids": ["20260807T234831-38f118c0"]}
+  -> 200
+  {
+    "freed_bytes": 7549726
+  }
+
+$ GET /api/system/session-storage
+  -> 200
+  {
+    "total_bytes": 1019128,
+    "total_sessions": 6,
+    "active_sessions": 1,
+    "active_bytes": 634500,
+    "reclaimable_sessions": 0,
+    "reclaimable_bytes": 0,
+    "reclaim_blocked_reason": "",
+    "buckets": [
+      {
+        "label": "under_7d",
+        "sessions": 0,
+        "bytes": 0
+      },
+      {
+        "label": "7_30d",
+        "sessions": 0,
+        "bytes": 0
+      },
+      {
+        "label": "30_90d",
+        "sessions": 0,
+        "bytes": 0
+      },
+      {
+        "label": "over_90d",
+        "sessions": 0,
+        "bytes": 0
+      }
+    ],
+    "trash": {
+      "bytes": 0,
+      "still_on_disk": true,
+      "instant": true,
+      "batches": []
+    }
+  }
+
+  total=1.0 MB / 6 sessions · reclaimable=0.0 MB · trash=0.0 MB in 0 batch(es)
+
+=== 8. Who SURVIVED every reclaim (the safety properties, by survivorship) ===
+  replay logs left : ['263be9a4-0db5-41b5-b953-3aac1974e093.jsonl', 'bec35da7-13cb-41f1-912f-f044c245ea02.jsonl', 'd94351ef-7869-4753-9156-87228998afe0.jsonl', 'dddd4444.jsonl', 'eeee5555.jsonl']
+  transcripts left : ['dashboard_chat-4.jsonl', 'dashboard_chat-5.jsonl']
+  dddd4444 survived — inside the 1-day floor, so no threshold can take it
+  eeee5555 survived — mapped, so it is still resumable
+  and no session was left as a half: every staged pair moved and returned together
