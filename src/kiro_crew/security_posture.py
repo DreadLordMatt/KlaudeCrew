@@ -105,6 +105,26 @@ class PostureControl:
 # Where a sink runs only ONE of the two scanners, its detail text says so.
 _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
     (
+        "Cross-session message delivery",
+        "dashboard/chat_delivery.py",
+        "A message one chat session delivers into another, on the path shared with "
+        "`POST /api/chat`. Two boundaries in one call: the text is persisted into the "
+        "target's transcript and broadcast to every connected browser as a "
+        "`steer_push` / `queue_push` card. The sender's content is arbitrary — an "
+        "agent composing a handoff can quote a tool output that carried a key — so "
+        "the scan happens here, before either boundary.",
+    ),
+    (
+        "Session control read + attribution",
+        "dashboard/session_control.py",
+        "Another session's transcript tail, served by "
+        "`GET /api/session-control/read` to the calling agent, plus the sender's "
+        "session title stamped onto the delivered message. Both are conversation "
+        "content read off a live slot, so either can carry a credential a tool "
+        "printed — the same output-boundary reason as the session-storage inventory "
+        "below, with the reader being an LLM rather than the browser.",
+    ),
+    (
         "Session storage inventory",
         "dashboard/handlers/session_storage.py",
         "A session's title and its first message, served by "

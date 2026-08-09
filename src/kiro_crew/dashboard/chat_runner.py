@@ -70,6 +70,8 @@ from kiro_crew.dashboard.chat_utils import (
     _BLOCKED_SLASH_COMMANDS,
     _MAX_TOOL_PURPOSE,
     _SLASH_COMMANDS,
+    SESSION_CONTROL_MAX_HOPS,
+    SESSION_CONTROL_PAYLOAD,
     ResetCause,
     _append_compaction_notice,
     _apply_incognito_prefix,
@@ -115,6 +117,7 @@ from kiro_crew.dashboard.state import (
     NATIVE_SUBAGENT_TERMINAL_KEEP,
     NATIVE_SUBAGENT_TERMINAL_TTL_SECS,
     REFUSAL_RECOVERY_PREFIX,
+    SESSION_CONTROL_PREFIX,
     STALE_RECOVERY_PREFIX,
     SUBAGENT_COMPLETION_PREFIXES,
     SUBAGENT_SYNTHESIS_PREFIX,
@@ -2524,6 +2527,21 @@ def _requeue_unconsumed_steers(state: "DashboardState", slot: "_ChatSlot") -> No
     requeued = slot._pending_steers[:]
     slot._pending_steers.clear()
     for steer_msg in reversed(requeued):
+        # A relay from another session must not lose its machine origin on the
+        # way into the queue: the drain decides from the ENTRY whether the turn
+        # may be mirrored to a linked channel as the user's speech, and an
+        # untagged entry would put a peer agent's words in the user's mouth
+        # there. The pending-steer list holds bare strings, so the envelope
+        # prefix is the only provenance left at this boundary — the one place a
+        # content check is used, rather than in the shared predicate. Erring
+        # toward synthetic is the safe direction (see
+        # ``is_synthetic_payload_item``): a suppressed mirror loses an echo of
+        # something already on screen, a wrong mirror misattributes authorship.
+        _payload = (
+            SESSION_CONTROL_PAYLOAD
+            if steer_msg.startswith(SESSION_CONTROL_PREFIX)
+            else ""
+        )
         # Raw-at-rest by design: slot._queue is a DELIVERY payload (the drained
         # entry becomes the next turn's LLM input), matching every other queue
         # producer (queue_append in chat_handlers / messaging). All dashboard
@@ -2531,7 +2549,22 @@ def _requeue_unconsumed_steers(state: "DashboardState", slot: "_ChatSlot") -> No
         # apply _redact_for_display, and every queue_* broadcast (including the
         # queue_push below) sanitizes. Sanitizing at insert would corrupt the
         # delivered message relative to the normal queue path.
-        qid = slot.queue_insert(0, steer_msg)
+        # The depth of a relay chain cannot be recovered here — the pending-steer
+        # list holds bare strings — so a requeued relay is treated as having spent
+        # the budget. That stops the chain rather than silently restarting it at
+        # one, which is the failure this bound exists to prevent; a human's own
+        # steer carries no marker and is unaffected.
+        _meta = {"session_control": {"relayed": True, "hops": SESSION_CONTROL_MAX_HOPS}} if _payload else None
+        # Carry the delivery id the steer registered under. The drain unions every
+        # consumed entry's meta onto the row it writes, so this reaches the row even
+        # when several queued items are merged into one — which is the only way the
+        # steer's caller can tell "already persisted by the drain" from "consumed by
+        # the turn" after both bookkeeping lists have emptied.
+        _did = getattr(slot, "_steer_delivery_ids", {}).pop(steer_msg, "")
+        if _did:
+            _meta = dict(_meta or {})
+            _meta["steer_delivery_id"] = _did
+        qid = slot.queue_insert(0, steer_msg, payload=_payload, meta=_meta)
         try:
             content, _ = redact_exfiltration_urls(steer_msg)
             content, _ = redact_credentials(content)
@@ -2625,6 +2658,30 @@ async def _start_next_queued_turn(state: DashboardState, slot: _ChatSlot) -> boo
     cron_label = match.group(1) if match else "cron"
     cron_label, _ = redact_exfiltration_urls(cron_label)
     cron_label, _ = redact_credentials(cron_label)
+    # Provenance a producer attached to the queue entry belongs on the row the
+    # drain writes, not only on the entry that is about to disappear: a relay's
+    # hop count is read back off the transcript, so losing it here silently
+    # restarts a chain the budget is supposed to bound.
+    _drained_meta: dict = {}
+    # Delivery ids ACCUMULATE; everything else is last-writer-wins. A merge folds
+    # several queued messages into one row, and each may carry its own steer's id —
+    # a plain `update` would keep only the last, and every other caller would see
+    # no row for its delivery and append a duplicate. The row stands for all of
+    # them, so it has to name all of them.
+    _drained_ids: list[str] = []
+    for item in consumed:
+        _item_meta = item.get("meta")
+        if isinstance(_item_meta, dict):
+            _one = _item_meta.get("steer_delivery_id")
+            if isinstance(_one, str) and _one:
+                _drained_ids.append(_one)
+            _many = _item_meta.get("steer_delivery_ids")
+            if isinstance(_many, list):
+                _drained_ids.extend(x for x in _many if isinstance(x, str) and x)
+            _drained_meta.update(_item_meta)
+    if _drained_ids:
+        _drained_meta.pop("steer_delivery_id", None)
+        _drained_meta["steer_delivery_ids"] = _drained_ids
     slot.append(
         "subagent" if is_subagent else "inject" if (is_cron or is_recovery) else "user",
         next_msg,
@@ -2633,6 +2690,7 @@ async def _start_next_queued_turn(state: DashboardState, slot: _ChatSlot) -> boo
             if is_cron
             else "msg msg-inject" if is_recovery else "msg msg-u"
         ),
+        meta=_drained_meta or None,
     )
 
     task = spawn_guarded_turn(

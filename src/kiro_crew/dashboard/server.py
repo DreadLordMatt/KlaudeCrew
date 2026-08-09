@@ -55,6 +55,7 @@ from kiro_crew.dashboard.crash_dump_store import (
     rotate_dumps,
     sweep_stale_dumps,
 )
+from kiro_crew.dashboard.handlers import session_control
 from kiro_crew.dashboard.handlers.artifacts import (
     api_artifact_comments,
     api_artifact_delete,
@@ -332,6 +333,14 @@ _STRICT_INTERNAL_API_PATHS = frozenset(
         # wiring class as "/api/notifications/agent" above.
         "/api/knowledge/agent-document",
         "/api/mcp/servers",
+        # Session control — the three routes behind the session_message_send /
+        # session_stop / session_read_message MCP tools. STRICT, not mixed: no
+        # browser calls them, and they are the entry point to typing into,
+        # stopping, and reading ANOTHER live conversation. A cookie fall-through
+        # there would be a new authorization path, not a convenience.
+        "/api/session-control/send",
+        "/api/session-control/stop",
+        "/api/session-control/read",
     }
 )
 
@@ -985,6 +994,12 @@ def _register_mcp_routes(app: web.Application) -> None:
     # here (not the dashboard-only block) so headless --slack-only mode
     # serves it too; it is on _STRICT_INTERNAL_API_PATHS like send-message.
     app.router.add_post("/api/notifications/agent", handlers.api_notification_agent_push)
+    # Session control. Registered here so the headless --slack-only server
+    # serves the same MCP surface as the dashboard; all three are on
+    # _STRICT_INTERNAL_API_PATHS.
+    app.router.add_post("/api/session-control/send", session_control.api_session_control_send)
+    app.router.add_post("/api/session-control/stop", session_control.api_session_control_stop)
+    app.router.add_get("/api/session-control/read", session_control.api_session_control_read)
     app.router.add_post("/api/browser-event", handlers.api_browser_event)
     app.router.add_post("/api/browser-auth-retry", handlers.api_browser_auth_retry)
     app.router.add_post("/api/browser/frame", handlers.api_browser_frame)

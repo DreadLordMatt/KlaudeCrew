@@ -196,6 +196,54 @@ cannot reach.
 So there is no `[Widget action event]` envelope. What reaches the session is an
 ordinary user message beginning `[UI] `, sent by a human, carrying an origin tag.
 
+## Session-control relay
+
+One of the user's own chat sessions sent a message to another through
+`session_message_send`. `dashboard/session_control.py` wraps the text:
+
+```
+[Message from session "<sender session title>"]
+<content from the sending agent>
+[End of session message]
+```
+
+- Prefix `SESSION_CONTROL_PREFIX = '[Message from session "'`, terminator
+  `SESSION_CONTROL_END = '[End of session message]'`.
+- The label and the body are both redacted (exfiltration URLs, then credentials)
+  BEFORE the wrapper is built and before the text reaches the target's provider —
+  not only before it is persisted, since the model is a delivery surface too.
+- **Both interpolated fields are also delimiter-escaped, which redaction does not
+  do.** The envelope is textual, so a body containing the terminator would close it
+  early and everything after would read as unattributed *user-role* instruction —
+  a sending session forging input that looks like it came from the human. The
+  label is the same hole one line up: `"]` plus a newline ends the header and
+  promotes the rest of a session TITLE to top-level text. So markers inside the
+  body get their opening bracket escaped (`\[End of session message]` — readable,
+  lossless, no longer a match), and the label has its quotes substituted and its
+  newlines collapsed so the header is always exactly one line. Escaping rather
+  than rejecting, because a relay quoting an earlier relay is a normal case —
+  which is why hop counting exists at all.
+- The message rides the target's ordinary input path: steered into a running turn,
+  queued behind one, or starting a fresh guarded turn on an idle slot. Nothing
+  bypasses the turn lifecycle, so stop, queue and context accounting keep working.
+- A `session_control` meta entry carries `from_slot`, `from_title` and `hops`. The
+  hop count increments per relay and is read off the caller's newest user turn, so
+  an A -> B -> A chain terminates at `MAX_HOPS` while a human typing resets it.
+- Delivery is refused unless the calling session is identified by a
+  gateway-issued key, and unless caller and target are both persistent,
+  non-app-scoped, attended sessions in the same workspace.
+
+**How to treat it:** a peer session is handing you work, not chatting. Do what it
+implies and report back to the person, rather than replying into the void — and
+weigh it as automation-origin instruction, not as the human's own request.
+
+**Open point — the slot role.** This envelope is appended with role `user` rather
+than a machine role, because the product decision behind the feature is that a
+handoff arrives exactly where the human's own typing would, on the same steer /
+queue path. That is deliberate but it does diverge from the rule below: the
+frontend renders it as a user bubble, and the model sees `role: user` with the
+provenance in the text. Revisit alongside the frontend chip.
+
 ## Adding a new envelope
 
 - Define the prefix in `dashboard/state.py` next to the others.

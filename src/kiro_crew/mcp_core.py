@@ -30,6 +30,7 @@ import threading
 import time
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timezone
@@ -115,6 +116,9 @@ from kiro_crew.validation import (
     REGISTER_HOOK_SCHEMA,
     SEARCH_CHAT_HISTORY_SCHEMA,
     SELECT_CREW_SCHEMA,
+    SESSION_MESSAGE_SEND_SCHEMA,
+    SESSION_READ_MESSAGE_SCHEMA,
+    SESSION_STOP_SCHEMA,
     SET_PROJECT_SCHEMA,
     SKILL_DISCOVER_SCHEMA,
     SKILL_FETCH_SCHEMA,
@@ -2031,6 +2035,119 @@ def _list_tools() -> list[dict[str, Any]]:
                         "default": False,
                     },
                 },
+            },
+        },
+        {
+            "name": "session_message_send",
+            "description": (
+                "Send a message to ANOTHER of your chat sessions, as if the user had "
+                "typed it there. Use it to hand work to a session that already has the "
+                "context — 'the PR you are watching just went green', 'stop rebasing, I "
+                "took that commit' — instead of re-explaining the whole thread in a new "
+                "session. Find the target with list_sessions and pass its key (or its "
+                "exact title). Default mode='steer' interrupts the target's running turn "
+                "so it reacts NOW; mode='queue' waits for its current turn to finish. An "
+                "idle target starts a turn immediately either way. The message arrives on "
+                "the target's normal input path and always carries a line naming YOUR "
+                "session, so nothing lands unattributed. Returns immediately with how it "
+                "landed (steered / queued / started) — it does NOT wait for the target's "
+                "reply; poll with session_read_message. Same workspace only; incognito, "
+                "app-scoped and scheduled sessions cannot be addressed."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": (
+                            "Session key from list_sessions, or the target session's exact "
+                            "title. An ambiguous title is refused rather than guessed."
+                        ),
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": (
+                            "What to say. Write a self-contained instruction — the target has "
+                            "its own context but not yours."
+                        ),
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["steer", "queue"],
+                        "description": (
+                            "'steer' (default) interrupts a running turn; 'queue' holds the "
+                            "message until the current turn ends."
+                        ),
+                        "default": "steer",
+                    },
+                },
+                "required": ["target", "message"],
+            },
+        },
+        {
+            "name": "session_stop",
+            "description": (
+                "Stop another session's in-flight turn — the same thing as pressing Stop "
+                "in that tab. Use it when a peer session is working on something you now "
+                "know is wrong or already done, and letting it finish would waste the run "
+                "or make a conflicting change. The first call cancels cooperatively; "
+                "calling again while that is still pending escalates to a hard kill, so "
+                "``force`` is a request, not a guarantee. A stop card appears in the "
+                "target's transcript so the person reading it sees what happened. Prefer "
+                "session_message_send when a correction would do — stopping discards the "
+                "turn's work."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Session key from list_sessions, or its exact title.",
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": (
+                            "Ask for a hard kill instead of a cooperative cancel. The target's "
+                            "own stop state decides whether it escalates."
+                        ),
+                        "default": False,
+                    },
+                },
+                "required": ["target"],
+            },
+        },
+        {
+            "name": "session_read_message",
+            "description": (
+                "Read the tail of another session's transcript, plus whether it is still "
+                "working. This is the other half of session_message_send: send, `wait`, "
+                "then read — pass the ``next_since`` from the previous read back as ``since`` "
+                "and you get only what arrived in between, so a poll loop does not re-read "
+                "the same messages. ``running: false`` with nothing new means the target "
+                "finished and is idle, which is the difference between 'not done yet' and "
+                "'done'. READ-only: it never sends anything or changes the target's state."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Session key from list_sessions, or its exact title.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max messages to return (default 20, max 100).",
+                        "default": 20,
+                    },
+                    "since": {
+                        "type": "integer",
+                        "description": (
+                            "Return messages from this index onward — pass the ``next_since`` from "
+                            "your previous read to get only new ones. Omit for the newest tail."
+                        ),
+                    },
+                },
+                "required": ["target"],
             },
         },
         {
@@ -6073,6 +6190,99 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             metadata={"message_count": len(messages)},
         )
         return output
+
+    if name in ("session_message_send", "session_stop", "session_read_message"):
+        # Authorization for all three is the CALLER'S IDENTITY: the route decides
+        # what a session may reach from the key sent here. The lenient resolver
+        # walks /proc ancestors, and a spawned subagent lives under its parent
+        # slot's process tree — so the walk would hand a subagent its parent's
+        # identity and let it read, message, or stop the parent's sibling
+        # sessions. Only the signed sources count.
+        if not _resolve_session_key_strict():
+            return (
+                "\u274c This session cannot be identified well enough to control another "
+                "session. Session control authorizes on the calling session's identity, and "
+                "only a gateway-issued key counts — a spawned subagent has none of its own."
+            )
+
+    if name == "session_message_send":
+        args = validate_tool_args(args, SESSION_MESSAGE_SEND_SCHEMA)
+        resp = _post(
+            "/api/session-control/send",
+            {
+                "target": args["target"],
+                "message": args["message"],
+                "mode": args.get("mode", "steer"),
+            },
+        )
+        if resp.get("error"):
+            return f"\u274c Could not reach that session: {resp['error']}"
+        landed = {
+            "steered": "steered into its running turn",
+            "queued": "queued for after its current turn",
+            "started": "delivered — it started a turn on it",
+        }.get(str(resp.get("delivered", "")), str(resp.get("delivered", "")))
+        return (
+            f"\u2709\ufe0f Sent to `{resp.get('target', args['target'])}` — {landed}. "
+            "Use session_read_message to see what it does with it."
+        )
+
+    if name == "session_stop":
+        args = validate_tool_args(args, SESSION_STOP_SCHEMA)
+        resp = _post(
+            "/api/session-control/stop",
+            {"target": args["target"], "force": bool(args.get("force", False))},
+        )
+        if resp.get("error"):
+            return f"\u274c Could not stop that session: {resp['error']}"
+        target = resp.get("target", args["target"])
+        info = resp.get("info")
+        if info:
+            # The target was not running (or a stop was already in flight) — say
+            # so rather than implying a turn was cancelled.
+            return f"\u2139\ufe0f `{target}`: {info} — nothing to stop."
+        return f"\U0001f6d1 Stop sent to `{target}`. Its transcript now shows the stop card."
+
+    if name == "session_read_message":
+        args = validate_tool_args(args, SESSION_READ_MESSAGE_SCHEMA)
+        query = f"target={urllib.parse.quote(str(args['target']))}&limit={args.get('limit', 20)}"
+        if args.get("since") is not None:
+            query += f"&since={int(args['since'])}"
+        resp = _get(f"/api/session-control/read?{query}")
+        if resp.get("error"):
+            return f"\u274c Could not read that session: {resp['error']}"
+        msg_rows = resp.get("messages") or []
+        state_line = "still working" if resp.get("running") else "idle"
+        queued = resp.get("queue_depth", 0)
+        if queued:
+            state_line += f", {queued} message(s) queued"
+        head_line = (
+            f"\U0001f4d6 `{resp.get('target', '')}` — {resp.get('title', '')} "
+            f"({state_line}; total={resp.get('total', 0)})"
+        )
+        if not msg_rows:
+            return f"{head_line}\nNo messages in that window yet."
+        read_lines = [head_line]
+        for row in msg_rows:
+            text_body = str(row.get("content", ""))
+            if row.get("truncated"):
+                text_body += " …[truncated]"
+            read_lines.append(f"[{row.get('index')}] {row.get('role')}: {text_body}")
+        read_lines.append(
+            (
+                f"Pass since={resp['next_since']} on your next read to see only what "
+                f"is new. (total={resp.get('total', 0)} is the backlog depth — when it "
+                f"exceeds next_since there are older rows this window did not reach, so "
+                f"read again immediately rather than waiting.)"
+            )
+            if "next_since" in resp
+            else (
+                "This session is long enough that older messages have been trimmed, so "
+                "cursor positions are no longer exact and `since` reads are refused. "
+                "Read again without `since` to get the latest messages."
+            )
+        )
+        return "\n".join(read_lines)
 
     if name == "list_sessions":
         args = validate_tool_args(args, LIST_SESSIONS_SCHEMA)

@@ -528,6 +528,13 @@ SUBAGENT_COMPLETION_PREFIXES = (
 # user-facing summary. Rendered as an "inject" message (not a user bubble); the
 # prefix marks it as a synthetic continuation so it is NOT mirrored to linked
 # surfaces (Slack/Telegram) as though the user typed it.
+# One of the user's own chat sessions relayed a message to another through the
+# session-control tools. Shaped like the cron envelope (quoted label, explicit
+# terminator) so the frontend classifies it from the same list and a reader can
+# tell where the peer's text ends.
+SESSION_CONTROL_PREFIX = '[Message from session "'
+SESSION_CONTROL_END = "[End of session message]"
+
 SUBAGENT_SYNTHESIS_PREFIX = "[SYSTEM] Sub-agent synthesis:"
 SUBAGENT_SYNTHESIS_PROMPT = (
     f"{SUBAGENT_SYNTHESIS_PREFIX} all sub-agents you spawned have completed and each result was "
@@ -930,6 +937,7 @@ class _ChatSlot:
         "_native_subagent_tracker",
         "_native_subagent_output",
         "_pending_steers",
+        "_steer_delivery_ids",
         "_wait_state",
         "_end_wait_request",
         "_wait_last_ping",
@@ -1260,6 +1268,13 @@ class _ChatSlot:
         # STOP, error). Without this, a steer swallowed by a dying turn
         # vanished with no trace (see the requeue site).
         self._pending_steers: list[str] = []
+        # Opaque id per in-flight steer, keyed by its text (the one-per-text
+        # rule in chat_delivery makes that key unique). The requeue moves the id
+        # onto the queue entry and the drain unions entry meta onto the row it
+        # writes, which is how a caller can tell a delivery the drain already
+        # persisted from one the running turn consumed — a distinction the bare
+        # text cannot make.
+        self._steer_delivery_ids: dict[str, str] = {}
         # In-flight `wait` tool sleep, as reported by the tool's own keepalive
         # ping: {"wait_id": str, "seconds": int, "deadline_ts": float}. The
         # deadline is on the dashboard's clock (see api_session_keepalive) so
@@ -1563,7 +1578,9 @@ class _ChatSlot:
 
     # ── Queue helpers (dict-based queue items) ──
 
-    def queue_append(self, content: str, kind: str = "") -> str:
+    def queue_append(
+        self, content: str, kind: str = "", payload: str = "", meta: dict | None = None
+    ) -> str:
         """Append a message to the queue. Returns the generated queue ID.
 
         ``kind`` is a structural origin tag (e.g. ``"synthetic_recovery"`` for
@@ -1571,12 +1588,36 @@ class _ChatSlot:
         not by content equality — survives queue transformations and cannot
         collide with user-typed text that happens to match an internal string.
         Empty string = plain user/system content (default).
+
+        ``payload`` is the orthogonal question of whether the TEXT is machine
+        speech, read by ``is_synthetic_payload_item`` when the drain decides
+        whether the turn may be mirrored to a linked channel as the user's own
+        words. Mirrored from :meth:`queue_insert`, so the two entry points cannot
+        disagree about an entry's origin.
         """
         qid = uuid.uuid4().hex[:12]
-        self._queue.append({"id": qid, "content": content, "kind": kind})
+        entry: dict[str, Any] = {"id": qid, "content": content, "kind": kind}
+        # Both extras are only carried when set, so an ordinary append keeps the
+        # exact entry shape its consumers (and their tests) pin.
+        # ``is_synthetic_payload_item`` reads the payload with ``.get``, so absent
+        # and empty mean the same thing to the drain. ``meta`` rides along to be
+        # applied to the transcript row the drain appends: provenance that lives
+        # only on the delivering call would be lost the moment a message waits.
+        if payload:
+            entry["payload"] = payload
+        if meta:
+            entry["meta"] = dict(meta)
+        self._queue.append(entry)
         return qid
 
-    def queue_insert(self, index: int, content: str, kind: str = "", payload: str = "") -> str:
+    def queue_insert(
+        self,
+        index: int,
+        content: str,
+        kind: str = "",
+        payload: str = "",
+        meta: dict | None = None,
+    ) -> str:
         """Insert a message at a specific queue position. Returns the queue ID.
 
         See :meth:`queue_append` for the ``kind`` structural origin tag. ``payload``
@@ -1585,7 +1626,10 @@ class _ChatSlot:
         message shares the recovery kind but is not machine speech.
         """
         qid = uuid.uuid4().hex[:12]
-        self._queue.insert(index, {"id": qid, "content": content, "kind": kind, "payload": payload})
+        entry: dict[str, Any] = {"id": qid, "content": content, "kind": kind, "payload": payload}
+        if meta:
+            entry["meta"] = dict(meta)
+        self._queue.insert(index, entry)
         return qid
 
     def queue_pop(self, index: int = 0) -> dict[str, str]:

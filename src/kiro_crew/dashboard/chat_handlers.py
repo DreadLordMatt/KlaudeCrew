@@ -31,6 +31,13 @@ from kiro_crew.config.loader import (
 )
 from kiro_crew.dashboard.channel_slots import channel_slot_name, note_slot_closed
 from kiro_crew.dashboard.chat_auto_tag import maybe_auto_tag
+from kiro_crew.dashboard.chat_delivery import (
+    STEER_DISCARDED,
+    STEER_REQUEUED,
+    STEER_STEERED,
+    queue_for_next_turn,
+    steer_into_running_turn,
+)
 from kiro_crew.dashboard.chat_folders import _unhide_folder
 from kiro_crew.dashboard.chat_orchestrator import _stage_loop
 from kiro_crew.dashboard.chat_persistence import (
@@ -265,95 +272,31 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         # path (steer is unavailable between stages, so it falls through to the
         # queue below and is held until the plan ends).
         if body.get("steer") and message:
-            _client = slot._acp_client
-            if _client is not None and getattr(_client, "supports_steer", False):
-                # Register as pending BEFORE the await: _client.steer() suspends
-                # on stdin.drain(), and if the turn's finally runs during that
-                # suspension it must already see this steer to requeue it
-                # (append-after-await would land on an idle slot and orphan the
-                # message). The force-stop
-                # clear() likewise races correctly: a hard kill during the
-                # await discards the entry, so a late write can't resurrect it.
-                slot._pending_steers.append(message)
-                try:
-                    steered = await _client.steer(message)
-                except Exception as exc:  # best-effort — fall through to queue
-                    logger.warning("steer failed for slot %s: %s", slot.key, exc)
-                    steered = False
-                if not steered:
-                    # Unwind the optimistic registration so the queue fallback
-                    # below doesn't double-deliver. If the entry is already
-                    # gone, the turn's finally requeued it (or a hard kill
-                    # discarded it) during the await — either way the message
-                    # is accounted for, so skip the fallback.
-                    try:
-                        slot._pending_steers.remove(message)
-                    except ValueError:
-                        return web.json_response({"ok": True, "queued": True})
-                if steered:
-                    _ts = datetime.now(timezone.utc).isoformat()
-                    # Cut the in-flight text segment at the steer boundary
-                    # BEFORE persisting the user message, so the transcript
-                    # reads [assistant(pre-steer), user(steer), …] — the same
-                    # order the client rendered live. Without this the whole
-                    # segment lands BELOW the steer bubble at end-of-turn and
-                    # the chat_done refresh visibly reorders the reply (and the
-                    # pre-steer chunk entries are stranded in slot.messages —
-                    # _flush_segment's trailing-run walk stops at this user
-                    # message). Best-effort: a cut failure must never lose the
-                    # steer itself.
-                    _cut = slot._steer_segment_cut
-                    if _cut is not None:
-                        try:
-                            _cut()
-                        except Exception:
-                            logger.warning(
-                                "steer segment cut failed for slot %s",
-                                slot.key,
-                                exc_info=True,
-                            )
-                    # Sanitize: same chain as the queue path.
-                    _sanitized, _ = redact_exfiltration_urls(message)
-                    _sanitized, _ = redact_credentials(_sanitized)
-                    _redacted = _redact_for_display(_sanitized)
-                    # Persist the steered message so it survives page reload
-                    # (dirty-flush picks it up on next save cycle). Store the
-                    # sanitized form — raw content must never reach an external
-                    # surface (security-controls).
-                    slot.append(
-                        "user",
-                        _sanitized,
-                        "msg msg-u",
-                        ts=_ts,
-                        meta={"steer": True},
-                    )
-                    state.broadcast_ws(
-                        "steer_push",
-                        {
-                            "slot": slot.key,
-                            "content": _redacted,
-                            "ts": _ts,
-                        },
-                    )
-                    return web.json_response({"ok": True, "steered": True})
-            # steer requested but unavailable → fall through to queue below.
-        # Queue the message — return JSON immediately (no SSE needed).
+            outcome = await steer_into_running_turn(state, slot, message)
+            if outcome == STEER_STEERED:
+                return web.json_response({"ok": True, "steered": True})
+            if outcome == STEER_REQUEUED:
+                # The turn's teardown moved it into the queue while the steer RPC
+                # was suspended — queueing again would deliver the same text twice.
+                return web.json_response({"ok": True, "queued": True})
+            if outcome == STEER_DISCARDED:
+                # A force-stop threw the message away with the turn. Answering
+                # "queued" would render a card for text that no longer exists;
+                # refusing instead lets the client hand the composer back so the
+                # user can resend.
+                return web.json_response(
+                    {
+                        "error": "the turn was stopped while this was being delivered — resend it",
+                        "code": "delivery_discarded",
+                    },
+                    status=409,
+                )
+            # steer requested but unavailable -> fall through to queue below.
+        # Queue the message - return JSON immediately (no SSE needed).
         # The existing SSE reader will pick up queued messages as _run_chat
         # processes the queue in its finally block.
         if message:
-            qid = slot.queue_append(message)
-            _c, _ = redact_exfiltration_urls(message)
-            _c, _ = redact_credentials(_c)
-            _redacted = _redact_for_display(_c)
-            state.broadcast_ws(
-                "queue_push",
-                {
-                    "slot": slot.key,
-                    "content": _redacted,
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "queue_id": qid,
-                },
-            )
+            queue_for_next_turn(state, slot, message)
         return web.json_response({"ok": True, "queued": True})
 
     if not message:
@@ -1226,18 +1169,25 @@ def _make_stop_resolver(
     return _resolve
 
 
-async def api_chat_slot_stop(request: web.Request) -> web.Response:
-    """POST /api/chat/slots/{slot}/stop — cooperative stop with kill fallback.
+async def stop_slot_turn(
+    state: "DashboardState",
+    slot: "_ChatSlot",
+    *,
+    force: bool = False,
+    source: str = "dashboard",
+) -> dict[str, Any]:
+    """Stop the slot's turn: cooperative cancel, hard kill on a second call.
 
-    First press: soft cancel (cooperative). Second press (?force=true):
-    hard kill. Inserts a stop_event message into the slot transcript.
+    First call: soft cancel. A second call while the first is still pending
+    escalates to a hard kill, regardless of *force* — the caller's view of the
+    stop state can lag the backend's, so the backend's own ``_stop_state`` is
+    what decides.
+
+    Inserts a ``stop_event`` card into the slot transcript so whoever is
+    watching the session sees the stop, and returns the JSON body the route
+    would have sent. *source* labels the SEL audit line with who asked.
     """
-    state: DashboardState = request.app["state"]
-    name = request.match_info["slot"]
-    slot = state._slots.get(name)
-    if not slot:
-        return web.json_response({"error": "not found"}, status=404)
-    force = request.query.get("force", "").lower() == "true"
+    name = slot.key
 
     # Escalation path: a second stop press while a cooperative cancel is
     # already pending hard-kills. We escalate on ANY second press — not only
@@ -1276,9 +1226,9 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
             outcome="hard",
             # Record what the client requested (force flag) vs. the escalation
             # the backend actually performed (always a hard kill here).
-            metadata={"slot": name, "force": force, "escalated": True},
+            metadata={"slot": name, "via": source, "force": force, "escalated": True},
         )
-        return web.json_response({"ok": True})
+        return {"ok": True}
 
     # Already stopping or not running — no-op (idempotent repeat press guard)
     if slot._stop_state != "idle" or not slot.running:
@@ -1294,9 +1244,9 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
             tool_name="dashboard_stop",
             tool_kind="command",
             outcome="noop",
-            metadata={"slot": name, "reason": _info},
+            metadata={"slot": name, "via": source, "reason": _info},
         )
-        return web.json_response({"ok": True, "info": _info})
+        return {"ok": True, "info": _info}
 
     # First press: soft stop
     slot._stop_state = "soft_pending"
@@ -1365,9 +1315,20 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
         tool_name="dashboard_stop",
         tool_kind="command",
         outcome=outcome,
-        metadata={"slot": name, "force": False},
+        metadata={"slot": name, "via": source, "force": False},
     )
-    return web.json_response({"ok": True})
+    return {"ok": True}
+
+
+async def api_chat_slot_stop(request: web.Request) -> web.Response:
+    """POST /api/chat/slots/{slot}/stop — cooperative stop with kill fallback."""
+    state: DashboardState = request.app["state"]
+    name = request.match_info["slot"]
+    slot = state._slots.get(name)
+    if not slot:
+        return web.json_response({"error": "not found"}, status=404)
+    force = request.query.get("force", "").lower() == "true"
+    return web.json_response(await stop_slot_turn(state, slot, force=force))
 
 
 async def api_chat_slot_continue(request: web.Request) -> web.Response:

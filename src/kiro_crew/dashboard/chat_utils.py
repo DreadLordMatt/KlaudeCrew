@@ -1380,6 +1380,21 @@ def payload_for_replay(message_is_synthetic: bool) -> RecoveryPayload:
     return RecoveryPayload.CONTINUATION if message_is_synthetic else RecoveryPayload.ORIGINAL
 
 
+# Queue-entry payload tag for text one chat session relayed to another. Machine
+# speech for mirroring purposes even though it rides the user-input path: the
+# sending AGENT wrote it, so echoing it to the target's linked Slack/Telegram
+# thread would put a peer session's words in the target user's mouth on a surface
+# other people read. Distinct from the recovery payloads because the origin is a
+# different subsystem, and the predicate below is the only reader.
+SESSION_CONTROL_PAYLOAD = "session_control"
+
+# How far a chain of session-control relays may travel. Lives here rather than in
+# ``dashboard/session_control.py`` because the turn runner needs it too: when a
+# relay is requeued by turn teardown its depth is unrecoverable, and the runner
+# marks it spent so the chain stops instead of restarting at one.
+SESSION_CONTROL_MAX_HOPS = 3
+
+
 def is_synthetic_payload_item(item: dict) -> bool:
     """True when a queue ENTRY's text was written by the runner, not the user.
 
@@ -1391,7 +1406,7 @@ def is_synthetic_payload_item(item: dict) -> bool:
     """
     payload = item.get("payload")
     if payload:
-        return payload == RecoveryPayload.CONTINUATION
+        return payload in (RecoveryPayload.CONTINUATION, SESSION_CONTROL_PAYLOAD)
     return is_synthetic_recovery_item(item)
 
 

@@ -330,11 +330,11 @@ class TestProductionWiring:
     def test_steer_handler_registers_before_await(self):
         from pathlib import Path
 
-        import kiro_crew.dashboard.chat_handlers as ch
+        import kiro_crew.dashboard.chat_delivery as cd
 
-        src = Path(ch.__file__).read_text(encoding="utf-8")
+        src = Path(cd.__file__).read_text(encoding="utf-8")
         register_at = src.index("slot._pending_steers.append(message)")
-        await_at = src.index("await _client.steer(message)")
+        await_at = src.index("await client.steer(message)")
         assert register_at < await_at, (
             "pending registration must precede the steer RPC await so a turn "
             "dying mid-write still requeues the steer"

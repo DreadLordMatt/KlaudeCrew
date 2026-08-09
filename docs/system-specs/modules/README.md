@@ -18,6 +18,7 @@ agent loads only the one it needs.
 | [history.md](history.md) | Conversation persistence, JSONL rotation, and transcript search. |
 | [file-search.md](file-search.md) | The `@`-mention file/folder search: index, ranking, `kinds` filter, and the sensitive-path symmetry. |
 | [session-storage.md](session-storage.md) | What sessions cost on disk, and the user-initiated trash that reclaims it. |
+| [session-control.md](session-control.md) | One chat session sending to, stopping, and reading another. |
 | [config.md](config.md) | The config schema, defaults, loading, and live reload. |
 | [cli.md](cli.md) | Every CLI command, the gateway flags, and the test harness. |
 | [heartbeat.md](heartbeat.md) | The liveness heartbeat and its restricted tool allowlist. |
