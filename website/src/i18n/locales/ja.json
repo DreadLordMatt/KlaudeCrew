@@ -7435,6 +7435,8 @@
       "folder": "フォルダー",
       "folder_2": "フォルダー {{name}}",
       "folder_options_for": "{{name}} のフォルダーオプション",
+      "folder_running": "このフォルダーとサブフォルダーで {{count}} 件実行中",
+      "folder_running_in_column": "この列のみ: このフォルダーとサブフォルダーで {{count}} 件実行中",
       "folders": "フォルダー",
       "goal_loop_cycle": "ゴールループ · サイクル {{count}}/{{total}}",
       "goal_loop_cycle_no_cap": "ゴールループ · サイクル {{count}}（上限なし）",

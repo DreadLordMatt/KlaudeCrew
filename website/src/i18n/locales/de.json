@@ -7536,6 +7536,8 @@
       "folder": "Ordner",
       "folder_2": "Ordner {{name}}",
       "folder_options_for": "Ordneroptionen für {{name}}",
+      "folder_running": "{{count}} laufen in diesem Ordner und seinen Unterordnern",
+      "folder_running_in_column": "{{count}} laufen in diesem Ordner und seinen Unterordnern, nur in dieser Spalte",
       "folders": "Ordner",
       "goal_loop_cycle": "Zielschleife · Zyklus {{count}} von {{total}}",
       "goal_loop_cycle_no_cap": "Zielschleife · Zyklus {{count}} (unbegrenzt)",

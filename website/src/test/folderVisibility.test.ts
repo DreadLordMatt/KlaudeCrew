@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { computeActiveSubtree, folderIsHidden, folderOffersHide } from '../utils/folderVisibility'
+import { computeActiveSubtree, countRunningSubtree, folderIsHidden, folderOffersHide } from '../utils/folderVisibility'
 import type { ChatFolder } from '../types'
 
 const folders: ChatFolder[] = [
@@ -65,5 +65,50 @@ describe('folderOffersHide', () => {
     expect(folderOffersHide({ ...folders[0], history_count: 0 }, active)).toBe(false)
     // history_count absent is treated as 0.
     expect(folderOffersHide(folders[0], active)).toBe(false)
+  })
+})
+
+describe('countRunningSubtree', () => {
+  it('counts nothing when no slot is running', () => {
+    expect(countRunningSubtree(folders, []).size).toBe(0)
+  })
+
+  it('counts a running slot for its own folder and every ancestor', () => {
+    const counts = countRunningSubtree(folders, ['grandchild'])
+    expect(counts.get('grandchild')).toBe(1)
+    expect(counts.get('child')).toBe(1)
+    expect(counts.get('root')).toBe(1)
+    // A sibling subtree stays untouched.
+    expect(counts.get('other')).toBeUndefined()
+  })
+
+  it('sums a subtree rather than collapsing it to a boolean', () => {
+    // Two running slots in the same folder plus one in its parent: the root's
+    // number is the total for the whole subtree, not "1 = something runs".
+    // This is the behaviour computeActiveSubtree cannot express — it would
+    // short-circuit on the second walk as soon as it saw `root` again.
+    const counts = countRunningSubtree(folders, ['grandchild', 'grandchild', 'child'])
+    expect(counts.get('grandchild')).toBe(2)
+    expect(counts.get('child')).toBe(3)
+    expect(counts.get('root')).toBe(3)
+  })
+
+  it('ignores a folder id that is not in the tree', () => {
+    const counts = countRunningSubtree(folders, ['ghost'])
+    // The unknown id still counts for itself (it has no parent to walk to), but
+    // it must not fabricate a count on any real folder.
+    expect(counts.get('ghost')).toBe(1)
+    expect(counts.get('root')).toBeUndefined()
+  })
+
+  it('terminates on a cyclic parent chain and counts each folder once', () => {
+    // Corrupt data: a→b→a. Without the per-slot `seen` guard this loops forever.
+    const cyclic: ChatFolder[] = [
+      { id: 'a', name: 'A', order: 0, parent_id: 'b' },
+      { id: 'b', name: 'B', order: 1, parent_id: 'a' },
+    ]
+    const counts = countRunningSubtree(cyclic, ['a'])
+    expect(counts.get('a')).toBe(1)
+    expect(counts.get('b')).toBe(1)
   })
 })

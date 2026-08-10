@@ -2487,6 +2487,8 @@
       "filter_tags": "Filter tags: {{name}}",
       "folder_2": "Folder {{name}}",
       "folder_options_for": "Folder options for {{name}}",
+      "folder_running": "{{count}} running in this folder and its subfolders",
+      "folder_running_in_column": "{{count}} running in this folder and its subfolders, in this column only",
       "goal_loop_cycle": "Goal loop · cycle {{count}} of {{total}}",
       "goal_loop_cycle_no_cap": "Goal loop · cycle {{count}} (no cap)",
       "hidden_because_parent_hidden": "{{name}} is hidden because a parent folder is hidden",

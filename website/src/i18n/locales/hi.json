@@ -7536,6 +7536,8 @@
       "folder": "फ़ोल्डर",
       "folder_2": "फ़ोल्डर {{name}}",
       "folder_options_for": "{{name}} के लिए फ़ोल्डर विकल्प",
+      "folder_running": "इस फ़ोल्डर और इसके सबफ़ोल्डर में {{count}} चल रहे हैं",
+      "folder_running_in_column": "केवल इस कॉलम में: इस फ़ोल्डर और इसके सबफ़ोल्डर में {{count}} चल रहे हैं",
       "folders": "फ़ोल्डर",
       "goal_loop_cycle": "लक्ष्य लूप · चक्र {{count}}/{{total}}",
       "goal_loop_cycle_no_cap": "लक्ष्य लूप · चक्र {{count}} (कोई सीमा नहीं)",

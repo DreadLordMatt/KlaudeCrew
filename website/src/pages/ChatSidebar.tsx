@@ -21,7 +21,7 @@ import { sseSlotTitle } from '../store/dashboardSlice'
 import { api, SEARCH_MIN_CHARS } from '../api/client'
 import { computeReorderedFolders } from '../utils/reorderFolders'
 import { computeRecentRank, recencyTintShadow, clampTintCount } from '../utils/recencyTint'
-import { computeActiveSubtree, folderIsHidden, folderOffersHide } from '../utils/folderVisibility'
+import { computeActiveSubtree, countRunningSubtree, folderIsHidden, folderOffersHide } from '../utils/folderVisibility'
 import { groupHistoryByFolder } from '../utils/groupHistoryByFolder'
 import { slotChannelLabel, slotChannelNamespace } from '../utils/channelOrigin'
 import { toolStatusLabel } from '../utils/toolStatusLabel'
@@ -352,6 +352,51 @@ function FolderDragGhost({ folder }: { folder?: ChatFolder }) {
     <div className="bg-bg-elevated border border-border rounded-md px-3 py-2 text-[13px] text-text shadow-lg max-w-[240px] truncate pointer-events-none flex items-center gap-2">
       <FolderGlyph color={folder?.color} size={14} />{folder?.name ?? i18nT('pages.chatSidebar.folder')}
     </div>
+  )
+}
+
+/** The "work in flight" mark on a folder row: a hollow accent RING.
+ *
+ *  Why it exists: a collapsed folder hides its rows, and the numeric column only
+ *  moves when sessions are added or removed. Without this a folder with a turn
+ *  mid-flight renders identically to a wholly idle one, so "something is running
+ *  in here" was simply not on screen.
+ *
+ *  Why a ring and not the session row's pulsing dot: the row's unread mark is
+ *  already a solid accent dot, and the two states are opposites — "working,
+ *  wait" vs "your turn". Distinguishing them by animation alone leaves them
+ *  identical at rest, which is what a reduced-motion user and anyone glancing at
+ *  a still sidebar actually see. Form carries the difference instead, which also
+ *  lets both marks sit on one row without ambiguity, and keeps a folder's whole
+ *  ancestor chain from animating for one running session — persistent motion in
+ *  daily-use chrome. Liveness still lives where the work is: the session row
+ *  itself pulses.
+ *
+ *  The count stays in the label: the ring answers the glanceable question, and
+ *  the row's one numeric slot is already spent on the session count — a second
+ *  number there would read as a change to that count. `role="img"` + aria-label
+ *  put that label on the accessibility tree, not just under the mouse.
+ *
+ *  The label must name the count's SCOPE, not just its size. The number is a
+ *  subtree total, and on the board it is subtree ∩ column — so a bare "in this
+ *  folder" over a parent holding one session directly, or a bare "in this
+ *  column" on two sibling rows carrying different numbers, reads as a
+ *  contradiction and costs the mark its credibility. Callers pass the scoped
+ *  string; this component does not choose it.
+ *
+ *  `markId` scopes the test id, not the folder identity: list view passes the
+ *  folder id, board view passes `col-<column>-<folder>` because the same folder
+ *  renders one row per column and each row stands for a different slice. */
+function FolderRunningRing({ markId, label, size = 7 }: { markId: string; label: string; size?: number }) {
+  return (
+    <span
+      data-testid={`folder-running-${markId}`}
+      role="img"
+      aria-label={label}
+      title={label}
+      className="rounded-full border-[1.5px] border-accent shrink-0"
+      style={{ width: size, height: size }}
+    />
   )
 }
 
@@ -1479,6 +1524,43 @@ function ChatSidebar({
     [foldersWithActiveSubtree],
   )
 
+  // How many RUNNING sessions each folder's subtree holds. A collapsed folder
+  // hides its rows, so without this the sidebar shows a folder with a turn
+  // mid-flight exactly like an idle one — the count column moves only when
+  // sessions are added or removed, never when they start working.
+  // Built from `enrichedSlots` (not `filteredSlots`) for two reasons: enriched
+  // counts a live dynamic-workflow run as running the same way the session row
+  // and the "In progress" filter do, and reading the UNfiltered list keeps a
+  // search or filter from making live work look idle.
+  const runningSubtreeCounts = useMemo(() => {
+    const direct: string[] = []
+    for (const s of enrichedSlots) {
+      if (!s.running) continue
+      const fid = slotFolders[s.key]
+      if (fid) direct.push(fid)
+    }
+    return countRunningSubtree(folders, direct)
+  }, [folders, enrichedSlots, slotFolders])
+
+  // Which RUNNING sessions belong to each BOARD column, decided by tag
+  // membership over the UNFILTERED slot list.
+  // A column is a structural partition — a session is in it because of its tags,
+  // not because it survived a search — so the board's mark must not reuse
+  // `colSlotKeys`: that set is derived from `filteredSlots`, and a search that
+  // excluded the running session would silently empty the ring while the work
+  // carried on. Membership is recomputed here from `enrichedSlots` for the same
+  // reason the list view's counts are.
+  const runningKeysByColumn = useMemo(() => {
+    const running = enrichedSlots.filter(s => s.running)
+    const byColumn = new Map<string, Set<string>>()
+    for (const col of orderedColumns) {
+      byColumn.set(col.id, new Set(
+        running.filter(s => columnMatches(col, s.tags || [])).map(s => s.key),
+      ))
+    }
+    return byColumn
+  }, [orderedColumns, enrichedSlots, columnMatches])
+
   const filteredSlots = useMemo(() => {
     const activeFilterDefs = SESSION_FILTERS.filter(filterDef => activeFilters.has(filterDef.key))
     // Active content search: order by the backend's relevance ranking instead
@@ -1979,6 +2061,22 @@ function ChatSidebar({
       const cfSlots = filteredSlots.filter(s => colSlotKeys.has(s.key) && slotFolders[s.key] === cf.id)
       return cfSlots.length > 0 || descendantMatch(folders, cf.id, filteredSlots.filter(s => colSlotKeys.has(s.key)), slotFolders)
     }).length
+    // Running sessions in this folder's subtree, scoped to THIS column. The
+    // column scope is load-bearing: a board column is a structural partition of
+    // the sessions, so a mark on the row must mean "running among the sessions
+    // this row actually stands for". The label therefore names BOTH scopes —
+    // subtree and column — because two sibling folder rows in one column carry
+    // different numbers, and a bare "in this column" would make them look like
+    // contradictory column totals.
+    // Membership comes from `runningKeysByColumn`, NOT from `colSlotKeys`: the
+    // latter is built from `filteredSlots`, so a search excluding the running
+    // session would empty the ring while the work carried on.
+    const colRunning = runningKeysByColumn.get(columnId)
+    const runningCount = colRunning
+      ? enrichedSlots.filter(s =>
+        colRunning.has(s.key) && subtreeIds.has(slotFolders[s.key] ?? ''),
+      ).length
+      : 0
     // Board-view folders become sortable only when a drag handle is supplied
     // (root folders wrapped in SortableColumnFolder). Subfolders render without
     // it (parity with list view, where only root folders reorder). Disabled
@@ -2026,6 +2124,10 @@ function ChatSidebar({
             // path is the ⋯-menu Rename item, so scope-disable the interaction rule.
             // eslint-disable-next-line jsx-a11y/no-static-element-interactions
             <span className="flex-1 truncate" title={i18nT('pages.chatSidebar.double_click_to_rename')} onDoubleClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditScope(columnId); setEditName(folder.name) }}>{folder.name}</span>
+          )}
+          {runningCount > 0 && (
+            <FolderRunningRing markId={`col-${columnId}-${folder.id}`} size={6}
+              label={i18nT('pages.chatSidebar.folder_running_in_column', { count: runningCount })} />
           )}
           <span className="text-[10px] text-muted shrink-0">{count}</span>
           {!(editingId === folder.id && editScope === columnId) && (
@@ -2589,6 +2691,7 @@ function ChatSidebar({
     const childSlots = filteredSlots.filter(s => slotFolders[s.key] === folder.id)
     const count = childSlots.length + childFolders.length
     const hasUnread = folderTreeHasUnread(folder.id)
+    const runningCount = runningSubtreeCounts.get(folder.id) ?? 0
     const draggable = !!dragHandleProps && editingId !== folder.id
     // Valid "Move folder to" destinations: everything outside this folder's
     // own subtree (cycle guard). One O(1) lookup, computed once per row.
@@ -2637,7 +2740,24 @@ function ChatSidebar({
               {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
               <span className="flex-1 text-[13px] font-medium text-text truncate text-left" title={i18nT('pages.chatSidebar.double_click_to_rename')} onDoubleClick={e => { e.stopPropagation(); setEditingId(folder.id); setEditScope('list'); setEditName(folder.name) }}>{folder.name}</span>
               {folder.project_dir && <span className="text-[10px] text-accent/60 shrink-0" title={folder.project_dir}><Link2 size={9} /></span>}
-              {hasUnread && folder.collapsed && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: 'var(--accent)' }} />}
+              {/* Two INDEPENDENT marks, and they coexist: the ring counts
+               *  sessions working right now, the dot says a DIFFERENT session
+               *  finished and is waiting on you. Suppressing one for the other
+               *  would hide a finished session's "your turn" for as long as any
+               *  sibling keeps running — the session row's `s.unread &&
+               *  !s.running` rule only ever masks a session with ITSELF, which
+               *  does not generalise to a folder holding many. Ring vs solid is
+               *  what keeps them legible side by side. */}
+              {runningCount > 0 && (
+                <FolderRunningRing markId={folder.id}
+                  label={i18nT('pages.chatSidebar.folder_running', { count: runningCount })} />
+              )}
+              {hasUnread && folder.collapsed && (
+                <span data-testid={`folder-unread-${folder.id}`} role="img"
+                  aria-label={i18nT('pages.chatSidebar.agent_finished_your_turn')}
+                  title={i18nT('pages.chatSidebar.agent_finished_your_turn')}
+                  className="w-2 h-2 rounded-full shrink-0" style={{ background: 'var(--accent)' }} />
+              )}
               <span className="text-[11px] text-muted tabular-nums shrink-0">{count}</span>
             </button>
             {folder.default_agent && <span className="text-[10px] text-accent bg-accent/10 px-1.5 py-0.5 rounded-full shrink-0 truncate max-w-[60px]" title={i18nT('pages.chatSidebar.default_agent', { name: folder.default_agent })}>{folder.default_agent}</span>}

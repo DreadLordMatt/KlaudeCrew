@@ -7435,6 +7435,8 @@
       "folder": "文件夹",
       "folder_2": "文件夹 {{name}}",
       "folder_options_for": "{{name}} 的文件夹选项",
+      "folder_running": "此文件夹及其子文件夹中有 {{count}} 个会话正在运行",
+      "folder_running_in_column": "仅此列中，此文件夹及其子文件夹有 {{count}} 个会话正在运行",
       "folders": "文件夹",
       "goal_loop_cycle": "目标循环 · 第 {{count}} 轮，共 {{total}} 轮",
       "goal_loop_cycle_no_cap": "目标循环 · 第 {{count}} 轮（无上限）",

@@ -7637,6 +7637,8 @@
       "folder": "Dossier",
       "folder_2": "Dossier {{name}}",
       "folder_options_for": "Options du dossier {{name}}",
+      "folder_running": "{{count}} en cours dans ce dossier et ses sous-dossiers",
+      "folder_running_in_column": "{{count}} en cours dans ce dossier et ses sous-dossiers, dans cette colonne uniquement",
       "folders": "Dossiers",
       "goal_loop_cycle": "Boucle d’objectif · cycle {{count}} sur {{total}}",
       "goal_loop_cycle_no_cap": "Boucle d’objectif · cycle {{count}} (sans limite)",

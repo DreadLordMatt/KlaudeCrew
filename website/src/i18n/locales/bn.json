@@ -7536,6 +7536,8 @@
       "folder": "ফোল্ডার",
       "folder_2": "ফোল্ডার {{name}}",
       "folder_options_for": "{{name}}-এর ফোল্ডার অপশন",
+      "folder_running": "এই ফোল্ডার ও এর সাবফোল্ডারে {{count}}টি চলছে",
+      "folder_running_in_column": "শুধু এই কলামে: এই ফোল্ডার ও এর সাবফোল্ডারে {{count}}টি চলছে",
       "folders": "ফোল্ডার",
       "goal_loop_cycle": "গোল লুপ · {{total}}-এর মধ্যে সাইকেল {{count}}",
       "goal_loop_cycle_no_cap": "গোল লুপ · সাইকেল {{count}} (কোনো সীমা নেই)",

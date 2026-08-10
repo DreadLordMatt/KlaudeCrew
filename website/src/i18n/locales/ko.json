@@ -7435,6 +7435,8 @@
       "folder": "폴더",
       "folder_2": "{{name}} 폴더",
       "folder_options_for": "{{name}}의 폴더 옵션",
+      "folder_running": "이 폴더와 하위 폴더에서 {{count}}개 실행 중",
+      "folder_running_in_column": "이 열에서만: 이 폴더와 하위 폴더에서 {{count}}개 실행 중",
       "folders": "폴더",
       "goal_loop_cycle": "목표 루프 · 사이클 {{total}}개 중 {{count}}",
       "goal_loop_cycle_no_cap": "목표 루프 · 사이클 {{count}} (상한 없음)",

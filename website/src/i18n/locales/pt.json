@@ -7637,6 +7637,8 @@
       "folder": "Pasta",
       "folder_2": "Pasta {{name}}",
       "folder_options_for": "Opções da pasta {{name}}",
+      "folder_running": "{{count}} em execução nesta pasta e nas suas subpastas",
+      "folder_running_in_column": "{{count}} em execução nesta pasta e nas suas subpastas, apenas nesta coluna",
       "folders": "Pastas",
       "goal_loop_cycle": "Loop de objetivo · ciclo {{count}} de {{total}}",
       "goal_loop_cycle_no_cap": "Loop de objetivo · ciclo {{count}} (sem limite)",

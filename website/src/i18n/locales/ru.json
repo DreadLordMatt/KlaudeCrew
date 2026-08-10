@@ -7738,6 +7738,8 @@
       "folder": "Папка",
       "folder_2": "Папка {{name}}",
       "folder_options_for": "Параметры папки {{name}}",
+      "folder_running": "{{count}} выполняется в этой папке и её подпапках",
+      "folder_running_in_column": "{{count}} выполняется в этой папке и её подпапках, только в этом столбце",
       "folders": "Папки",
       "goal_loop_cycle": "Цикл цели · {{count}} из {{total}}",
       "goal_loop_cycle_no_cap": "Цикл цели · {{count}} (без лимита)",
