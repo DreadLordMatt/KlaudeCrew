@@ -328,6 +328,11 @@ def _decide(**kw):
         n_fail=0,
         n_checks=50,
         readiness_context="PR Readiness",
+        # The issue-link gate is orthogonal to the precedence rules these tests
+        # exercise, so the baseline satisfies it. Tests for the gate itself live
+        # in test_prepare_pr_status.py.
+        body="Fixes #1",
+        closing_refs=[{"number": 1}],
     )
     base.update(kw)
     return pr_status.decide(**base)

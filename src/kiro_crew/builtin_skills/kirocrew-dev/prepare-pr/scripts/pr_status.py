@@ -43,6 +43,57 @@ PASS_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CTX_PASS = {"SUCCESS"}
 CTX_RUNNING = {"PENDING", "EXPECTED"}
 DEFAULT_READINESS_CONTEXT = "PR Readiness"
+
+# A host closes an issue on merge ONLY for these verbs. "Related: #n", "Part of
+# #n" and a bare "#n" render as links and close nothing, which is how finished
+# work merges while its issue stays open forever.
+_CLOSING_KW_RE = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#\d+",
+    re.IGNORECASE,
+)
+# Any issue-ish reference at all, used to tell "forgot the verb" from
+# "genuinely closes nothing".
+_BARE_REF_RE = re.compile(r"(?<![\w/])#\d+\b")
+# Explicit opt-out so a refactor with no filed issue is not blocked forever.
+# Anchored at column 0 and requires the colon, because an UNANCHORED substring
+# is satisfied by any prose that merely discusses the gate — including the
+# instruction block of our own body template, which would make an author who
+# copies the template and skips this section pass in exactly the careless case
+# the gate exists to catch. A declaration is a trailer, not a mention.
+_NO_ISSUE_RE = re.compile(r"^no issue closed[ \t]*:", re.IGNORECASE | re.MULTILINE)
+
+
+def closing_link_reason(body, closing_refs):
+    """Return a BLOCKED reason when the issue-link contract is unmet, else None.
+
+    ``closing_refs`` is the host's OWN resolution of the body (the
+    ``closingIssuesReferences`` field), so it is the truth about what will
+    actually close. The body regexes only classify *why* it resolved to
+    nothing, which is what makes the message actionable.
+    """
+    if closing_refs:
+        return None
+    body = body or ""
+    if _NO_ISSUE_RE.search(body):
+        return None
+    if _CLOSING_KW_RE.search(body):
+        # Verb is present but the host resolved nothing: wrong repo prefix, a
+        # code fence, or an issue that is already closed/nonexistent.
+        return (
+            "body has a closing keyword but the host resolved no issue "
+            "(check the number and that it is not inside a code fence)"
+        )
+    if _BARE_REF_RE.search(body):
+        return (
+            "body references an issue with no closing keyword - use "
+            "'Fixes #<n>' so it closes on merge, or state 'no issue closed: <why>'"
+        )
+    return (
+        "no issue link - add 'Fixes #<n>', or state 'no issue closed: <why>' "
+        "to record that the omission is deliberate"
+    )
+
+
 # Page cap so a pathological PR can't make us loop unbounded (100 * 50 = 5000).
 _MAX_THREAD_PAGES = 50
 
@@ -204,6 +255,8 @@ def decide(
     n_fail,
     n_checks,
     readiness_context,
+    body,
+    closing_refs,
 ):
     """Resolve PR state to (exit_code, status line). Fail-closed.
 
@@ -237,6 +290,13 @@ def decide(
         blocked_now.append("PR is a draft")
     if decision == "CHANGES_REQUESTED":
         blocked_now.append("review decision is CHANGES_REQUESTED")
+    # Belongs in this tier, not with the check-result verdicts: no amount of
+    # waiting adds a closing trailer, and surfacing it while checks are still
+    # running lets the author fix the body in the same round instead of the
+    # next one.
+    _closing = closing_link_reason(body, closing_refs)
+    if _closing:
+        blocked_now.append(_closing)
     if blocked_now:
         return 20, "STATUS: BLOCKED - " + "; ".join(blocked_now)
 
@@ -291,7 +351,8 @@ def main(argv):
 
     fields = (
         "number,title,state,isDraft,mergeable,mergeStateStatus,"
-        "reviewDecision,url,headRefName,statusCheckRollup"
+        "reviewDecision,url,headRefName,statusCheckRollup,"
+        "body,closingIssuesReferences"
     )
     rc, out, _ = run(["gh", "pr", "view", pr, "--json", fields])
     if rc != 0 or not out:
@@ -336,6 +397,12 @@ def main(argv):
         print("  - {}: {}  [{}]".format(name, shown, kind))
     print("  rollup: total={} running={} failing={}".format(len(rollup), n_running, n_fail))
     print("  aggregate readiness: {}".format(readiness_kind or "not published"))
+    _closes = d.get("closingIssuesReferences") or []
+    print(
+        "  closes on merge: {}".format(
+            ", ".join("#{}".format(i.get("number")) for i in _closes) if _closes else "nothing"
+        )
+    )
 
     n_unresolved = unresolved_thread_count(d.get("number"))
     print("-- Review threads " + "-" * 35)
@@ -355,6 +422,8 @@ def main(argv):
         n_fail=n_fail,
         n_checks=len(rollup),
         readiness_context=readiness_context,
+        body=d.get("body"),
+        closing_refs=d.get("closingIssuesReferences") or [],
     )
     print(status)
     return code
