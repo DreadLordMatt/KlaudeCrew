@@ -219,8 +219,14 @@
      what makes leading safe. */
   --script-fallbacks:'KC Han Fallback','KC Devanagari Fallback','KC Bengali Fallback';
   --script-fallbacks-mono:'KC Han Mono Fallback','KC Han Fallback','KC Devanagari Fallback','KC Bengali Fallback';
-  --font-body:var(--script-fallbacks),'Space Grotesk',-apple-system,BlinkMacSystemFont,sans-serif;
-  --mono:var(--script-fallbacks-mono),'JetBrains Mono',ui-monospace,SFMono-Regular,monospace;
+  /* An installed theme pack fills --theme-font-sans / --theme-font-mono with its
+     own faces (see hooks/themeCss.ts). Reading them here means code surfaces
+     follow a pack's monospace face without the user having to switch the whole UI
+     to monospace, and the pack's proportional face is already in place on first
+     paint rather than swapping in when the preference effect runs. Unfilled, each
+     var() falls back to the built-in stack. */
+  --font-body:var(--theme-font-sans, var(--script-fallbacks),'Space Grotesk',-apple-system,BlinkMacSystemFont,sans-serif);
+  --mono:var(--theme-font-mono, var(--script-fallbacks-mono),'JetBrains Mono',ui-monospace,SFMono-Regular,monospace);
   --radius-sm:6px;--radius-md:8px;--radius-lg:12px;--radius-xl:16px;
 }
 html:lang(ja) {
