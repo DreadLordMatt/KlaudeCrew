@@ -2826,7 +2826,8 @@ class TestResolveClientPortRunMarker:
     def _owned(self, ports):
         """Pretend a verified KiroCrew gateway listens on each of *ports*."""
         return patch(
-            "kiro_crew.cli_server._gateway_owns_port", side_effect=lambda p: p in set(ports)
+            "kiro_crew.instances.discovery._gateway_owns_port",
+            side_effect=lambda p: p in set(ports),
         )
 
     def test_sole_owned_marker_used_when_nothing_configured(self):
@@ -2967,7 +2968,7 @@ class TestGatewayOwnsPort:
             self._sidecar(4242),
             self._listeners([4242]),
             self._owner(self._me()),
-            patch("kiro_crew.cli_server._is_kirocrew_process", return_value=True),
+            patch("kiro_crew.instances.discovery._is_kirocrew_process", return_value=True),
             patch("kiro_crew.cli_server.os.getuid", return_value=self._me(), create=True),
         ):
             assert _gateway_owns_port(6776) is True
@@ -2988,7 +2989,7 @@ class TestGatewayOwnsPort:
             self._sidecar(4242),
             self._listeners([4242]),
             self._owner(self._me()),
-            patch("kiro_crew.cli_server._is_kirocrew_process", return_value=True),
+            patch("kiro_crew.instances.discovery._is_kirocrew_process", return_value=True),
             patch("kiro_crew.cli_server.os.getuid", return_value=self._me(), create=True),
         ):
             assert _gateway_owns_port(6776) is False
@@ -3003,7 +3004,7 @@ class TestGatewayOwnsPort:
             self._listeners([9999]),
             self._owner(self._me()),
             # Even if its argv is a perfect forgery of a gateway command line.
-            patch("kiro_crew.cli_server._is_kirocrew_process", return_value=True),
+            patch("kiro_crew.instances.discovery._is_kirocrew_process", return_value=True),
         ):
             assert _gateway_owns_port(6776) is False
 
@@ -3017,7 +3018,7 @@ class TestGatewayOwnsPort:
             self._sidecar(4242),
             self._listeners([4242]),
             self._owner(os.getuid() + 1),
-            patch("kiro_crew.cli_server._is_kirocrew_process", return_value=True),
+            patch("kiro_crew.instances.discovery._is_kirocrew_process", return_value=True),
         ):
             assert _gateway_owns_port(6776) is False
 
@@ -3030,7 +3031,7 @@ class TestGatewayOwnsPort:
             self._sidecar(4242),
             self._listeners([4242]),
             self._owner(None),
-            patch("kiro_crew.cli_server._is_kirocrew_process", return_value=True),
+            patch("kiro_crew.instances.discovery._is_kirocrew_process", return_value=True),
         ):
             assert _gateway_owns_port(6776) is False
 
@@ -3049,7 +3050,7 @@ class TestGatewayOwnsPort:
             self._sidecar(4242),
             self._listeners([4242]),
             self._owner(self._me()),
-            patch("kiro_crew.cli_server._is_kirocrew_process", return_value=False),
+            patch("kiro_crew.instances.discovery._is_kirocrew_process", return_value=False),
         ):
             assert _gateway_owns_port(6776) is False
 

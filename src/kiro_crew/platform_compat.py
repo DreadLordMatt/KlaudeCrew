@@ -1593,6 +1593,62 @@ def listening_pid_tool_available() -> bool:
     return trusted_system_bin(listening_pid_tool()) is not None
 
 
+def listening_host_literals(pid: int, port: int) -> list[str]:
+    """Host literals *pid* has a LISTEN socket on for TCP *port*, best-effort.
+
+    Returned values are dial-ready hosts — ``"127.0.0.1"`` or ``"::1"`` — with a
+    wildcard bind resolved to the loopback of the family lsof reports for that
+    socket. Order follows the tool's output; callers decide preference.
+
+    Exists because :func:`find_listening_pids` is family-blind — it answers "which
+    pids hold this port" for IPv4 and IPv6 alike. A client that verified ownership
+    through that probe and then dials a hard-coded family may reach a *different*
+    process: with the gateway on ``[::1]:7788``, dialing ``127.0.0.1:7788`` lands on
+    whatever another local user bound there, and any credential on the request goes
+    with it. Pinning the other family inverts the same hole rather than closing it.
+
+    POSIX only (``lsof -nP``); returns ``[]`` on Windows or any failure, which
+    callers must treat as "cannot determine" and refuse rather than guess.
+    """
+    if not IS_POSIX:
+        return []
+    lsof_bin = trusted_system_bin("lsof")
+    if lsof_bin is None:
+        return []
+    try:
+        out = subprocess.check_output(
+            [lsof_bin, "-nP", "-a", "-p", str(int(pid)), "-iTCP:%d" % int(port), "-sTCP:LISTEN"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, OSError, ValueError):
+        return []
+    hosts: list[str] = []
+    for line in out.splitlines()[1:]:  # first line is lsof's header
+        # Columns are COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME, and the
+        # NAME column holds e.g. "127.0.0.1:7788", "[::1]:7788" or "*:7788".
+        fields = line.split()
+        if len(fields) < 5:
+            continue
+        family = fields[4]  # TYPE: "IPv4" or "IPv6"
+        name = fields[-2] if fields[-1] == "(LISTEN)" else fields[-1]
+        addr, sep, tail = name.rpartition(":")
+        if not sep or tail != str(int(port)):
+            continue
+        addr = addr.strip()
+        if addr.startswith("[") and addr.endswith("]"):
+            addr = addr[1:-1]
+        # A wildcard is printed identically for both families, so the TYPE column
+        # is the only thing that says which one it is. Resolve it to the loopback
+        # of its OWN family: reading an IPv6 wildcard as IPv4 would send traffic
+        # to an address this gateway may not hold at all.
+        if addr in ("*", "0.0.0.0", "::"):
+            addr = "::1" if family == "IPv6" else "127.0.0.1"
+        if addr and addr not in hosts:
+            hosts.append(addr)
+    return hosts
+
+
 def find_listening_pids(port: int) -> list[int]:
     """Return PIDs with a LISTEN socket on TCP *port* (best-effort, deduped).
 

@@ -673,17 +673,32 @@ marker is inert there, but the *filename* still matters to consumer 2.
 ### Consumer 2: zero-config client port discovery
 
 The marker's filename advertises which port a gateway serves, so `marker_ports()`
-lets a local client command (`token` / `status` / `logout` / `stop`, via
-`cli_server.resolve_client_port`) find a gateway on a non-default port with no
-configuration. That path reads only the filename and ignores marker *contents*
-entirely. Resolution order is `--port`, then `KIROCREW_PORT`, then a port named
-by `dashboard.url`, then the sole gateway-owned marker, then the default 5476.
+lets a client find a gateway on a non-default port with no configuration. That path
+reads only the filename and ignores marker *contents* entirely.
+
+`instances/discovery.py` owns the chain: `discovery.resolve_port(url)` returns
+`KIROCREW_PORT`, then a port named by `dashboard.url`, then the sole gateway-owned
+marker, then the default 5476. Two consumers share it, which is why it is a leaf
+(stdlib plus `platform_compat`, `run_marker` and the stdlib-only
+`dashboard.urls`) rather than living in the CLI:
+
+- **Client CLI commands** (`token` / `status` / `logout` / `stop`) via
+  `cli_server.resolve_client_port`, which applies an explicit `--port` flag first
+  and passes a callback so an ambiguous multi-gateway host is reported on stderr.
+- **The MCP tool servers** (`mcp_core`, `mcp_computer`) for every callback into the
+  gateway — `file_send`, `learn_add`, artifact writes, `send_message`, cron and
+  spawn control. Their base is `http://127.0.0.1:<resolved port>`: the proof below
+  establishes ownership of a *port number*, and `localhost` may resolve to `::1`
+  first, so dialling a different address family than the one verified would expose
+  the internal secret to a foreign-user listener on the same port. The unix-socket
+  path is derived from the same resolved port, since the socket is named after the
+  port the gateway bound.
 
 **A marker is not proof a gateway is there.** `clear_marker()` runs only on
 graceful shutdown, so a crash or SIGKILL leaves the file behind and an unrelated
 process may since have bound that port. Because client commands send the local
 secret (`X-Local-Secret`) to whatever answers, the consumer must verify the
-listener before trusting a discovered port. `cli_server._gateway_owns_port()`
+listener before trusting a discovered port. `discovery._gateway_owns_port()`
 does that in four fail-closed steps: the recorded pid must exist, must be among
 `platform_compat.find_listening_pids(port)`, must be owned by the caller's uid
 (which closes pid recycling into another user's process), and must look like a

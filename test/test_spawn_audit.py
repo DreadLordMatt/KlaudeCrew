@@ -666,6 +666,13 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "platform_compat.py::_posix_process_parent_map",
         "platform_compat.py::find_listening_pids",
         "platform_compat.py::find_python_interpreter",
+        # Same class as find_listening_pids: a read-only listener query
+        # (``lsof -nP -a -p <pid> -iTCP:<port> -sTCP:LISTEN``) whose argv is fixed
+        # and carries only int-coerced values, so no agent input reaches it. The
+        # pid comes from the gateway's own run-marker sidecar and the port from
+        # config or that same marker's filename. It cannot route through the
+        # sandbox helper because sandbox imports platform_compat.
+        "platform_compat.py::listening_host_literals",
         "platform_compat.py::kill_pid",
         "platform_compat.py::kill_process_tree",
         "platform_compat.py::process_command_line",

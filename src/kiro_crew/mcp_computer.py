@@ -96,9 +96,10 @@ from kiro_crew.computer_use.types import (
 )
 from kiro_crew.loopback_http import loopback_urlopen
 from kiro_crew.mcp_core import (
-    _API,
+    _api_base,
     _http_error_body,
     _internal_secret,
+    _invalidate_api_base,
     _resolve_session_key_strict,
     _session_key_header_error,
 )
@@ -642,25 +643,40 @@ def _invoke(session_key: str, name: str, args: dict[str, Any]) -> dict[str, Any]
     body = json.dumps(
         {"tool": name, "args": args, "session_key": session_key, "agent": "", "app": ""}
     ).encode()
-    request = urllib.request.Request(
-        f"{_API}{INVOKE_PATH}",
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Secret": _internal_secret(),
-            "X-Session-Key": session_key,
-        },
-        method="POST",
-    )
-    try:
-        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- URL is the loopback gateway (_API from dashboard.url config) + a fixed internal path; never agent-controlled  # noqa: E501
+    headers = {
+        "Content-Type": "application/json",
+        "X-Internal-Secret": _internal_secret(),
+        "X-Session-Key": session_key,
+    }
+
+    def _send_once():
+        request = urllib.request.Request(
+            f"{_api_base()}{INVOKE_PATH}", data=body, headers=headers, method="POST"
+        )
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- URL is the loopback gateway (_api_base(): 127.0.0.1 plus a port proven to be held by this user's gateway) + a fixed internal path; never agent-controlled  # noqa: E501
         with loopback_urlopen(request, timeout=INVOKE_TIMEOUT_SECS) as response:
-            decoded = json.loads(response.read())
+            return json.loads(response.read())
+
+    try:
+        decoded = _send_once()
     except urllib.error.HTTPError as exc:
         return _http_error_body(exc)
     except urllib.error.URLError as exc:
         detail = str(exc.reason) if isinstance(exc.reason, OSError) else str(exc)
-        return {"error": ERR_GATEWAY_UNREACHABLE.format(detail=detail)}
+        # The cached base can predate the gateway: its port is recorded only in the
+        # run marker, so a refusal is worth one re-resolution before giving up.
+        if isinstance(exc.reason, (ConnectionRefusedError, socket.gaierror)):
+            previous = _api_base()
+            _invalidate_api_base()
+            if _api_base() != previous:
+                try:
+                    decoded = _send_once()
+                except Exception:
+                    return {"error": ERR_GATEWAY_UNREACHABLE.format(detail=detail)}
+            else:
+                return {"error": ERR_GATEWAY_UNREACHABLE.format(detail=detail)}
+        else:
+            return {"error": ERR_GATEWAY_UNREACHABLE.format(detail=detail)}
     except (TimeoutError, socket.timeout) as exc:
         return {"error": ERR_GATEWAY_UNREACHABLE.format(detail=f"timed out ({exc})")}
     except Exception as exc:

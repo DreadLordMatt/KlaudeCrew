@@ -701,8 +701,8 @@ def test_mcp_core_post_prefers_unix_socket(
 ) -> None:
     import kiro_crew.mcp_core as mcp_core
 
-    monkeypatch.setattr(mcp_core, "_API_UNIX_SOCKET", unix_http_server)
-    monkeypatch.setattr(mcp_core, "_API", "http://127.0.0.1:1")  # TCP would refuse
+    monkeypatch.setattr(mcp_core, "_api_unix_socket", lambda: unix_http_server)
+    monkeypatch.setattr(mcp_core, "_api_base", lambda: "http://127.0.0.1:1")  # TCP would refuse
     monkeypatch.setattr(mcp_core, "_internal_secret", lambda: "s")
     monkeypatch.setattr(mcp_core, "_resolve_session_key", lambda: "dashboard:chat-1")
     assert mcp_core._get("/api/anything") == {"via": "unix"}
@@ -714,8 +714,10 @@ def test_mcp_core_post_falls_back_to_tcp_when_socket_absent(
     """Error shape of _get is unchanged when neither transport answers."""
     import kiro_crew.mcp_core as mcp_core
 
-    monkeypatch.setattr(mcp_core, "_API_UNIX_SOCKET", str(tmp_path / "absent.sock"))
-    monkeypatch.setattr(mcp_core, "_API", "http://127.0.0.1:1")
+    monkeypatch.setattr(
+        mcp_core, "_api_unix_socket", lambda p=str(tmp_path / "absent.sock"): p
+    )
+    monkeypatch.setattr(mcp_core, "_api_base", lambda: "http://127.0.0.1:1")
     monkeypatch.setattr(mcp_core, "_internal_secret", lambda: "s")
     monkeypatch.setattr(mcp_core, "_resolve_session_key", lambda: "dashboard:chat-1")
     out = mcp_core._get("/api/anything")

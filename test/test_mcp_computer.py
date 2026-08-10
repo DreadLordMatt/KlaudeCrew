@@ -2192,7 +2192,7 @@ class TestTheInvokeCallIsNeverProxied:
     could authorise reading a password field.
 
     Real sockets on port 0 following ``test_cron_trigger.py``: the kernel hands
-    out free ports, so no ``xdist_group`` marker is needed. ``_API`` and
+    out free ports, so no ``xdist_group`` marker is needed. ``_api_base`` and
     ``_internal_secret`` are patched on ``mcp_computer``'s own namespace (it
     imports both FROM ``mcp_core``, binding local names), which keeps the real
     secret file out of the test entirely.
@@ -2255,7 +2255,7 @@ class TestTheInvokeCallIsNeverProxied:
             for key in self.PROXY_ENV_KEYS:
                 monkeypatch.delenv(key, raising=False)
             monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy_port}")
-            monkeypatch.setattr(mcp_computer, "_API", f"http://127.0.0.1:{gateway_port}")
+            monkeypatch.setattr(mcp_computer, "_api_base", lambda base=f"http://127.0.0.1:{gateway_port}": base)
             monkeypatch.setattr(mcp_computer, "_internal_secret", lambda: self.CANARY)
 
             decoded = mcp_computer._invoke("dashboard:main", TOOL_LIST_APPS, {})
@@ -2276,7 +2276,7 @@ class TestTheInvokeCallIsNeverProxied:
 
     def test_no_proxy_naming_localhost_only_still_does_not_expose_it(self, monkeypatch):
         """``no_proxy=localhost`` is the common corporate default and looks like
-        coverage, but it matches the host STRING — ``_API`` spelled either way must
+        coverage, but it matches the host STRING — ``_api_base`` spelled either way must
         not depend on it."""
         gateway_hits: list[dict] = []
         proxy_hits: list[dict] = []
@@ -2287,7 +2287,7 @@ class TestTheInvokeCallIsNeverProxied:
                 monkeypatch.delenv(key, raising=False)
             monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy_port}")
             monkeypatch.setenv("no_proxy", "localhost")
-            monkeypatch.setattr(mcp_computer, "_API", f"http://127.0.0.1:{gateway_port}")
+            monkeypatch.setattr(mcp_computer, "_api_base", lambda base=f"http://127.0.0.1:{gateway_port}": base)
             monkeypatch.setattr(mcp_computer, "_internal_secret", lambda: self.CANARY)
 
             mcp_computer._invoke("dashboard:main", TOOL_LIST_APPS, {})
