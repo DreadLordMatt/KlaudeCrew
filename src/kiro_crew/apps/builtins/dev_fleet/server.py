@@ -723,6 +723,11 @@ _SANDBOX_ERR_MAX = 900
 _GIT_ERR_MAX = 300
 
 
+def _bin_override_env(name: str) -> str:
+    """The service-environment variable that pins *name* to an absolute path."""
+    return f"KIROCREW_DEVFLEET_BIN_{name.upper().replace('-', '_')}"
+
+
 def _trusted_bin(name: str) -> str | None:
     """Resolve *name* to a canonical executable in a system or Homebrew bin dir.
 
@@ -739,7 +744,7 @@ def _trusted_bin(name: str) -> str | None:
     # system dirs (e.g. gh in ~/.local/bin): an explicit absolute path set
     # in the SERVICE environment (operator-owned unit file), never derived
     # from the inherited PATH.
-    override = os.environ.get(f"KIROCREW_DEVFLEET_BIN_{name.upper().replace('-', '_')}")
+    override = os.environ.get(_bin_override_env(name))
     if override and Path(override).is_absolute() and Path(override).is_file() \
             and os.access(override, os.X_OK):
         _TRUSTED_BIN_CACHE[name] = override
@@ -808,6 +813,29 @@ def _toolchain_bin(name: str) -> str | None:
     return find_node_tool(name, _TRUSTED_PATH) or _trusted_bin(name)
 
 
+_UNRESOLVED_TOOL_PREFIX = "toolchain not found:"
+
+
+def _unresolved_tool_error(name: str) -> str:
+    """Explain an unresolvable tool in terms the reader can act on.
+
+    ``_trusted_bin`` fails closed, and the reasons are many (installed outside the
+    trusted dirs, on another drive, a portable or MSYS2 layout, absent entirely).
+    Enumerating install shapes is a losing game, so say what happened, name the
+    tool, and give the one setting that fixes every one of them.
+
+    Deliberately does NOT include ``_TRUSTED_PATH``: the searched list is long,
+    the reader cannot act on it, and the remedy does not require knowing it. It
+    is not logged either — it is environment-derived on Windows and constant per
+    platform, so it is documented in ``_TRUSTED_BIN_DIRS`` rather than emitted.
+    """
+    return (
+        f"{_UNRESOLVED_TOOL_PREFIX} no trusted {name!r} executable. Set "
+        f"{_bin_override_env(name)} to its absolute path in the gateway's service "
+        f"environment, or install {name} into a system location."
+    )
+
+
 async def _run_cmd(
     cmd: list[str], *, cwd: str | None = None, env: dict | None = None,
     timeout: int = 30, mode: str = "standard"
@@ -830,7 +858,15 @@ async def _run_cmd(
     if cmd and "/" not in cmd[0]:
         trusted = _trusted_bin(cmd[0])
         if trusted is None:
-            return -1, "", f"no trusted executable for {cmd[0]!r} in {_TRUSTED_PATH}"
+            # Deliberately NOT logging _TRUSTED_PATH. It is environment-derived
+            # on Windows (ProgramFiles / SystemRoot), and logging strings that
+            # came from the environment is a habit worth not having — CodeQL
+            # flags it as clear-text logging of sensitive data and cannot know
+            # which variables are benign. It also carries no per-incident
+            # information: the list is a per-platform constant, and the tool
+            # name below is the part that identifies what actually failed.
+            logger.warning("dev-fleet: no trusted %r executable", cmd[0])
+            return -1, "", _unresolved_tool_error(cmd[0])
         cmd = [trusted, *cmd[1:]]
     base_env["PATH"] = _TRUSTED_PATH
     base_env.update(_GIT_ENV_NEUTRALIZERS)
@@ -1501,6 +1537,17 @@ async def _discover_worktrees() -> list[dict]:
         # Propagate sandbox/git failures as a RuntimeError so callers can
         # surface the real reason instead of returning silent empty lists.
         raw = (stderr or stdout or "").strip()
+        # Two classified error classes now reach here as strings — this one and
+        # "sandbox unavailable" below — because `_run_cmd` reports through a
+        # (rc, out, err) tuple with no typed channel. Deliberately matching the
+        # existing idiom rather than inventing a second convention beside it.
+        # THIRD class arriving here is the signal to stop: at that point give
+        # `_run_cmd` a typed failure instead of a third string probe.
+        if raw.startswith(_UNRESOLVED_TOOL_PREFIX):
+            # Surface this one verbatim. Wrapping it in the generic "discovery
+            # failed in {MAIN_REPO}" branch below would aim the reader at their
+            # checkout, which is fine — we never got far enough to read it.
+            raise RuntimeError(raw)
         if "sandbox unavailable" in raw:
             # Do NOT clip to the generic git-error length here. The sandbox layer
             # puts the *remedy* (which opt-in to set, or that an EPERM is a
@@ -2970,9 +3017,7 @@ async def _sync_start_locked() -> dict:
         ),
     )
     if git_bin is None:
-        return {"ok": False, "error": (
-            f"no trusted executable for 'git' in {_TRUSTED_PATH}"
-        )}
+        return {"ok": False, "error": _unresolved_tool_error("git")}
     if npm_bin is None:
         # Drop the memoized resolution so the remedy this message advertises
         # actually works. `node_bin_dirs()` is lru_cached and `_BUILD_PATH_CACHE`

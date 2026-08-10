@@ -4182,6 +4182,7 @@ async def test_fetch_pr_head_oid_refuses_non_merged(monkeypatch):
 def test_trusted_bin_rejects_agent_writable_path(monkeypatch, tmp_path):
     """Bare command names resolve only inside the trusted bin dirs; a planted
     shim in an agent-writable PATH entry is never selected."""
+    monkeypatch.delenv("KIROCREW_DEVFLEET_BIN_GIT", raising=False)
     mod._TRUSTED_BIN_CACHE.clear()
     fake = tmp_path / "git"
     fake.write_text("#!/bin/sh\necho pwned\n")
@@ -4192,6 +4193,68 @@ def test_trusted_bin_rejects_agent_writable_path(monkeypatch, tmp_path):
     mod._TRUSTED_BIN_CACHE.clear()
     assert mod._trusted_bin("definitely-not-a-real-tool-xyz") is None
     mod._TRUSTED_BIN_CACHE.clear()
+
+
+def test_unresolved_tool_error_names_the_tool_and_the_remedy():
+    """The whole point of the message: which tool, and the one setting that fixes
+    every install shape. Enumerating shapes (portable, MSYS2, another drive) is a
+    losing game; the override covers them all."""
+    msg = mod._unresolved_tool_error("git")
+
+    assert "git" in msg
+    assert "KIROCREW_DEVFLEET_BIN_GIT" in msg
+    assert msg.startswith(mod._UNRESOLVED_TOOL_PREFIX)
+    # The searched PATH is long and not actionable — it belongs in the log.
+    assert mod._TRUSTED_PATH not in msg
+
+
+def test_bin_override_env_matches_the_name_trusted_bin_actually_reads(
+    monkeypatch, tmp_path
+):
+    """The remedy has to be the real lever. If `_bin_override_env` and the variable
+    `_trusted_bin` reads ever drift, the message tells the user to set something
+    that does nothing — the worst failure a remedy can have. So set the override
+    THROUGH the advertised name and prove resolution honours it."""
+    exe = tmp_path / "git"
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+
+    monkeypatch.setenv(mod._bin_override_env("git"), str(exe))
+    mod._TRUSTED_BIN_CACHE.clear()
+    try:
+        assert mod._trusted_bin("git") == str(exe), (
+            "the advertised variable is not the one _trusted_bin reads"
+        )
+    finally:
+        mod._TRUSTED_BIN_CACHE.clear()
+
+
+@pytest.mark.asyncio
+async def test_run_cmd_reports_an_unresolvable_tool_with_the_remedy(monkeypatch):
+    """A bare argv name that cannot be pinned must come back naming the tool and
+    the override, not just 'not found'."""
+    monkeypatch.setattr(mod, "_trusted_bin", lambda n: None)
+
+    rc, out, err = await mod._run_cmd(["git", "status"])
+
+    assert rc == -1 and out == ""
+    assert err == mod._unresolved_tool_error("git")
+
+
+@pytest.mark.asyncio
+async def test_discovery_does_not_blame_the_checkout_for_a_missing_tool(monkeypatch):
+    """The reported defect: an unresolvable git surfaced as "git worktree discovery
+    failed in <MAIN_REPO>", sending the reader to inspect a checkout that is fine.
+    Discovery never got far enough to read it, so the message must not mention it."""
+    monkeypatch.setattr(mod, "_trusted_bin", lambda n: None)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await mod._discover_worktrees()
+
+    msg = str(excinfo.value)
+    assert msg == mod._unresolved_tool_error("git"), "must surface verbatim"
+    assert "worktree discovery failed" not in msg, "must not blame the checkout"
+    assert mod.MAIN_REPO not in msg
 
 
 @pytest.mark.skipif(mod.platform_compat.IS_WINDOWS, reason="POSIX bin dirs")
@@ -4209,6 +4272,7 @@ def test_trusted_bin_pins_the_resolved_target_not_the_symlink(monkeypatch, tmp_p
     """Homebrew's `bin/gh` is a user-writable symlink into `Cellar/`. Caching the
     LINK would let it be repointed between validation and execution, so the
     vetted real path is what gets cached and spawned."""
+    monkeypatch.delenv("KIROCREW_DEVFLEET_BIN_GH", raising=False)
     mod._TRUSTED_BIN_CACHE.clear()
     cellar = tmp_path / "Cellar" / "gh" / "1.0" / "bin"
     cellar.mkdir(parents=True)
