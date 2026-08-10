@@ -37,31 +37,84 @@ _NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 _SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "kiro_crew"
 
 
+def _called_names(body: list[ast.stmt]) -> set[tuple[str, int]]:
+    """Every name called directly in *body*, paired with its line number.
+
+    Nested scopes are skipped: a call inside a nested ``def``/``lambda`` runs in
+    that frame (a sync helper, or a thread target), not in the enclosing one.
+    """
+    out: set[tuple[str, int]] = set()
+    stack = list(body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, _NESTED_SCOPES):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        called = (
+            func.attr if isinstance(func, ast.Attribute)
+            else getattr(func, "id", None)
+        )
+        if called:
+            out.add((called, node.lineno))
+    return out
+
+
+def _sync_helpers_reaching(tree: ast.Module, name: str) -> set[str]:
+    """Sync ``def`` names in this module that reach *name* without a thread hop.
+
+    Computed as a fixpoint, so a chain of sync helpers is followed to any depth.
+    Calling one of these from a coroutine body blocks the loop exactly as much
+    as calling *name* itself -- the indirection is invisible to a lexical scan,
+    which is how ``_skip_as_duplicate`` kept a synchronous
+    ``delete_items_batch`` alive after every direct call site was offloaded.
+
+    Scope is deliberately one module: resolving a call to another module's
+    method needs import and receiver-type resolution, which an AST scan cannot
+    do honestly. Same-file indirection is what the real defect used.
+    """
+    sync_defs = {
+        n.name: n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef)
+    }
+    reaching: set[str] = set()
+    while True:
+        grew = False
+        for fname, fn in sync_defs.items():
+            if fname in reaching:
+                continue
+            targets = {called for called, _ in _called_names(fn.body)}
+            if name in targets or targets & reaching:
+                reaching.add(fname)
+                grew = True
+        if not grew:
+            return reaching
+
+
 def _on_loop_call_sites(name: str) -> list[str]:
-    """Every lexical call to *name* directly inside an ``async def`` body."""
+    """Every call reaching *name* from an ``async def`` body without a hop.
+
+    Covers both the direct call and a call to a same-module sync helper that
+    reaches it (see ``_sync_helpers_reaching``).
+    """
     found: list[str] = []
     for path in sorted(_SRC.rglob("*.py")):
         try:
             tree = ast.parse(path.read_text(errors="replace"))
         except SyntaxError:  # pragma: no cover - syntax is enforced elsewhere
             continue
+        indirect = _sync_helpers_reaching(tree, name)
         for fn in (n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)):
-            stack = list(fn.body)
-            while stack:
-                node = stack.pop()
-                if isinstance(node, _NESTED_SCOPES):
-                    continue
-                stack.extend(ast.iter_child_nodes(node))
-                if not isinstance(node, ast.Call):
-                    continue
-                func = node.func
-                called = (
-                    func.attr if isinstance(func, ast.Attribute)
-                    else getattr(func, "id", None)
-                )
+            for called, lineno in sorted(_called_names(fn.body), key=lambda c: c[1]):
                 if called == name:
                     found.append(
-                        f"{path.relative_to(_SRC)}:{node.lineno} in async {fn.name}")
+                        f"{path.relative_to(_SRC)}:{lineno} in async {fn.name}")
+                elif called in indirect:
+                    found.append(
+                        f"{path.relative_to(_SRC)}:{lineno} in async {fn.name} "
+                        f"(via sync {called})")
     return found
 
 
@@ -110,6 +163,84 @@ async def test_handle_deleted_runs_the_delete_off_the_loop_thread(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_duplicate_skip_runs_the_delete_off_the_loop_thread(tmp_path):
+    """The duplicate gate's delete executes on some other thread.
+
+    The gate is reached through a plain ``def`` helper, so the lexical ratchet
+    above cannot see the hop; only asserting the THREAD proves it is real.
+    """
+    from unittest.mock import AsyncMock
+
+    from kiro_crew.knowledge.ingestion import IngestionPipeline
+
+    store = KnowledgeStore(str(tmp_path / "knowledge.db"))
+    try:
+        extractor = MagicMock()
+        extractor._pool = None
+        extractor.extract_batch = AsyncMock(
+            return_value=[{"category": "document", "summary": "s", "entities": []}])
+        chunker = MagicMock()
+        chunker.chunk.side_effect = lambda text, **kw: [
+            {"content": text, "chunk_index": 0, "section_title": None,
+             "line_start": 0, "line_end": 0}]
+        pipeline = IngestionPipeline(
+            store=store, extractor=extractor, chunker=chunker,
+            reader=MagicMock(), embedder=None)
+
+        # Holder: another source already owns this exact text. Equal source_type
+        # means neither outranks the other, which is the branch that refuses the
+        # write -- and therefore the branch that deletes the superseded items.
+        holder = store.add_source(name="holder", source_type="artifact",
+                                  uri="artifact://holder")
+        await pipeline.ingest_text("shared body", title="H", source_id=holder,
+                                   old_item_ids=[])
+
+        target = store.add_source(name="target", source_type="artifact",
+                                  uri="artifact://target")
+        await pipeline.ingest_text("its own body", title="T", source_id=target,
+                                   old_item_ids=[])
+        superseded = [r["id"] for r in store.db.execute(
+            "SELECT id FROM items WHERE source_id = ?", (target,)).fetchall()]
+        assert superseded, "no items to supersede -- setup would prove nothing"
+
+        seen_threads: list[int] = []
+        real = store.delete_items_batch_in_txn
+
+        def recording(*args, **kwargs):
+            seen_threads.append(threading.get_ident())
+            return real(*args, **kwargs)
+
+        store.delete_items_batch_in_txn = recording  # type: ignore[method-assign]
+
+        job = await pipeline.ingest_text("shared body", title="T", source_id=target,
+                                         old_item_ids=superseded)
+
+        assert job, "the duplicate gate did not return its terminal job id"
+        assert seen_threads, (
+            "delete_items_batch_in_txn was never called -- the duplicate gate was "
+            "not reached and this test would pass vacuously")
+        assert threading.get_ident() not in seen_threads, (
+            "the duplicate gate's delete ran on the event-loop thread; the whole "
+            "gate must travel through run_to_completion")
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_run_to_completion_forwards_the_return_value():
+    """The hop is usable for work that reports a result, not just side effects.
+
+    Without this the duplicate gate could only be offloaded by splitting its
+    delete from the job id it returns, across an await -- the exact shape that
+    strands committed data.
+    """
+    from kiro_crew.knowledge.ingestion import run_to_completion
+
+    assert await run_to_completion(lambda: "job-1234") == "job-1234"
+    assert await run_to_completion(lambda: None) is None
+
+
+@pytest.mark.asyncio
 async def test_finalizer_runs_even_when_cancelled_while_queued():
     """A cancellation landing while the finalizer is still QUEUED in the
     executor must not skip it (GPT round-2 finding on #2336): a bare
@@ -148,3 +279,75 @@ async def test_finalizer_runs_even_when_cancelled_while_queued():
         await blocker
     finally:
         pool.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_gate_reingests_when_the_holder_vanishes_before_the_lock(tmp_path):
+    """A holder deleted between the probe and the write lock must not dedupe.
+
+    The gate reads a holder and then makes the target DEPEND on it, so the two
+    steps have to be one atomic unit. Moving the gate off the event loop let a
+    concurrent source deletion land in the middle: the target got a terminal
+    'skipped_duplicate' row while the copy it was attaching to was cascaded
+    away, leaving the file on disk with its content unrecoverable.
+
+    Simulate the interleaving deterministically by making the authoritative
+    in-transaction lookup miss after the cheap probe has already hit. The gate
+    must decline to dedupe and let a normal ingest proceed.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from kiro_crew.knowledge.ingestion import IngestionPipeline
+
+    store = KnowledgeStore(str(tmp_path / "knowledge.db"))
+    try:
+        extractor = MagicMock()
+        extractor._pool = None
+        extractor.extract_batch = AsyncMock(
+            return_value=[{"category": "document", "summary": "s", "entities": []}])
+        chunker = MagicMock()
+        chunker.chunk.side_effect = lambda text, **kw: [
+            {"content": text, "chunk_index": 0, "section_title": None,
+             "line_start": 0, "line_end": 0}]
+        pipeline = IngestionPipeline(
+            store=store, extractor=extractor, chunker=chunker,
+            reader=MagicMock(), embedder=None)
+
+        holder = store.add_source(name="holder", source_type="artifact",
+                                  uri="artifact://holder")
+        await pipeline.ingest_text("shared body", title="H", source_id=holder,
+                                   old_item_ids=[])
+        target = store.add_source(name="target", source_type="artifact",
+                                  uri="artifact://target")
+
+        real_find = store.find_doc_by_content_hash
+        calls: list[int] = []
+
+        def vanishing(*args, **kwargs):
+            calls.append(1)
+            # First call is the unlocked probe (hit); the second is the
+            # authoritative read under BEGIN IMMEDIATE -- by then the holder is
+            # "deleted", so it must miss.
+            return real_find(*args, **kwargs) if len(calls) == 1 else None
+
+        store.find_doc_by_content_hash = vanishing  # type: ignore[method-assign]
+
+        job = await pipeline.ingest_text("shared body", title="T",
+                                         source_id=target, old_item_ids=[])
+
+        assert len(calls) >= 2, (
+            "the gate consulted the holder only once, so the holder is still "
+            "read outside the write lock and this test proves nothing")
+        rows = store.db.execute(
+            "SELECT status FROM ingestion_jobs WHERE source_id = ?",
+            (target,)).fetchall()
+        assert rows, "the ingest recorded no job at all"
+        assert all(r["status"] != "skipped_duplicate" for r in rows), (
+            "target was marked a duplicate of a holder that no longer exists -- "
+            f"its content is now unrecoverable (job={job}, rows={[dict(r) for r in rows]})")
+        assert store.db.execute(
+            "SELECT COUNT(*) FROM items WHERE source_id = ?",
+            (target,)).fetchone()[0] > 0, (
+            "target kept no items of its own after the holder vanished")
+    finally:
+        store.db.close()
