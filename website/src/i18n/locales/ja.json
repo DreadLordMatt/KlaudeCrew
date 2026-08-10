@@ -3596,8 +3596,9 @@
         "personal_shopper": "パーソナルショッパー",
         "say_something_like_help_me_find_running_shoes_or": "「ランニングシューズを探して」や「娘の誕生日が近い」のように話しかけてください",
         "start_a_conversation_with_your_personal_advisor": "どのチャットセッションでもパーソナルアドバイザーと会話を始められます。",
+        "start_advisor_conversation": "アドバイザーと会話を始める",
+        "start_conversation_failed": "会話を開始できませんでした（{{code}}）",
         "your_life_problem_advisor_solves_first_shops_sec": "暮らしの困りごとのアドバイザー — まず解決、それから買い物",
-        "tab_chat": "チャット",
         "tab_preferences": "好み",
         "tab_history": "履歴",
         "tab_sites": "サイト"

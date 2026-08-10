@@ -3776,8 +3776,9 @@
         "personal_shopper": "Personal Shopper",
         "say_something_like_help_me_find_running_shoes_or": "Скажи что-нибудь вроде «помоги найти кроссовки для бега» или «у дочки скоро день рождения»",
         "start_a_conversation_with_your_personal_advisor": "Начни разговор со своим личным советником в любой сессии чата.",
+        "start_advisor_conversation": "Начать разговор с консультантом",
+        "start_conversation_failed": "Не удалось начать разговор ({{code}})",
         "your_life_problem_advisor_solves_first_shops_sec": "Твой советник по бытовым задачам — сначала решает, потом покупает",
-        "tab_chat": "Чат",
         "tab_preferences": "Предпочтения",
         "tab_history": "История",
         "tab_sites": "Сайты"

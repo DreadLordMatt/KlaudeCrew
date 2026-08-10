@@ -3596,8 +3596,9 @@
         "personal_shopper": "퍼스널 쇼퍼",
         "say_something_like_help_me_find_running_shoes_or": "‘러닝화 찾아 줘’ 또는 ‘딸 생일이 다가와’처럼 말해 보세요",
         "start_a_conversation_with_your_personal_advisor": "어떤 채팅 세션에서든 퍼스널 어드바이저와 대화를 시작할 수 있습니다.",
+        "start_advisor_conversation": "어드바이저와 대화 시작",
+        "start_conversation_failed": "대화를 시작할 수 없습니다 ({{code}})",
         "your_life_problem_advisor_solves_first_shops_sec": "생활 문제 어드바이저 — 해결이 먼저, 쇼핑은 그다음",
-        "tab_chat": "채팅",
         "tab_preferences": "선호 항목",
         "tab_history": "기록",
         "tab_sites": "사이트"

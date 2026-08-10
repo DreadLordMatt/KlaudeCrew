@@ -3656,8 +3656,9 @@
         "personal_shopper": "পার্সোনাল শপার",
         "say_something_like_help_me_find_running_shoes_or": "এমন কিছু বলো যেমন “দৌড়ানোর জুতো খুঁজতে সাহায্য করো” বা “আমার মেয়ের জন্মদিন আসছে”",
         "start_a_conversation_with_your_personal_advisor": "যেকোনো চ্যাট সেশনে তোমার ব্যক্তিগত পরামর্শদাতার সঙ্গে আলাপ শুরু করো।",
+        "start_advisor_conversation": "পরামর্শদাতার সাথে কথা বলুন",
+        "start_conversation_failed": "কথা বলা শুরু করা যায়নি ({{code}})",
         "your_life_problem_advisor_solves_first_shops_sec": "রোজকার সমস্যার পরামর্শদাতা — আগে সমাধান, পরে কেনাকাটা",
-        "tab_chat": "চ্যাট",
         "tab_preferences": "পছন্দ",
         "tab_history": "ইতিহাস",
         "tab_sites": "সাইট"

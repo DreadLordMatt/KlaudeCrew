@@ -3596,8 +3596,9 @@
         "personal_shopper": "私人购物顾问",
         "say_something_like_help_me_find_running_shoes_or": "可以这样说：“帮我找跑鞋”，或者“女儿快过生日了”",
         "start_a_conversation_with_your_personal_advisor": "在任意聊天会话中都能和私人顾问开始对话。",
+        "start_advisor_conversation": "开始咨询对话",
+        "start_conversation_failed": "无法开始对话（{{code}}）",
         "your_life_problem_advisor_solves_first_shops_sec": "生活问题顾问，先解决，再购物",
-        "tab_chat": "聊天",
         "tab_preferences": "偏好",
         "tab_history": "历史",
         "tab_sites": "网站"

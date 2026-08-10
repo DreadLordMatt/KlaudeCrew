@@ -3656,8 +3656,9 @@
         "personal_shopper": "पर्सनल शॉपर",
         "say_something_like_help_me_find_running_shoes_or": "कुछ ऐसा कहो जैसे “दौड़ने के जूते ढूँढने में मदद करो” या “मेरी बेटी का जन्मदिन आ रहा है”",
         "start_a_conversation_with_your_personal_advisor": "किसी भी चैट सत्र में अपने निजी सलाहकार से बातचीत शुरू करो।",
+        "start_advisor_conversation": "सलाहकार से बात करें",
+        "start_conversation_failed": "बातचीत शुरू नहीं हो सकी ({{code}})",
         "your_life_problem_advisor_solves_first_shops_sec": "रोज़मर्रा की दिक्कतों का सलाहकार — पहले हल, फिर खरीद",
-        "tab_chat": "चैट",
         "tab_preferences": "पसंद",
         "tab_history": "इतिहास",
         "tab_sites": "साइटें"

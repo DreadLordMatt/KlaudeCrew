@@ -3716,8 +3716,9 @@
         "personal_shopper": "Personal Shopper",
         "say_something_like_help_me_find_running_shoes_or": "Diga algo como “me ajuda a achar um tênis de corrida” ou “o aniversário da minha filha está chegando”",
         "start_a_conversation_with_your_personal_advisor": "Comece uma conversa com seu consultor pessoal em qualquer sessão de chat.",
+        "start_advisor_conversation": "Falar com o consultor",
+        "start_conversation_failed": "Não foi possível iniciar a conversa ({{code}})",
         "your_life_problem_advisor_solves_first_shops_sec": "Seu consultor para problemas do dia a dia — resolve primeiro, compra depois",
-        "tab_chat": "Chat",
         "tab_preferences": "Preferências",
         "tab_history": "Histórico",
         "tab_sites": "Sites"
