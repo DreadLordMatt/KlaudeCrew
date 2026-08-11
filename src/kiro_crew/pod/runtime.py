@@ -29,6 +29,7 @@ try:  # POSIX only; pods are refused on hosts without it (require_backend)
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
+from kiro_crew.atomic_write import atomic_write
 from kiro_crew.loopback_http import loopback_urlopen
 from kiro_crew.platform_compat import IS_LINUX, IS_MACOS
 from kiro_crew.pod import launchd
@@ -100,15 +101,35 @@ def write_env_file(cfg: PodConfig, name: str, updates: dict[str, str]) -> None:
     newlines, so a multi-line value would not round-trip. ``--seed`` is
     user-supplied, so reject a newline-bearing value loudly (fail-closed) rather
     than silently writing an un-parseable file.
+
+    **Written atomically**, because readers are deliberately lock-free: ``boot``
+    reads this file without taking the mutex (so ``pod up`` can hold it across
+    the health wait without deadlocking against the process it waits for). An
+    in-place truncating rewrite therefore has a window where a reader — a
+    ``Restart=`` re-exec, say — sees a partial or empty file. A dropped
+    ``APPROVAL`` is not a benign default: ``boot`` leaves ``approval_mode``
+    unset, which falls through to ``cfg.agent.approval_mode`` and lands on
+    auto-approve, the LEAST restrictive outcome. Temp-file + rename means an
+    unlocked reader sees either the old file or the new one, never a torn one.
+
+    The merge additionally re-acquires :func:`pod_name_mutex`, which every
+    mutating pod path already holds at its call site. That is defense in depth
+    for direct callers rather than a fix for a live race, and it mirrors what
+    ``start_pod`` / ``stop_pod`` already do; reentrancy is what makes
+    re-acquiring it inside an outer transaction safe.
     """
-    data = read_env_file(cfg, name)
-    data.update(updates)
-    for key, val in data.items():
+    for key, val in updates.items():
         if "\n" in val or "\r" in val:
             raise PodError(f"pod env value for {key!r} must be single-line")
-    cfg.pods_dir.mkdir(parents=True, exist_ok=True)
-    body = "".join(f"{k}='{v}'\n" for k, v in data.items())
-    cfg.env_file(name).write_text(body)
+    with pod_name_mutex(cfg, name):
+        data = read_env_file(cfg, name)
+        data.update(updates)
+        for key, val in data.items():
+            if "\n" in val or "\r" in val:
+                raise PodError(f"pod env value for {key!r} must be single-line")
+        cfg.pods_dir.mkdir(parents=True, exist_ok=True)
+        body = "".join(f"{k}='{v}'\n" for k, v in data.items())
+        atomic_write(cfg.env_file(name), body, newline="")
 
 
 def pin_checkout(cfg: PodConfig, name: str, checkout: Path) -> None:

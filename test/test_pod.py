@@ -9,6 +9,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1682,6 +1683,154 @@ class TestReviewRound2Fix:
         # a normal single-line value still round-trips
         rt.write_env_file(c, "y", {"CHECKOUT": "/a/b"})
         assert rt.read_env_file(c, "y")["CHECKOUT"] == "/a/b"
+
+
+@pytest.mark.skipif(
+    rt.fcntl is None,
+    reason="flock needs POSIX; without it the mutex is a documented no-op",
+)
+class TestEnvFileConcurrentWrite:
+    """``write_env_file`` merges, so it must serialize per pod name.
+
+    ``pod up`` writes pod settings AND starts the unit whose gateway writes the same
+    file, so an unserialized merge drops one side's keys and boots the pod on stale
+    config.
+
+    Both tests assert a property only the real lock provides, so both are POSIX-only:
+    where ``fcntl`` is absent ``pod_name_mutex`` degrades to a no-op by design, and
+    pods are refused on those hosts anyway.
+    """
+
+    def test_a_concurrent_write_does_not_drop_the_other_writers_keys(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two real threads, both past a barrier before either takes the lock.
+
+        Threads rather than a nested call because the lock is per open-file-description:
+        re-entering from one thread exercises the reentrant counter instead of the
+        cross-writer exclusion this is about.
+        """
+        monkeypatch.setenv("KIROCREW_POD_ENV_DIR", str(tmp_path))
+        c = PodConfig.load()
+        rt.write_env_file(c, "demo", {"CHECKOUT": "/first", "APPROVAL": "reads"})
+
+        entered = threading.Barrier(2, timeout=30)
+        errors: list[BaseException] = []
+
+        def writer(updates: dict[str, str]) -> None:
+            try:
+                entered.wait()
+                rt.write_env_file(c, "demo", updates)
+            except BaseException as exc:  # noqa: BLE001 - surfaced via `errors`
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=writer, args=({"CRONS": "1"},)),
+            threading.Thread(target=writer, args=({"SEED": "/s"},)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+            assert not t.is_alive(), "write_env_file deadlocked"
+        assert not errors, f"writer raised: {errors!r}"
+
+        final = rt.read_env_file(c, "demo")
+        # Neither writer's key may be lost, and the pre-existing ones survive both.
+        assert final["CRONS"] == "1"
+        assert final["SEED"] == "/s"
+        assert final["CHECKOUT"] == "/first"
+        assert final["APPROVAL"] == "reads"
+
+    def test_a_writer_inside_the_pod_up_transaction_is_serialized_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The mutex must be the one ``pod up`` holds, not one private to the merge.
+
+        ``pod up`` runs its whole transaction under :func:`pod_name_mutex`, so a lock
+        only ``write_env_file`` took would leave the writes made inside it unexcluded.
+        Holding the mutex here must therefore block a competing writer outright.
+        """
+        monkeypatch.setenv("KIROCREW_POD_ENV_DIR", str(tmp_path))
+        c = PodConfig.load()
+        rt.write_env_file(c, "demo", {"CHECKOUT": "/first"})
+
+        blocked = threading.Event()
+
+        def competing_writer() -> None:
+            rt.write_env_file(c, "demo", {"SEED": "/s"})
+            blocked.set()
+
+        with rt.pod_name_mutex(c, "demo"):
+            t = threading.Thread(target=competing_writer)
+            t.start()
+            # The transaction holds the mutex, so the other writer cannot proceed.
+            assert not blocked.wait(timeout=1.0), "a writer entered during the transaction"
+            rt.write_env_file(c, "demo", {"APPROVAL": "yolo"})
+        t.join(timeout=30)
+        assert not t.is_alive()
+
+        final = rt.read_env_file(c, "demo")
+        assert final["APPROVAL"] == "yolo"
+        assert final["SEED"] == "/s"
+        assert final["CHECKOUT"] == "/first"
+
+    def test_a_lock_free_reader_never_sees_a_torn_env_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The write must be atomic, not merely serialized.
+
+        ``boot`` reads without the mutex on purpose, so an in-place truncating
+        rewrite lets a reader observe one generation spliced onto another. A
+        missing ``APPROVAL`` is the least restrictive outcome (``boot`` leaves
+        ``approval_mode`` unset, which falls through to auto-approve), so a torn
+        read is a silent privilege upgrade rather than a crash.
+
+        Modelled deterministically instead of by racing: a reader opens the file
+        and consumes half of it, a write lands, then it consumes the rest. Under
+        temp-file + rename its descriptor still refers to the intact old inode,
+        so the two halves belong to ONE generation. Under an in-place rewrite the
+        same descriptor reads across the truncation and the halves do not match
+        any generation that was ever valid.
+        """
+        monkeypatch.setenv("KIROCREW_POD_ENV_DIR", str(tmp_path))
+        c = PodConfig.load()
+        # Enough keys that a spliced read is unambiguous rather than a near-miss.
+        first = {"APPROVAL": "interactive", "CHECKOUT": "/a"}
+        first.update({f"PAD{i}": f"v{i}" * 8 for i in range(40)})
+        rt.write_env_file(c, "demo", first)
+
+        env_path = c.env_file("demo")
+        before = env_path.read_bytes()
+
+        # Raw fd, NOT open() -- a buffered text reader slurps a small file whole
+        # on the first read, so the second read would come from memory and the
+        # test could not observe the on-disk seam at all.
+        fd = os.open(str(env_path), os.O_RDONLY)
+        try:
+            head = os.read(fd, len(before) // 2)
+            # The writer runs while this reader is mid-file.
+            rt.write_env_file(c, "demo", {"APPROVAL": "yolo"})
+            chunks = [head]
+            while True:
+                part = os.read(fd, 4096)
+                if not part:
+                    break
+                chunks.append(part)
+        finally:
+            os.close(fd)
+        seen = b"".join(chunks)
+
+        after = env_path.read_bytes()
+        assert head, "reader consumed nothing; the fixture is not exercising the seam"
+        # The reader must have seen exactly one whole generation, old or new.
+        assert seen in (before, after), (
+            "torn read: the reader spliced two generations together"
+        )
+        # And the new generation must be complete on disk.
+        final = rt.read_env_file(c, "demo")
+        assert final["APPROVAL"] == "yolo"
+        assert final["CHECKOUT"] == "/a"
 
 
 class TestUnitExecSelfHeal:
