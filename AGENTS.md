@@ -11,8 +11,10 @@ open before touching that subsystem: see
 Kiro Crew is an open-source personal AI agent: chat from the web dashboard, the
 CLI, or a messaging channel like Slack and Discord; run multi-step tasks
 unattended; schedule cron jobs; keep memory across
-sessions. It drives an LLM through the KiroACP provider (the ACP adapter running
-`kiro-cli` over ACP JSON-RPC) plus MCP tools.
+sessions. It drives an LLM through the ACP provider (the ACP adapter running
+either `claude-agent-acp`, the default in this fork, or `kiro-cli`, over ACP
+JSON-RPC) plus MCP tools. See "This fork: Claude Code is the default ACP
+backend" below.
 
 - **Backend:** Python package `kiro_crew` in `src/kiro_crew/`.
 - **Frontend:** React + TS + Vite SPA in `website/`; the built `dist/` is staged
@@ -22,6 +24,41 @@ sessions. It drives an LLM through the KiroACP provider (the ACP adapter running
 - **Distribution:** public GitHub, plain setuptools, public PyPI / public npm.
 
 Full map: [`docs/architecture/overview.md`](docs/architecture/overview.md).
+
+## This fork: Claude Code is the default ACP backend
+
+KlaudeCrew is a fork of [kirodotdev/KiroCrew](https://github.com/kirodotdev/KiroCrew)
+that re-enables the dormant `ACP_BACKEND_CLAUDE` seam upstream ships but never
+selects, and makes it the **default**. `agent.acp_backend` (enum
+`"claude"`/`"kiro"`, default `"claude"`) picks which agent drives ACP
+sessions; `agent.provider` stays `"acp"` either way — both backends speak the
+same protocol.
+
+- **Selection:** `config/loader.py`'s `create_provider_factory()` reads
+  `agent.acp_backend` and passes `acp_backend=ACP_BACKEND_CLAUDE` (or `""` for
+  kiro) into `AcpProvider`/`AcpClient` — the ~30 `_is_claude` branches already
+  in `acp/client.py` do the rest.
+- **Registration glue:** `src/kiro_crew/klaude/` is new, fork-owned code that
+  fills the hooks `AcpClient` looks up via `getattr` but the public core
+  leaves unattached — MCP server injection (`mcp_servers.py`, since
+  claude-agent-acp reads no config file), the permission-routing settings
+  seed (`settings_seed.py`), and session transcript lifecycle
+  (`transcripts.py`). Wired in via the sanctioned `ProviderRegistry`
+  extension point (`klaude/registry.py`, swapped in at
+  `platform/bootstrap.py`), not by editing `acp/client.py` directly.
+- **kiro-cli stays fully supported** — set `agent.acp_backend: "kiro"` to opt
+  out. Every fork-owned edit branches on the config value rather than
+  replacing kiro's behavior, so the kiro path is byte-identical to upstream.
+- **Rebase discipline:** core-file edits are isolated into `fork:`-prefixed
+  commits (see `git log --oneline --grep=^fork`); everything else lives under
+  `src/kiro_crew/klaude/` and `test/test_klaude_*.py`, which never conflict
+  with an upstream merge. When resolving a conflict in a `fork:` commit's
+  hunk, re-apply the fork's change on top of upstream's — do not silently
+  drop it back to dormant.
+
+Full design + rationale: see the "Other providers" note under "Never
+re-introduce" below, `docs/system-specs/modules/acp-client.md` §Backend
+Selection, and `docs/system-specs/modules/providers.md`.
 
 ## Read before you touch
 
@@ -75,10 +112,15 @@ This repo is the de-Amazoned public fork of an internal package. Never re-add:
 - **Keep these stubbed** (public symbols preserved as no-ops so the import graph
   holds): `sso_status.py`, `browser/auth.py`, `dashboard/handlers/sso_login.py`,
   `tunnel/manager.py`, `aim_agents.py`.
-- **Other providers.** Kiro Crew is KiroACP-only: `agent.provider` is fixed to
-  `acp` and kiro-cli is REQUIRED. Keep the dormant `ACP_BACKEND_CLAUDE` /
-  `_is_claude` seam in `acp/client.py` so an internal companion can re-register
-  Claude Code; do NOT re-add the public registration glue.
+- **Other providers.** Upstream Kiro Crew is KiroACP-only (`agent.provider`
+  fixed to `acp`, kiro-cli required, the `ACP_BACKEND_CLAUDE`/`_is_claude` seam
+  in `acp/client.py` deliberately dormant). **This fork inverts that policy —
+  see "This fork: Claude Code is the default ACP backend" below.** Do not
+  revert the registration glue to dormant when rebasing on upstream; re-apply
+  the fork's `klaude/` package and its `fork:`-prefixed core-file hunks
+  instead (`config/loader.py`'s `_acp()` closure, `platform/bootstrap.py`'s
+  registry swap, `acp/client.py`'s resume-guard hook, `providers/acp.py`'s
+  cleanup branch, `dashboard/handlers/core.py`'s config table).
 - **OSS-flipped defaults:** always-on in-process embeddings, Piper TTS by default,
   a default-open Slack enterprise gate, lazy STT extras.
 - **Fork UX divergences:** the Channels app is hidden from the App Store and the

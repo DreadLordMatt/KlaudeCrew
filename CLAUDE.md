@@ -1,4 +1,4 @@
-# CLAUDE.md — KiroCrew
+# CLAUDE.md — KlaudeCrew (fork of KiroCrew)
 
 **`AGENTS.md` is the single source of truth for this repository.** Read it before
 any non-trivial change; it is imported below so it is always in context. This
