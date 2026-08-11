@@ -3718,6 +3718,19 @@
         "preview_unavailable": "Pré-visualização não disponível"
       }
     },
+    "prPostmortem": {
+      "manifest": {
+        "description": "Vincula um pull request de correção mesclado ao pull request que introduziu o bug e explica por que a revisão de código e os testes não o detectaram. A descoberta lê os assuntos de commits squash-merge, então pull requests de correção são encontrados automaticamente em repositórios que fazem squash e podem ser nomeados explicitamente em qualquer outro lugar. Os achados se acumulam como arquivos que você lê; quando o mesmo mecanismo aparece em três pares distintos, ele se torna uma diretriz que você aceita.",
+        "display_name": "PR Postmortem",
+        "highlight_1": "Atribui uma correção à sua causa de forma mecânica, não por suposição: as linhas que o fix removeu são rastreadas com blame no commit pai, e esses commits se agrupam nos seus pull requests",
+        "highlight_2": "Cada veredito inclui a evidência de blame que o produziu, para que um vínculo incorreto seja visível em vez de aceito sem questionamento",
+        "highlight_3": "Calibrado contra histórico julgado manualmente: ports em massa e código movido são sinalizados em vez de culpados, porque um commit que apenas moveu uma linha não escreveu o bug",
+        "highlight_4": "A análise reavalia a atribuição e pode rejeitá-la, impedindo que um vínculo errado se torne silenciosamente uma regra de prevenção",
+        "highlight_5": "Explica por que a revisão e os testes não detectaram cada defeito, com base nos comentários de revisão e nos resultados de CI do pull request culpado",
+        "highlight_6": "Registra o mecanismo de falha nas palavras do analista, de modo que dois achados com o mesmo erro se reconhecem mesmo quando o código e a correção não têm nada em comum",
+        "highlight_7": "Aguarda evidência antes de propor uma regra — três achados de três pull requests distintos — e a regra aceita é salva como um arquivo de steering no repositório correspondente"
+      }
+    },
     "projects": {
       "manifest": {
         "description": "Entregue um trabalho de várias etapas e deixe que ele vá até o fim sem supervisão. Descreva o trabalho em linguagem simples, cole uma especificação escrita ou envie um arquivo YAML e, então, gere primeiro um plano para revisar as etapas ou comece na hora. Cada execução ganha uma página própria com o progresso passo a passo, e você pode pausar, retomar, tentar novamente ou parar a qualquer momento.",

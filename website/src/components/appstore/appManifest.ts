@@ -58,7 +58,10 @@ import { i18nT } from '../../i18n/t'
 type ManifestKeys = {
   displayName: string
   description: string
-  pageLabel: string
+  // Optional: an app that ships no `ui.pages` has no page to label, so it carries
+  // no key for one. Requiring it would mean storing an empty catalog value, which
+  // `catalogParity` rejects outright — an empty string is not a translation.
+  pageLabel?: string
   highlights: string[]
 }
 
@@ -288,6 +291,21 @@ export const APP_MANIFEST_KEY: Record<string, ManifestKeys> = {
       'apps.pptxMaker.manifest.highlight_6',
     ],
   },
+  'pr-postmortem': {
+    displayName: 'apps.prPostmortem.manifest.display_name',
+    description: 'apps.prPostmortem.manifest.description',
+    // No `pageLabel`: this app ships no dashboard page, so there is nothing to
+    // label and no string to translate.
+    highlights: [
+      'apps.prPostmortem.manifest.highlight_1',
+      'apps.prPostmortem.manifest.highlight_2',
+      'apps.prPostmortem.manifest.highlight_3',
+      'apps.prPostmortem.manifest.highlight_4',
+      'apps.prPostmortem.manifest.highlight_5',
+      'apps.prPostmortem.manifest.highlight_6',
+      'apps.prPostmortem.manifest.highlight_7',
+    ],
+  },
   'projects': {
     displayName: 'apps.projects.manifest.display_name',
     description: 'apps.projects.manifest.description',
@@ -367,7 +385,7 @@ export function appDescription(app: { name?: string; description?: string; _regi
  */
 export function appPageLabel(name: string | undefined, label?: string, displayName?: string): string {
   const k = keysFor({ name })
-  return k ? i18nT(k.pageLabel) : (label || displayName || name || '')
+  return k?.pageLabel ? i18nT(k.pageLabel) : (label || displayName || name || '')
 }
 
 /**

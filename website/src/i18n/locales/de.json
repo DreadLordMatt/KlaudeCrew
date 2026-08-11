@@ -3658,6 +3658,19 @@
         "preview_unavailable": "Keine Vorschau verfügbar"
       }
     },
+    "prPostmortem": {
+      "manifest": {
+        "description": "Verknüpft eine gemergte Fix-Pull-Request mit der Pull Request, die den Bug eingeführt hat, und erklärt, warum Review und Tests den Fehler übersehen haben. Die Erkennung liest Squash-Merge-Commit-Subjects, sodass Fix-Pull-Requests in Repositories mit Squash-Merge automatisch gefunden werden und anderswo explizit benannt werden können. Befunde sammeln sich als Dateien; sobald derselbe Mechanismus in drei separaten Paaren auftaucht, wird er zu einer Steering-Regel, die du annimmst.",
+        "display_name": "PR Postmortem",
+        "highlight_1": "Ordnet einen Fix seiner Ursache mechanisch zu, nicht durch Vermutung: Die Zeilen, die ein Fix gelöscht hat, werden per Blame am Parent-Commit nachvollzogen und auf ihre Pull Requests zurückgeführt",
+        "highlight_2": "Jedes Urteil liefert die Blame-Evidenz mit, sodass eine fehlerhafte Zuordnung sichtbar ist statt blind vertraut zu werden",
+        "highlight_3": "Kalibriert an handgeprüfter History: Bulk-Ports und verschobener Code werden markiert statt beschuldigt, weil ein Commit, der eine Zeile nur verschoben hat, den Bug nicht geschrieben hat",
+        "highlight_4": "Die Analyse überprüft die Zuordnung erneut und kann sie ablehnen, damit eine falsche Verknüpfung nicht stillschweigend zur Präventionsregel wird",
+        "highlight_5": "Erklärt, warum Review und Tests jeden Defekt übersehen haben, gestützt auf die Review-Kommentare und CI-Ergebnisse der verursachenden Pull Request",
+        "highlight_6": "Hält den Fehlermechanismus in den Worten des Analysten fest, damit zwei Befunde mit demselben Fehler auch dann erkannt werden, wenn ihr Code und ihre Lösung nichts gemeinsam haben",
+        "highlight_7": "Schlägt erst dann eine Regel vor, wenn drei Befunde aus drei verschiedenen Pull Requests vorliegen — und eine akzeptierte Regel landet als Steering-Datei im zugehörigen Repository"
+      }
+    },
     "projects": {
       "manifest": {
         "description": "Übergib eine mehrstufige Aufgabe und lass sie unbeaufsichtigt bis zum Ende laufen. Beschreibe die Arbeit in normaler Sprache, füge eine schriftliche Spezifikation ein oder lade eine YAML-Datei hoch, und erstelle dann entweder zuerst einen Plan, um die Schritte zu prüfen, oder starte sofort. Jede Ausführung erhält ihre eigene Seite mit dem Schritt-für-Schritt-Fortschritt, und du kannst sie jederzeit pausieren, fortsetzen, wiederholen oder stoppen.",

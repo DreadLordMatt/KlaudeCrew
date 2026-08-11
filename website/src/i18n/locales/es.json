@@ -3718,6 +3718,19 @@
         "preview_unavailable": "Vista previa no disponible"
       }
     },
+    "prPostmortem": {
+      "manifest": {
+        "description": "Vincula un pull request de corrección fusionado al pull request que introdujo el error y explica por qué la revisión de código y los tests no lo detectaron. El descubrimiento lee los asuntos de commits squash-merge, por lo que los pull requests de corrección se encuentran automáticamente en repositorios que realizan squash y pueden nombrarse explícitamente en cualquier otro lugar. Los hallazgos se acumulan como archivos que lees; cuando el mismo mecanismo aparece en tres pares distintos, se convierte en una directriz que aceptas.",
+        "display_name": "PR Postmortem",
+        "highlight_1": "Atribuye una corrección a su causa de forma mecánica, no por intuición: las líneas que un fix eliminó se rastrean con blame en el commit padre, y esos commits se agrupan en sus pull requests",
+        "highlight_2": "Cada veredicto incluye la evidencia de blame que lo produjo, de modo que un vínculo incorrecto se detecta en vez de darse por bueno",
+        "highlight_3": "Calibrado contra historial juzgado a mano: los ports masivos y el código movido se señalan en lugar de culparse, porque un commit que solo trasladó una línea no escribió el error",
+        "highlight_4": "El análisis re-evalúa la atribución y puede rechazarla, así que un vínculo erróneo no se convierte silenciosamente en una regla de prevención",
+        "highlight_5": "Explica por qué la revisión y los tests no detectaron cada defecto, basándose en los comentarios de revisión y los resultados de CI del pull request culpable",
+        "highlight_6": "Registra el mecanismo de fallo en las palabras del analista, de modo que dos hallazgos con el mismo error se reconocen aunque su código y su remedio no tengan nada en común",
+        "highlight_7": "Espera evidencia antes de proponer una regla — tres hallazgos de tres pull requests distintos — y la regla aceptada se guarda como un archivo de steering en el repositorio correspondiente"
+      }
+    },
     "projects": {
       "manifest": {
         "description": "Delega un trabajo de varios pasos y déjalo llegar al final sin supervisión. Describe el trabajo en lenguaje natural, pega una especificación escrita o sube un archivo YAML, y luego genera primero un plan para revisar los pasos o inícialo de una vez. Cada ejecución tiene su propia página con el avance paso a paso, y puedes pausarla, reanudarla, reintentarla o detenerla en cualquier momento.",

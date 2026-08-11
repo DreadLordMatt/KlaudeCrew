@@ -164,6 +164,20 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # against a real bare remote, which is how four fatal sync bugs were found that
         # every mocked-git test passed.
         "apps/builtins/ops_mission_control/tests/test_ledger_sync_git.py::_git",
+        # PR Postmortem reads history from a local clone the OPERATOR configured in
+        # the app's state.json — never a path an agent supplies. Every argv is a
+        # literal in the module (`blame`, `diff`, `log`, `rev-parse`, `show`) plus a
+        # commit sha or a path taken from git's own output; there is no shell, and
+        # `--` terminates options before any path so a file named like a flag cannot
+        # become one. The one number parsed out of attacker-influenced text (a
+        # commit subject's "(#1234)") is bounded to seven digits before it is used.
+        "apps/builtins/pr_postmortem/engine/vcs.py::_run",
+        # Its test harness: fixed `git` argv against a per-test tempdir, with the
+        # host's global and system config excluded so the suite cannot execute a
+        # developer's hooks. Sandboxing it would defeat the point — these tests exist
+        # to run real git, which is how the merge-commit and blame-coordinate defects
+        # were found while every mocked-git test passed.
+        "apps/builtins/pr_postmortem/tests/support.py::git",
         "apps/builtins/ops_mission_control/tests/test_ledger_sync_git.py::setUp",
         # Diagnostics support-bundle version probe: fixed argv
         # ``["kiro-cli", "--version"]`` with a 5s timeout, no shell, no cwd, and

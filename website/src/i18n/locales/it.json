@@ -3718,6 +3718,19 @@
         "preview_unavailable": "Anteprima non disponibile"
       }
     },
+    "prPostmortem": {
+      "manifest": {
+        "description": "Collega una pull request di correzione mergiata alla pull request che ha introdotto il bug e spiega perché la revisione e i test non l'hanno intercettato. Il rilevamento legge i soggetti dei commit squash-merge, quindi le pull request di correzione vengono trovate automaticamente nei repository che eseguono squash e possono essere nominate esplicitamente altrove. I risultati si accumulano come file; quando lo stesso meccanismo compare in tre coppie distinte, diventa una regola di steering che accetti.",
+        "display_name": "PR Postmortem",
+        "highlight_1": "Attribuisce un fix alla sua causa in modo meccanico, non per supposizione: le righe cancellate dal fix vengono tracciate con blame al commit genitore e ricondotte alle relative pull request",
+        "highlight_2": "Ogni verdetto include la prova di blame che lo ha generato, così un collegamento errato è visibile anziché dato per buono",
+        "highlight_3": "Calibrato su una cronologia verificata a mano: i port in blocco e il codice spostato vengono segnalati anziché incolpati, perché un commit che ha solo spostato una riga non ha scritto il bug",
+        "highlight_4": "L'analisi rivaluta l'attribuzione e può respingerla, impedendo a un collegamento errato di diventare silenziosamente una regola di prevenzione",
+        "highlight_5": "Spiega perché la revisione e i test hanno mancato ogni difetto, basandosi sui commenti di revisione e sugli esiti CI della pull request colpevole",
+        "highlight_6": "Registra il meccanismo di errore con le parole dell'analista, così due risultati con lo stesso tipo di svista vengono riconosciuti anche quando il loro codice e il loro rimedio non hanno nulla in comune",
+        "highlight_7": "Propone una regola solo dopo avere prove sufficienti — tre risultati da tre pull request diverse — e una regola accettata viene salvata come file di steering nel repository di pertinenza"
+      }
+    },
     "projects": {
       "manifest": {
         "description": "Affida un lavoro in più passi e lascialo arrivare alla fine senza supervisione. Descrivi il lavoro in linguaggio naturale, incolla una specifica scritta o carica un file YAML, poi genera prima un piano per rivedere i passi oppure parti subito. Ogni esecuzione ha una pagina propria che mostra i progressi passo per passo, e puoi metterla in pausa, riprenderla, ritentarla o fermarla in qualsiasi momento.",

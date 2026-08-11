@@ -131,7 +131,10 @@ for (const [name, app] of apps) {
   }
   check(keys.displayName, app.displayName, 'displayName')
   check(keys.description, app.description, 'description')
-  check(keys.pageLabel, app.pageLabel, 'pageLabel')
+  // An app with no `ui.pages` has no page label. Requiring a key for one would mean
+  // storing an empty catalog value, and `catalogParity` rejects that: an empty string
+  // is not a translation. So the key is expected only when there is a page.
+  if (app.pageLabel) check(keys.pageLabel, app.pageLabel, 'pageLabel')
   keys.highlights.forEach((k, i) => check(k, app.highlights[i], `highlight_${i + 1}`))
 }
 

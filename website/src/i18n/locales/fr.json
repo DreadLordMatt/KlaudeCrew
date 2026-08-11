@@ -3718,6 +3718,19 @@
         "preview_unavailable": "Aperçu indisponible"
       }
     },
+    "prPostmortem": {
+      "manifest": {
+        "description": "Relie une pull request de correction mergée à la pull request qui a introduit le bug et explique pourquoi la revue et les tests l'ont manqué. La découverte lit les sujets de commit squash-merge, donc les pull requests de correction sont trouvées automatiquement dans les dépôts qui font du squash et peuvent être nommées explicitement partout ailleurs. Les constats s'accumulent sous forme de fichiers ; dès que le même mécanisme apparaît dans trois paires distinctes, il devient une règle de steering que tu acceptes.",
+        "display_name": "PR Postmortem",
+        "highlight_1": "Attribue un correctif à sa cause de manière mécanique, sans conjecture : les lignes supprimées par le correctif sont tracées par blame au commit parent et remontées à leurs pull requests",
+        "highlight_2": "Chaque verdict embarque la preuve de blame qui l'a produit, rendant un lien erroné visible plutôt qu'accepté sur confiance",
+        "highlight_3": "Calibré sur un historique jugé manuellement : les ports en masse et le code déplacé sont signalés au lieu d'être blâmés, car un commit qui a simplement déplacé une ligne n'a pas écrit le bug",
+        "highlight_4": "L'analyse réévalue l'attribution et peut la rejeter, empêchant un lien incorrect de devenir silencieusement une règle de prévention",
+        "highlight_5": "Explique pourquoi la revue et les tests ont manqué chaque défaut, en s'appuyant sur les commentaires de revue et les résultats de CI de la pull request coupable",
+        "highlight_6": "Enregistre le mécanisme de défaillance dans les mots de l'analyste, afin que deux constats partageant la même erreur soient reconnus même quand leur code et leur remède n'ont rien en commun",
+        "highlight_7": "Attend d'avoir des preuves avant de proposer une règle — trois constats issus de trois pull requests différentes — et une règle acceptée atterrit en fichier de steering dans le dépôt concerné"
+      }
+    },
     "projects": {
       "manifest": {
         "description": "Confie une tâche en plusieurs étapes et laisse-la s’exécuter jusqu’au bout sans surveillance. Décris le travail en langage simple, colle une spécification écrite ou charge un fichier YAML, puis génère d’abord un plan pour relire les étapes, ou lance-la tout de suite. Chaque exécution obtient sa propre page qui montre la progression étape par étape, et tu peux la mettre en pause, la reprendre, la relancer ou l’arrêter à tout moment.",

@@ -2959,6 +2959,19 @@
         "preview_unavailable": "Preview unavailable"
       }
     },
+    "prPostmortem": {
+      "manifest": {
+        "description": "Links a merged fix PR to the pull request that introduced the bug and explains why review and tests missed it. Discovery reads squash-merge subjects, so fix PRs are found automatically in repositories that squash and can be named explicitly anywhere else. Findings accumulate as files you read; once the same mechanism shows up in three separate pairs, it becomes a steering rule you accept.",
+        "display_name": "PR Postmortem",
+        "highlight_1": "Attributes a fix to its cause mechanically, not by guesswork: the lines a fix deleted are blamed at the fix's parent commit, and those commits roll up to their pull requests",
+        "highlight_2": "Every verdict ships the blame evidence that produced it, so a wrong link is visible rather than trusted",
+        "highlight_3": "Calibrated against hand-judged history: bulk ports and moved code are flagged rather than blamed, because a commit that merely moved a line did not write the bug",
+        "highlight_4": "The analysis re-judges the attribution and may reject it, so a bad link cannot quietly become a prevention rule",
+        "highlight_5": "Explains why review and tests missed each defect, grounded in the culprit's own review comments and CI outcomes",
+        "highlight_6": "Records the failure mechanism in the analyst's own words, so two findings that share a mistake can be recognised even when their code and their remedy have nothing in common",
+        "highlight_7": "Waits for evidence before proposing a rule — three findings from three different pull requests — and an accepted rule lands as a steering file in the repository it applies to"
+      }
+    },
     "projects": {
       "manifest": {
         "description": "Hand over a multi-step job and let it run to completion unattended. Describe the work in plain language, paste a written spec, or upload a YAML file, then either generate a plan first to review the steps or start it straight away. Each run gets its own page showing step-by-step progress, and you can pause, resume, retry, or stop it at any point.",
