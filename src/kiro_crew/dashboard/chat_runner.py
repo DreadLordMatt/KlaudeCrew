@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import stat as stat_module
 import time
@@ -550,18 +551,22 @@ def _pinned_model_withheld(client: Any, model: str, provider: str) -> bool:
     displays the effective model, so a stale pin is inert and recovers by itself
     if entitlement returns.
 
-    Only the kiro/acp path is checked. ``slot.model`` is a bare dotted wire id
-    there — the same namespace ``session/new`` advertises — while claude_code
-    holds canonical keys against bare advertised ids, and comparing those two
-    namespaces would call every legitimate model unusable (see
-    :func:`model_is_unusable`'s namespace note). ``model_is_unusable`` itself
-    fails open on an empty advertised set, so a session that advertised nothing
-    (or a provider with no getter) leaves the pin alone: entitlement unknown is
-    not entitlement denied.
+    kiro/acp path: ``slot.model`` is a bare dotted wire id there — the same
+    namespace ``session/new`` advertises — so :func:`model_is_unusable`'s
+    direct string comparison applies. It fails open on an empty advertised
+    set, so a session that advertised nothing (or a provider with no getter)
+    leaves the pin alone: entitlement unknown is not entitlement denied.
+
+    Fork (KlaudeCrew), claude path: ``slot.model`` may be a canonical
+    registry key while the session advertises short bare values
+    ("opus[1m]", "sonnet" — see acp-client.md "Model Advertisement"), so the
+    check routes through :func:`model_registry.resolve_claude_wire_id`
+    (canonicalizes both sides) — the SAME resolver the startup withhold in
+    ``_apply_startup_model`` uses, so this read side cannot disagree with
+    the wire side about what matched. Same fail-open on an empty advertised
+    set.
     """
     if not model or model == "auto" or provider == "claude_code":
-        return False
-    if getattr(client, "is_claude_backend", False):
         return False
     getter = getattr(client, "available_models", None)
     if not callable(getter):
@@ -570,6 +575,14 @@ def _pinned_model_withheld(client: Any, model: str, provider: str) -> bool:
         advertised = advertised_model_ids(getter())
     except Exception:
         return False
+    if getattr(client, "is_claude_backend", False):
+        if os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1":
+            # Bedrock ids don't share the advertised namespace; that posture
+            # keeps its own substitution-advisory reporting.
+            return False
+        if not advertised:
+            return False
+        return model_registry.resolve_claude_wire_id(model, advertised) is None
     return model_is_unusable(model, advertised)
 
 

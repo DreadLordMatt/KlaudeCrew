@@ -6191,12 +6191,16 @@ class KiroCrewConfig:
             # config_dir_from_extra_env's regression guard), but a normal
             # `claude login` session rejects it outright ("Invalid value for
             # config option model"), which blocks every turn from spawning.
-            # There is no non-Bedrock id data in the registry to translate to
-            # instead (and AGENTS.md's model-selection rule forbids hardcoding
-            # one), so the correct default is to send NO override at all here
-            # and let the adapter/SDK fall back to the authenticated account's
-            # own default model -- exactly what happens when CLAUDE_CODE_USE_
-            # BEDROCK is unset, the common case for this fork's actual users.
+            # So on the non-Bedrock claude path the value is passed through
+            # UNRESOLVED: the session's real advertised model list only
+            # exists after session/new completes, so the wire-id resolution
+            # happens inside AcpClient._apply_startup_model (via
+            # model_registry.resolve_claude_wire_id against that session's
+            # own advertised set -- see acp-client.md "Model Advertisement").
+            # A no-match there withholds (stays on the account's default)
+            # rather than failing session init -- this is the non-explicit
+            # pick path; explicit picker switches go through
+            # chat_handlers._wire_model_id, which raises instead.
             claude_use_bedrock = os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1"
             if m and (not acp_backend or claude_use_bedrock):
                 m = (
@@ -6204,8 +6208,6 @@ class KiroCrewConfig:
                     if acp_backend
                     else model_registry.to_acp_id(m)
                 )
-            elif acp_backend:
-                m = ""
             # Thread the slot's effort into a per-model override so the kiro
             # cli.json overlay is written from it at spawn — without this, a
             # kiro cold start (or the handler's reset-then-respawn) would only

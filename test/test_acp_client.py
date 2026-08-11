@@ -6797,6 +6797,87 @@ class TestCaptureAvailableModels:
         assert c.available_models()[0]["modelId"] == "m1"
 
 
+class TestCaptureAvailableModelsFromConfigOptions:
+    """Fork (KlaudeCrew): the real claude-agent-acp wire shape, live-verified
+    (v0.66.0, a real gateway + real `claude`) -- no top-level `models` field
+    at all; the model list is one entry of `configOptions`, the same array
+    `get_valid_effort_levels()` reads for `id == "effort"`."""
+
+    def _client(self):
+        return AcpClient(acp_backend=ACP_BACKEND_CLAUDE)
+
+    def _resp(self, **extra):
+        return {
+            "sessionId": "s",
+            "configOptions": [
+                {"id": "mode", "options": [{"value": "default"}]},
+                {
+                    "id": "model",
+                    "currentValue": "opus[1m]",
+                    "options": [
+                        {"value": "default", "name": "Default (recommended)", "description": "..."},
+                        {"value": "opus[1m]", "name": "Opus (1M context)", "description": "..."},
+                        {"value": "sonnet", "name": "Sonnet", "description": "..."},
+                    ],
+                },
+                {"id": "effort", "options": [{"value": "low"}, {"value": "high"}]},
+            ],
+            **extra,
+        }
+
+    def test_captures_from_config_options_when_models_key_absent(self):
+        c = self._client()
+        c._capture_available_models(self._resp())
+        assert [m["modelId"] for m in c.available_models()] == ["default", "opus[1m]", "sonnet"]
+        assert c._resolved_model_id == "opus[1m]"
+
+    def test_names_and_descriptions_preserved(self):
+        c = self._client()
+        c._capture_available_models(self._resp())
+        sonnet = next(m for m in c.available_models() if m["modelId"] == "sonnet")
+        assert sonnet["name"] == "Sonnet"
+
+    def test_models_shape_takes_priority_when_both_present(self):
+        # Shape 1 (models.availableModels) wins if a future adapter sends both.
+        c = self._client()
+        resp = self._resp(
+            models={
+                "currentModelId": "from-models-key",
+                "availableModels": [{"modelId": "from-models-key", "name": "X"}],
+            }
+        )
+        c._capture_available_models(resp)
+        assert [m["modelId"] for m in c.available_models()] == ["from-models-key"]
+        assert c._resolved_model_id == "from-models-key"
+
+    def test_falls_back_to_config_options_when_models_availablemodels_empty(self):
+        # An empty (not absent) models.availableModels doesn't block the fallback.
+        c = self._client()
+        resp = self._resp(models={"availableModels": []})
+        c._capture_available_models(resp)
+        assert [m["modelId"] for m in c.available_models()] == ["default", "opus[1m]", "sonnet"]
+
+    def test_no_model_entry_in_config_options_leaves_empty(self):
+        c = self._client()
+        c._capture_available_models(
+            {"configOptions": [{"id": "effort", "options": [{"value": "low"}]}]}
+        )
+        assert c.available_models() == []
+        assert c._resolved_model_id is None
+
+    def test_malformed_options_list_skipped(self):
+        c = self._client()
+        c._capture_available_models(
+            {"configOptions": [{"id": "model", "options": "not-a-list"}]}
+        )
+        assert c.available_models() == []
+
+    def test_neither_shape_present_leaves_empty(self):
+        c = self._client()
+        c._capture_available_models({"sessionId": "s"})
+        assert c.available_models() == []
+
+
 def _scripted_process(lines, *, returncode=None):
     """Build a mock subprocess whose stdout.readline yields *lines* in order.
 
@@ -9690,14 +9771,60 @@ class TestModelEntitlementPreflight:
         assert client._model == "claude-opus-4.8"
 
     @pytest.mark.asyncio
-    async def test_startup_leaves_claude_backend_alone(self):
-        """The claude backend advertises BARE ids while _model is prefixed.
-
-        Comparing the two namespaces would call every legitimate model unusable,
-        so that backend keeps its own session/new substitution advisory.
+    async def test_startup_resolves_claude_model_to_advertised_spelling(self):
+        """Fork (KlaudeCrew): the claude backend advertises BARE ids while
+        _model may be a prefixed provider id (or a canonical key). Instead of
+        sending the prefixed value verbatim and hoping (the old behavior --
+        which a claude-login session rejects), _apply_startup_model resolves
+        through resolve_claude_wire_id and sends the ADVERTISED spelling.
         """
         client = self._client(
             ["claude-opus-4-8[1m]"],
+            "global.anthropic.claude-opus-4-8[1m]",
+            is_claude=True,
+        )
+        applied = []
+
+        async def _set_config_option(config_id, value):
+            applied.append((config_id, value))
+
+        client.set_config_option = _set_config_option
+
+        await client._apply_startup_model()
+
+        # Both spellings canonicalize to opus-4.8-1m -> the verbatim advertised
+        # string wins the wire.
+        assert applied == [("model", "claude-opus-4-8[1m]")]
+        assert client._model == "claude-opus-4-8[1m]"
+
+    @pytest.mark.asyncio
+    async def test_startup_withholds_unmatched_claude_model(self):
+        """No advertised match -> withhold (stay on backend default), never
+        fail session init over a stale persisted value. Non-explicit path."""
+        client = self._client(
+            ["sonnet", "haiku"],
+            "opus-4.7-1m",
+            is_claude=True,
+        )
+        applied = []
+
+        async def _set_config_option(config_id, value):
+            applied.append((config_id, value))
+
+        client.set_config_option = _set_config_option
+
+        await client._apply_startup_model()
+
+        assert applied == []
+        assert client._model == "auto"  # DEFAULT_MODEL sentinel
+
+    @pytest.mark.asyncio
+    async def test_startup_bedrock_opt_in_sends_model_verbatim(self, monkeypatch):
+        """CLAUDE_CODE_USE_BEDROCK=1: the factory already produced the correct
+        Bedrock id upstream -- send as-is, no advertised-set resolution."""
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+        client = self._client(
+            [],
             "global.anthropic.claude-opus-4-8[1m]",
             is_claude=True,
         )

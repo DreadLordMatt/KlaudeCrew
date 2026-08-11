@@ -800,7 +800,9 @@ def _entitled_kiro_models(request: web.Request, models: list[dict]) -> list[dict
     return kept
 
 
-def _cc_models(request: web.Request, configured_default: str = "") -> list[dict]:
+def _cc_models(
+    request: web.Request, configured_default: str = "", *, bedrock: bool = True
+) -> list[dict]:
     """Assemble the CC model dropdown, scoped to what the account can actually use.
 
     The live backend's advertised set is AUTHORITATIVE when present. It is the
@@ -820,6 +822,22 @@ def _cc_models(request: web.Request, configured_default: str = "") -> list[dict]
     gets nothing", and showing an empty picker on a cold dashboard would be worse
     than showing a superset.
 
+    Fork (KlaudeCrew) -- ``bedrock=False`` (a non-Bedrock ``claude login``
+    account, the fork's default posture; callers pass
+    ``CLAUDE_CODE_USE_BEDROCK == "1"``): the unfiltered-registry fallback
+    above is DISABLED, because the registry's ``claude_code`` column holds
+    only AWS Bedrock inference-profile ids -- on a non-Bedrock account every
+    one of those rows is an option that cannot succeed (the live session
+    advertises an unrelated id namespace: "opus[1m]", "sonnet", ... -- see
+    acp-client.md "Model Advertisement"). With nothing advertised this
+    returns just the ``auto`` sentinel row, which the ``api_models`` claude
+    branch reads as "cold start" and converts to a retryable 503 so the
+    frontend keeps polling instead of caching a stale one-entry picker. The
+    configured-default resurrection below is skipped by the same early
+    return; once something IS advertised, the existing advertised-membership
+    guard (``may_include``) already prevents resurrecting an un-advertised
+    id, so no extra gating is needed there.
+
     ``auto`` is always present and always FIRST. It is the configured default
     (``config.agent.model``) and a sentinel rather than a real model, so it is
     never filtered by entitlement. It leads the list because the registry's own
@@ -827,6 +845,16 @@ def _cc_models(request: web.Request, configured_default: str = "") -> list[dict]
     a specific paid model as the default in the picker.
     """
     advertised = _advertised_cc_models(request)
+    if not bedrock and not advertised:
+        return [
+            {
+                "model_name": "auto",
+                "display_name": "Auto",
+                "description": "",
+                "context_window": model_registry.model_window("auto")
+                or model_registry.REFERENCE_WINDOW_TOKENS,
+            }
+        ]
     registry_rows = model_registry.display_list("claude_code")
 
     if advertised:
@@ -929,17 +957,41 @@ def _wrap_list_models_argv(argv: list[str]) -> tuple[list[str], str | None]:
 
 
 async def api_models(request: web.Request) -> web.Response:
-    """GET /api/models — list available models from the live kiro-cli ACP session."""
-    # Fork (KlaudeCrew): kiro-cli isn't even the configured backend must never
-    # reach the spawn below either -- assume_kiro_ready (set whenever
-    # agent.acp_backend != "kiro") makes reject_if_kiro_unverified() below a
-    # pass-through, so without this separate check every 8s poll would spawn
-    # a real, unauthenticated kiro-cli and pop its own browser sign-in tab.
-    # See reject_if_not_kiro_backend()'s docstring for why this can't be
-    # folded into that guard.
+    """GET /api/models — list available models from the live ACP backend.
+
+    kiro backend: shells out to ``kiro-cli chat --list-models`` (below).
+    Fork (KlaudeCrew), claude backend: pure in-memory read of the live
+    session's advertised model list (captured at session init — see
+    acp-client.md "Model Advertisement") merged by :func:`_cc_models`.
+    No subprocess, so neither kiro guard applies on that branch.
+    """
+    # Fork (KlaudeCrew): kiro-cli isn't the configured backend -> serve the
+    # claude model list instead. This branch must come BEFORE the two kiro
+    # guards: assume_kiro_ready (set whenever agent.acp_backend != "kiro")
+    # makes reject_if_kiro_unverified() a pass-through, and without the
+    # backend check every 8s poll would spawn a real, unauthenticated
+    # kiro-cli and pop its own browser sign-in tab. See
+    # reject_if_not_kiro_backend()'s docstring for why this can't be folded
+    # into that shared guard.
     blocked = reject_if_not_kiro_backend()
     if blocked is not None:
-        return blocked
+        cfg = KiroCrewConfig.load()
+        bedrock = os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1"
+        models = _cc_models(request, configured_default=cfg.agent.model, bedrock=bedrock)
+        if not bedrock and len(models) <= 1:
+            # Only the "auto" sentinel — no live session has advertised a
+            # model list yet. 503 (not 200) is deliberate: the frontend
+            # treats any 2xx as a live success and STOPS its 8s degraded
+            # poll (modelListHealth.ts), so a 200 here would permanently
+            # strand the picker at "auto only" even after the first turn
+            # spawns a session and captures the real list. The 503 keeps
+            # the poll alive and the picker self-heals — the same retry
+            # contract the kiro branch's cold-spawn-timeout path uses.
+            return web.json_response(
+                {"error": "model list not advertised yet", "code": "cc_models_cold_start"},
+                status=503,
+            )
+        return web.json_response(models)
     # Signed-out gateways must never reach the spawn below. kiro-cli auto-opens
     # an interactive browser login for ANY subcommand run unauthenticated
     # (--no-interactive does not suppress it, and there is no opt-out env var),

@@ -20,7 +20,7 @@ from aiohttp import web
 from aiohttp.client_exceptions import ClientConnectionResetError
 
 from kiro_crew import model_registry
-from kiro_crew.acp.client import AcpModelUnavailable
+from kiro_crew.acp.client import AcpModelUnavailable, advertised_model_ids
 from kiro_crew.agent_discovery import cached_project_agent_names, warm_project_agent_names
 from kiro_crew.config.loader import (
     KiroCrewConfig,
@@ -2527,10 +2527,21 @@ def _model_rejected_reason(model_name: str) -> str | None:
     if not model_name or model_name == "auto":
         return None
     try:
-        provider = KiroCrewConfig.load().agent.provider
+        cfg = KiroCrewConfig.load()
+        provider = cfg.agent.provider
+        acp_backend = cfg.agent.acp_backend
     except Exception:  # pragma: no cover - config load is resilient
         provider = ""
+        acp_backend = ""
     if provider == "claude_code":
+        return None
+    # Fork (KlaudeCrew): on the claude ACP backend, canonical registry keys
+    # are valid picker input -- _wire_model_id resolves them against the live
+    # advertised set (resolve_claude_wire_id) and rejects a no-match with its
+    # own, stronger model_unavailable error. Only the kiro wire needs this
+    # front-door canonical-key rejection (kiro's set_model takes only its own
+    # dotted ids).
+    if provider == "acp" and acp_backend != "kiro":
         return None
     if model_registry.is_canonical_key(model_name):
         return (
@@ -2548,8 +2559,19 @@ def _wire_model_id(provider: AcpProvider, model_name: str) -> str:
     accepts the backend's own ids — two namespaces. Mirrors the normalisation the
     warm-pool post-claim switch does in ``SessionManager``: kiro wants the bare
     dotted id via ``to_acp_id`` (which translates canonical keys and passes
-    kiro's own ids through unchanged), the claude backend wants the
-    ``global.anthropic.*`` id.
+    kiro's own ids through unchanged).
+
+    Fork (KlaudeCrew), claude backend: the wire value is resolved against the
+    LIVE session's advertised set (``resolve_claude_wire_id`` — see
+    acp-client.md "Model Advertisement"), never fabricated from the registry's
+    Bedrock-only ``claude_code`` column — a non-Bedrock ``claude login``
+    session rejects those ids outright. The Bedrock translation survives
+    behind the same ``CLAUDE_CODE_USE_BEDROCK=1`` opt-in the provider
+    factory uses. A pick with NO verified advertised match raises
+    ``AcpModelUnavailable`` (an explicit user choice must be rejected loudly,
+    never silently swapped — the same contract kiro's ``set_model`` pre-flight
+    enforces); the caller (`_try_live_model_switch`) already propagates that
+    to the handler's 4xx path.
 
     Returns "" when the change cannot be expressed as a ``set_model`` on this
     backend, which tells the caller to fall back to a session reset.
@@ -2560,7 +2582,15 @@ def _wire_model_id(provider: AcpProvider, model_name: str) -> str:
     if provider.is_claude_backend:
         # The claude backend has no id meaning "let the server choose", so
         # returning to default needs a reset.
-        return "" if is_default else model_registry.to_provider_id(model_name, "claude_code")
+        if is_default:
+            return ""
+        if os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1":
+            return model_registry.to_provider_id(model_name, "claude_code")
+        advertised_ids = advertised_model_ids(provider.available_models())
+        wire = model_registry.resolve_claude_wire_id(model_name, advertised_ids)
+        if wire is not None:
+            return wire
+        raise AcpModelUnavailable(model_name, advertised_ids)
     if is_default:
         # kiro DOES express Auto as a real model id — but only switch to it when
         # this session's backend actually advertised it.

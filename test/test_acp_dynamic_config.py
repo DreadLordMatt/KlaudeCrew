@@ -77,6 +77,46 @@ class TestHandleConfigOptionUpdate:
         client._handle_config_option_update(msg)
         assert client._acp_config_options == []
 
+    def test_refreshes_available_models_from_notification(self):
+        # Fork (KlaudeCrew): a live config_option_update also refreshes the
+        # model list, mirroring how it already refreshes effort levels.
+        client = AcpClient()
+        msg = JsonRpcMessage(
+            method="session/update",
+            params={
+                "update": {
+                    "sessionUpdate": "config_option_update",
+                    "configOptions": [
+                        {
+                            "id": "model",
+                            "currentValue": "haiku",
+                            "options": [{"value": "haiku", "name": "Haiku"}],
+                        },
+                    ],
+                }
+            },
+        )
+        with patch.object(client, "_sync_effort_levels"):
+            client._handle_config_option_update(msg)
+        assert [m["modelId"] for m in client.available_models()] == ["haiku"]
+        assert client._resolved_model_id == "haiku"
+
+    def test_update_without_model_entry_leaves_prior_models_intact(self):
+        client = AcpClient()
+        client._available_models = [{"modelId": "sonnet", "name": "Sonnet", "description": ""}]
+        msg = JsonRpcMessage(
+            method="session/update",
+            params={
+                "update": {
+                    "sessionUpdate": "config_option_update",
+                    "configOptions": [{"id": "effort", "options": [{"value": "low"}]}],
+                }
+            },
+        )
+        with patch.object(client, "_sync_effort_levels"):
+            client._handle_config_option_update(msg)
+        assert [m["modelId"] for m in client.available_models()] == ["sonnet"]
+
 
 class TestGetValidEffortLevels:
     def test_extracts_effort_levels_in_order(self):

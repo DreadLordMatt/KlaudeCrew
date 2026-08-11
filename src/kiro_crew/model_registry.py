@@ -572,6 +572,36 @@ def canonicalize_for_provider(stored_model: str, provider: str) -> str:
     return from_provider_id(stored_model, provider)
 
 
+def resolve_claude_wire_id(preferred: str, advertised: list[str]) -> str | None:
+    """Match *preferred* against a claude session's live-advertised model ids.
+
+    Returns the VERBATIM string from *advertised* whose canonical form (via
+    :func:`canonicalize_for_provider`) matches *preferred*'s -- never a
+    fabricated or transformed id. This is the one place that turns a canonical
+    registry key (e.g. an old persisted ``sonnet-4.6-1m`` slot value or the
+    configured ``agent.model`` default) OR an already-bare wire value (e.g.
+    ``"sonnet"``, picked fresh from a live picker) into exactly what
+    ``session/set_config_option("model", ...)`` should receive.
+
+    ``advertised`` is the live claude-agent-acp session's own reported model
+    ids (``AcpClient.available_models()`` / ``_advertised_model_ids()``) --
+    NOT the static (Bedrock-only) ``model_registry.json`` ``claude_code``
+    column, which is a different, mutually-incompatible id namespace (see
+    ``docs/system-specs/modules/acp-client.md`` "Model translation is
+    Bedrock-gated"). Returns ``None`` on no match / empty *advertised* --
+    callers decide fail-closed (raise ``AcpModelUnavailable`` for an explicit
+    user pick) vs. fail-open (withhold silently for a non-explicit default),
+    this function never guesses.
+    """
+    if not preferred:
+        return None
+    target = canonicalize_for_provider(preferred, "claude_code")
+    for wire in advertised:
+        if wire and canonicalize_for_provider(wire, "claude_code") == target:
+            return wire
+    return None
+
+
 def supports_effort(canonical_or_id: str) -> bool | None:
     """Registry-declared effort support for a model, or None if not declared.
 
