@@ -107,6 +107,10 @@ class TestConfigParsing:
         cfg_path = tmp_path / "config.json"
         cfg_path.write_text(json.dumps(payload), encoding="utf-8")
         monkeypatch.setattr(loader, "config_path", lambda: cfg_path)
+        # Isolate from host config.local.json which could deep-merge unexpected
+        # values on macOS developer hosts.
+        monkeypatch.setattr(loader, "config_local_path", lambda: tmp_path / "config.local.json")
+        loader._invalidate_config_cache()
         return loader.KiroCrewConfig.load()
 
     def test_defaults_to_true_when_absent(self):
