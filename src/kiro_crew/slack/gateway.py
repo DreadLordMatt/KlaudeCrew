@@ -5436,7 +5436,13 @@ class GatewayOrchestrator:
             dashboard_url=self._cfg.dashboard.url,
             slack_client=self.slack,
             owner_id=self._owner_id,
-            assume_kiro_ready=self._test_mode,
+            # Fork (KlaudeCrew): the kiro-cli first-run gate is meaningless
+            # when kiro-cli isn't the configured backend -- bypass it rather
+            # than have KiroPrerequisiteService spawn `kiro-cli --version`
+            # probes for a binary the operator never installed. Claude
+            # readiness is checked separately -- see check_claude_backend_ready
+            # above (loud, non-blocking).
+            assume_kiro_ready=self._test_mode or self._cfg.agent.acp_backend != "kiro",
         )
         # When --port auto was requested, read the OS-assigned ephemeral port
         # back from the runner so subsequent URL building and the READY line
@@ -5476,7 +5482,13 @@ class GatewayOrchestrator:
             owner_id=self._owner_id,
             local_only=self._local_only,
             configured_host=configured_host,
-            assume_kiro_ready=self._test_mode,
+            # Fork (KlaudeCrew): the kiro-cli first-run gate is meaningless
+            # when kiro-cli isn't the configured backend -- bypass it rather
+            # than have KiroPrerequisiteService spawn `kiro-cli --version`
+            # probes for a binary the operator never installed. Claude
+            # readiness is checked separately -- see check_claude_backend_ready
+            # above (loud, non-blocking).
+            assume_kiro_ready=self._test_mode or self._cfg.agent.acp_backend != "kiro",
         )
         if dashboard_port == 0 and self._dashboard_runner is not None:
             addresses = self._dashboard_runner.addresses
@@ -6371,6 +6383,16 @@ class GatewayOrchestrator:
         from kiro_crew.session import cleanup_orphaned_sessions
 
         cleanup_orphaned_sessions()
+
+        # Fork (KlaudeCrew): loud, non-fatal check that the claude backend is
+        # actually resolvable -- see klaude/prerequisite.py. kiro-cli's own
+        # gate (KiroPrerequisiteService) isn't even constructed on this path
+        # (see assume_kiro_ready below), so this is the only signal an
+        # operator gets before the first chat turn fails.
+        if self._cfg.agent.acp_backend != "kiro":
+            from kiro_crew.klaude.prerequisite import check_claude_backend_ready
+
+            check_claude_backend_ready()
 
         # Fill the sandbox probe cache BEFORE any on-loop spawn path can reach
         # detect_backend(). Waiting (off-loop) rather than firing-and-forgetting
