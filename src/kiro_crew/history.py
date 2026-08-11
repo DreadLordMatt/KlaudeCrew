@@ -481,6 +481,7 @@ def append_if_absent_off_loop(
     content: str,
     *,
     agent: str | None = None,
+    cls: str = "",
 ) -> None:
     """Idempotent, loop-safe variant of :func:`append_off_loop`.
 
@@ -497,7 +498,7 @@ def append_if_absent_off_loop(
     """
 
     def _do() -> None:
-        conversation_log.append_if_absent(key, role, content, agent=agent)
+        conversation_log.append_if_absent(key, role, content, agent=agent, cls=cls)
 
     try:
         loop = asyncio.get_running_loop()
@@ -1743,8 +1744,14 @@ class ConversationLog:
         source_user: str | None = None,
         agent: str | None = None,
         tab_id: str | None = None,
+        cls: str = "",
     ) -> None:
         """Append a message with optional provenance to the session log.
+
+        *cls* persists the message's presentation class. The in-memory slot
+        carries one (``_ChatSlot.append``) but this durable copy had nowhere to
+        put it, so any class-borne distinction silently vanished the moment a
+        session's rows had to be replayed from disk after a restart.
 
         If the session file does not yet exist, it will be created with an
         initial metadata line.  When *agent* is supplied, the agent name is
@@ -1779,6 +1786,7 @@ class ConversationLog:
             msg: dict = {
                 "role": role,
                 "content": _redact_at_write_boundary(role, content),
+                **({"cls": cls} if cls else {}),
                 # Strictly after the row already on disk, so the pair written by
                 # one turn stays ordered on a host whose clock cannot separate
                 # them (see monotonic_transcript_ts). Consulting the file here is
@@ -1830,6 +1838,7 @@ class ConversationLog:
         *,
         agent: str | None = None,
         tab_id: str | None = None,
+        cls: str = "",
     ) -> bool:
         """Append a message only if an identical one is not already persisted.
 
@@ -1862,7 +1871,7 @@ class ConversationLog:
             # Reentrant: ``append`` re-enters ``_locked`` for the same key on
             # this thread (RLock + refcounted flock), so the write stays inside
             # the critical section we already hold.
-            self.append(key, role, content, agent=agent, tab_id=tab_id)
+            self.append(key, role, content, agent=agent, tab_id=tab_id, cls=cls)
             return True
 
     def recent(
