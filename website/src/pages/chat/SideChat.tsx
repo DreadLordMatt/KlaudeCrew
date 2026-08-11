@@ -7,7 +7,7 @@ import { sideClose, sideOptimisticAppend, sideOptimisticRollback, sseSideQueue, 
 import QueueStack from '../../components/QueueStack'
 import ChatMessageList from '../../app-sdk/ChatMessageList'
 import FollowUpBar from '../../components/FollowUpBar'
-import { deriveFollowUpOptions } from '../../utils/deriveFollowUpOptions'
+import { deriveFollowUpOptions } from '../../app-sdk/protocol'
 import BusySendButton, { useBusySendMode } from '../../components/BusySendButton'
 import type { SideMessage } from '../../store/chatSlice'
 import type { ChatMessage } from '../../types'

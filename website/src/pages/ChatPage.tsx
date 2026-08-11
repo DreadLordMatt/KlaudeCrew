@@ -154,7 +154,7 @@ import {
   sourceSelection,
   withSourceSelection,
 } from '../utils/pullRequestLinks'
-import { deriveFollowUpOptions } from '../utils/deriveFollowUpOptions'
+import { deriveFollowUpOptions } from '../app-sdk/protocol'
 import OverlayDrawer from '../components/OverlayDrawer'
 import { loadChatConfig, CONTENT_WIDTH, type ChatConfig } from './chat/ChatSettings'
 import SessionFlyout, { TOGGLE_RECT } from './chat/SessionFlyout'

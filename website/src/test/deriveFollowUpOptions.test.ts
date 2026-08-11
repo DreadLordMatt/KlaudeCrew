@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { ChatMessage } from '../types'
-import { deriveFollowUpOptions } from '../utils/deriveFollowUpOptions'
+import { deriveFollowUpOptions } from '../app-sdk/protocol'
 
 const user = (content: string): ChatMessage => ({ role: 'user', content, cls: 'msg msg-u' })
 const assistant = (content: string): ChatMessage => ({ role: 'assistant', content, cls: 'msg msg-a' })
