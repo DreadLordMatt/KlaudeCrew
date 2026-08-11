@@ -5340,13 +5340,13 @@
       "no_matches": "Aucun résultat"
     },
     "modelEffortDropdown": {
-      "default_for_agent": "Par défaut pour {{agent}}",
+      "default_for_agent": "Modèle par défaut pour <agent/>",
       "filter_models": "Filtrer les modèles",
       "model_list": "Liste des modèles",
       "models": "Modèles",
-      "pin_model_unavailable": "{{model}} n'est pas proposé pour le moment",
+      "pin_model_unavailable": "<model/> n’est pas proposé pour le moment",
       "reasoning": "Raisonnement",
-      "set_default_for_agent": "Définir {{model}} par défaut pour {{agent}}",
+      "set_default_for_agent": "Définir <model/> comme modèle par défaut pour <agent/>",
       "set_default_for_new_sessions": "Repli global pour les nouvelles sessions…",
       "type_to_filter": "Saisir pour filtrer…"
     },

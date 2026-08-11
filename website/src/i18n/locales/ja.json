@@ -5182,13 +5182,13 @@
       "no_matches": "一致するものがありません"
     },
     "modelEffortDropdown": {
-      "default_for_agent": "{{agent}} のデフォルト",
+      "default_for_agent": "<agent/> のデフォルトモデル",
       "filter_models": "モデルをフィルター",
       "model_list": "モデルリスト",
       "models": "モデル",
-      "pin_model_unavailable": "{{model}} は現在提供されていません",
+      "pin_model_unavailable": "<model/> は現在提供されていません",
       "reasoning": "推論",
-      "set_default_for_agent": "{{model}} を {{agent}} の既定に設定",
+      "set_default_for_agent": "<model/> を <agent/> のデフォルトモデルに設定",
       "set_default_for_new_sessions": "新規セッションのグローバルフォールバック…",
       "type_to_filter": "フィルターするには入力…"
     },

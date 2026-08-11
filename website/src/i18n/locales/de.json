@@ -5261,13 +5261,13 @@
       "no_matches": "Keine Treffer"
     },
     "modelEffortDropdown": {
-      "default_for_agent": "Standard für {{agent}}",
+      "default_for_agent": "Standardmodell für <agent/>",
       "filter_models": "Modelle filtern",
       "model_list": "Modellliste",
       "models": "Modelle",
-      "pin_model_unavailable": "{{model}} wird derzeit nicht angeboten",
+      "pin_model_unavailable": "<model/> wird derzeit nicht angeboten",
       "reasoning": "Reasoning",
-      "set_default_for_agent": "{{model}} als Standard für {{agent}} festlegen",
+      "set_default_for_agent": "<model/> als Standardmodell für <agent/> festlegen",
       "set_default_for_new_sessions": "Globaler Fallback für neue Sitzungen…",
       "type_to_filter": "Zum Filtern tippen…"
     },

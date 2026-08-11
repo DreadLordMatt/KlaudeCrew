@@ -5419,13 +5419,13 @@
       "no_matches": "Совпадений нет"
     },
     "modelEffortDropdown": {
-      "default_for_agent": "По умолчанию для {{agent}}",
+      "default_for_agent": "Модель по умолчанию для <agent/>",
       "filter_models": "Фильтр моделей",
       "model_list": "Список моделей",
       "models": "Модели",
-      "pin_model_unavailable": "{{model}} сейчас не предлагается",
+      "pin_model_unavailable": "<model/> сейчас не предлагается",
       "reasoning": "Рассуждения",
-      "set_default_for_agent": "Использовать {{model}} по умолчанию для {{agent}}",
+      "set_default_for_agent": "Сделать <model/> моделью по умолчанию для <agent/>",
       "set_default_for_new_sessions": "Глобальный запасной вариант для новых сессий…",
       "type_to_filter": "Введите для фильтрации…"
     },

@@ -5182,13 +5182,13 @@
       "no_matches": "일치 항목 없음"
     },
     "modelEffortDropdown": {
-      "default_for_agent": "{{agent}} 기본값",
+      "default_for_agent": "<agent/>의 기본 모델",
       "filter_models": "모델 필터",
       "model_list": "모델 목록",
       "models": "모델",
-      "pin_model_unavailable": "{{model}}은(는) 현재 제공되지 않습니다",
+      "pin_model_unavailable": "<model/>은(는) 현재 제공되지 않습니다",
       "reasoning": "추론",
-      "set_default_for_agent": "{{model}}을(를) {{agent}}의 기본값으로 설정",
+      "set_default_for_agent": "<model/>을(를) <agent/>의 기본 모델로 설정",
       "set_default_for_new_sessions": "새 세션의 전역 대체 값…",
       "type_to_filter": "입력하여 필터…"
     },

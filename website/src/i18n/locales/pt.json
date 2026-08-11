@@ -5340,13 +5340,13 @@
       "no_matches": "Nenhuma correspondência"
     },
     "modelEffortDropdown": {
-      "default_for_agent": "Padrão de {{agent}}",
+      "default_for_agent": "Modelo padrão de <agent/>",
       "filter_models": "Filtrar modelos",
       "model_list": "Lista de modelos",
       "models": "Modelos",
-      "pin_model_unavailable": "{{model}} não está sendo oferecido no momento",
+      "pin_model_unavailable": "<model/> não está sendo oferecido no momento",
       "reasoning": "Raciocínio",
-      "set_default_for_agent": "Definir {{model}} como padrão para {{agent}}",
+      "set_default_for_agent": "Definir <model/> como modelo padrão de <agent/>",
       "set_default_for_new_sessions": "Reserva global para novas sessões…",
       "type_to_filter": "Digite para filtrar…"
     },
