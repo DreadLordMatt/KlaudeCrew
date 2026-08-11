@@ -37,6 +37,17 @@ _RESOLVE_TARGET = "kiro_crew.acp.client._resolve_kiro_bin_for_spawn"
 _FAKE_KIRO_BIN = "/usr/bin/kiro-cli"
 
 
+@pytest.fixture(autouse=True)
+def _kiro_is_the_backend():
+    """This whole file is about the kiro-cli spawn sites specifically, so
+    pin acp_backend="kiro" for every test here -- otherwise fork (KlaudeCrew)
+    reject_if_not_kiro_backend() would 503 every case with kiro_not_backend
+    before the signed-out/ready gates under test ever run."""
+    cfg = SimpleNamespace(agent=SimpleNamespace(acp_backend="kiro"))
+    with patch("kiro_crew.config.loader.KiroCrewConfig.load", return_value=cfg):
+        yield
+
+
 class _SignedOutKiroPrerequisiteService(KiroPrerequisiteService):
     """Not-ready latch: the guard's ``isinstance`` check must still accept it."""
 

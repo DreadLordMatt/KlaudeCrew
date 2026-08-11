@@ -6181,12 +6181,31 @@ class KiroCrewConfig:
             # accepts its own advertised ids, so resolve through the claude_code
             # provider column (which deliberately folds kiro-only aliases like
             # Haiku onto models the claude backend serves).
-            if m:
+            #
+            # Fork (KlaudeCrew): the claude_code column is Bedrock-only -- every
+            # non-empty entry in model_registry.json is an AWS cross-region
+            # inference-profile id (e.g. "global.anthropic.claude-opus-4-8[1m]"),
+            # never a plain Anthropic API model name. That's fine for an
+            # operator running claude-agent-acp against Bedrock
+            # (CLAUDE_CODE_USE_BEDROCK=1 -- see test_spawn_forwards_claude_
+            # config_dir_from_extra_env's regression guard), but a normal
+            # `claude login` session rejects it outright ("Invalid value for
+            # config option model"), which blocks every turn from spawning.
+            # There is no non-Bedrock id data in the registry to translate to
+            # instead (and AGENTS.md's model-selection rule forbids hardcoding
+            # one), so the correct default is to send NO override at all here
+            # and let the adapter/SDK fall back to the authenticated account's
+            # own default model -- exactly what happens when CLAUDE_CODE_USE_
+            # BEDROCK is unset, the common case for this fork's actual users.
+            claude_use_bedrock = os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1"
+            if m and (not acp_backend or claude_use_bedrock):
                 m = (
                     model_registry.to_provider_id(m, "claude_code")
                     if acp_backend
                     else model_registry.to_acp_id(m)
                 )
+            elif acp_backend:
+                m = ""
             # Thread the slot's effort into a per-model override so the kiro
             # cli.json overlay is written from it at spawn — without this, a
             # kiro cold start (or the handler's reset-then-respawn) would only

@@ -25,7 +25,10 @@ import kiro_crew.dashboard.handlers as _h
 from kiro_crew.acp.client import _resolve_kiro_bin_for_spawn
 from kiro_crew.config.paths import kiro_agents_dir
 from kiro_crew.dashboard.handlers import kiro_usage_api
-from kiro_crew.dashboard.kiro_readiness import reject_if_kiro_unverified
+from kiro_crew.dashboard.kiro_readiness import (
+    reject_if_kiro_unverified,
+    reject_if_not_kiro_backend,
+)
 from kiro_crew.dashboard.session_memory import SessionMemorySampler
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.executors import subprocess_executor
@@ -871,6 +874,13 @@ async def _fetch_usage_bg() -> None:
 
 async def api_sessions_usage(request: web.Request) -> web.Response:
     """GET /api/sessions/usage — cached kiro credit usage (background refresh)."""
+    # Fork (KlaudeCrew): same reasoning as api_models's guard -- kiro-cli not
+    # being the configured backend must block this BEFORE the assume_ready
+    # pass-through below, or every 30s poll spawns a real unauthenticated
+    # kiro-cli and pops its own browser sign-in tab.
+    blocked = reject_if_not_kiro_backend()
+    if blocked is not None:
+        return blocked
     # Same browser-storm guard as api_models: the /usage scrape shells out to
     # `kiro-cli chat --no-interactive ... /usage`, which auto-opens a browser
     # login while signed out. This endpoint is polled every 30s by the top-bar

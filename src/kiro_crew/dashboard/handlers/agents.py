@@ -54,7 +54,10 @@ from kiro_crew.dashboard.handlers._shared import (
     apply_skill_mapping,
 )
 from kiro_crew.dashboard.handlers.discover import _redact_external
-from kiro_crew.dashboard.kiro_readiness import reject_if_kiro_unverified
+from kiro_crew.dashboard.kiro_readiness import (
+    reject_if_kiro_unverified,
+    reject_if_not_kiro_backend,
+)
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.executors import discovery_executor, maintenance_executor, subprocess_executor
 from kiro_crew.sandbox import (
@@ -927,6 +930,16 @@ def _wrap_list_models_argv(argv: list[str]) -> tuple[list[str], str | None]:
 
 async def api_models(request: web.Request) -> web.Response:
     """GET /api/models — list available models from the live kiro-cli ACP session."""
+    # Fork (KlaudeCrew): kiro-cli isn't even the configured backend must never
+    # reach the spawn below either -- assume_kiro_ready (set whenever
+    # agent.acp_backend != "kiro") makes reject_if_kiro_unverified() below a
+    # pass-through, so without this separate check every 8s poll would spawn
+    # a real, unauthenticated kiro-cli and pop its own browser sign-in tab.
+    # See reject_if_not_kiro_backend()'s docstring for why this can't be
+    # folded into that guard.
+    blocked = reject_if_not_kiro_backend()
+    if blocked is not None:
+        return blocked
     # Signed-out gateways must never reach the spawn below. kiro-cli auto-opens
     # an interactive browser login for ANY subcommand run unauthenticated
     # (--no-interactive does not suppress it, and there is no opt-out env var),

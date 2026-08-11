@@ -11,10 +11,24 @@ The ACP layer spans **five** modules: the legacy per-session client (`acp/client
 `["claude", "kiro"]`, **default `"claude"`**) is read by
 `KiroCrewConfig.create_provider_factory()`, which passes
 `ACP_BACKEND_CLAUDE` unless the operator opts out with `"kiro"`. The factory
-also branches model translation (`to_provider_id(m, "claude_code")` on claude
-vs `to_acp_id(m)` on kiro) and injects `CLAUDE_CONFIG_DIR` (below) on the
-claude path. Upstream keeps this seam dormant; this fork is the "internal
+also branches model translation and injects `CLAUDE_CONFIG_DIR` (below) on
+the claude path. Upstream keeps this seam dormant; this fork is the "internal
 companion" that re-registers it.
+
+**Model translation is Bedrock-gated.** `model_registry.json`'s `claude_code`
+provider column holds ONLY AWS Bedrock cross-region inference-profile ids
+(e.g. `global.anthropic.claude-opus-4-8[1m]`) — there is no plain Anthropic
+API model-name data in the registry for this column. A `claude login`
+session (the normal case for this fork's users) rejects those ids outright
+(`Invalid value for config option model`), which blocks every turn from
+spawning. So `to_provider_id(m, "claude_code")` is applied ONLY when
+`CLAUDE_CODE_USE_BEDROCK=1` is set in the gateway's own environment (which
+`_spawn`'s `env = {**os.environ}` then forwards to the adapter subprocess
+unchanged, matching what the operator's own Bedrock credentials expect) —
+otherwise no model override is sent at all, and `_apply_startup_model` skips
+`session/set_config_option`, leaving the authenticated account's own default
+model in effect. This mirrors `to_acp_id(m)` on the kiro path, which is
+unaffected and always applies.
 
 - `""` (default): `kiro-cli acp --agent <name>` (resolved by `_resolve_kiro_bin`). Per-session kiro settings are layered in via the workspace overlay `<work_dir>/.kiro/settings/cli.json` (written by `AcpProvider`, not the client): reasoning **effort** (`chat.modelDefaults`) and **MCP Tool Search** (`toolSearch.enabled` + zeroed thresholds, gated by `agent.tool_search`, default on) — see providers.md.
 - `"claude"` (`ACP_BACKEND_CLAUDE`): `claude-agent-acp` (resolved by `_resolve_claude_acp_bin` → `list[str] | None`). Resolution order: `CLAUDE_AGENT_ACP_BIN` env var, then the **vendored copy** (`_resolve_vendored_claude_acp` — `<node_modules>/@agentclientprotocol/claude-agent-acp/dist/index.js` found under the package's `_vendor/node_modules` from the distribution bundle, the sibling `KiroCrewWebsite/node_modules` in a source checkout, or `KIROCREW_PROJECT_DIR`; needs no global npm install or network — matters on hosts that have no package-registry token at gateway runtime), then `mise which claude-agent-acp` (respects MISE_DATA_DIR and all mise config), then `~/.local/share/mise/installs/node/*/bin/claude-agent-acp` (direct glob fallback), then augmented PATH (`env.augmented_path` — mise shims, `~/.npm-packages/bin`, `~/.volta/bin`, `/opt/homebrew/bin`, plus globbed nvm/fnm node bins via `_node_version_manager_bins`, so a non-login launchd/systemd gateway also finds globally-installed binaries). The adapter is vendored into the distribution bundle and the pip build by `setup.py` (`_vendor_acp_into_pkg` → `kiro_crew/_vendor/node_modules`), so every install method ships it without asking the user to `npm i -g`. Vendoring copies the adapter **plus its full transitive dependency closure** (`_acp_dependency_closure` walks `dependencies`/`optionalDependencies` from the resolved website `node_modules`, ~96 flat top-level packages) — npm hoists deps like `@agentclientprotocol/sdk` flat, so copying only the adapter package crashes the ESM loader with `ERR_MODULE_NOT_FOUND`. `_resolve_vendored_claude_acp` accepts a root only when the hoisted dependency marker `@agentclientprotocol/sdk` is present alongside the entry, so an incomplete vendored copy is skipped in favour of a complete one instead of being spawned and crashed. For scripts under mise installs, returns `[node_binary, script_path]` to bypass `#!/usr/bin/env node` shebang resolution which fails in non-interactive daemon contexts. For standalone binaries, returns `[binary_path]`. Pre-spawn the client writes `<work_dir>/.claude/settings.local.json` with `defaultMode: default` so the adapter routes every tool decision back to KiroCrew via `session/request_permission`. This makes claude-agent-acp participate in the same approve / trust_reads / trust / yolo protocol as kiro-cli — dashboard, subagents, channel agents, cron, and heartbeat all share the path. KiroCrew still enforces per-tool security via `HooksConfig.auto_deny_tools` (evaluated by `HookManager.on_tool_call` in `hooks.py`) on every `session/request_permission` event. The subprocess env also carries `CLAUDE_CONFIG_DIR=<config_dir>/cc-config` (isolated config root, distinct from the project-scope `<work_dir>/.claude/settings.local.json` which stays) so the adapter's `SettingsManager` and the SDK read KiroCrew's seeded settings (creds/models kept, plugins stripped) instead of the user's global `~/.claude` — see claude-code-provider.md "Config Isolation" (the "Standalone provider — removed" record). Disable via `KIROCREW_CC_ISOLATE=0`. The env also carries `CLAUDE_CODE_EXECUTABLE` (claude backend only, set in `_spawn` when unset): the adapter delegates the model turn to `@anthropic-ai/claude-agent-sdk`, which needs a per-platform native Claude binary (~250 MB each) shipped as npm `optionalDependencies` that the website install omits — so the vendored closure does **not** include it and the SDK fails `session/new` with `Claude native binary not found for <platform>`. The SDK does **not** search PATH for `claude` itself (so the host merely having the external agent CLI installed is not enough), and bundling a quarter-GB binary per platform is not viable; instead `_resolve_claude_code_executable` finds an existing `claude` (`CLAUDE_CODE_EXECUTABLE` override → `mise which claude` → augmented PATH incl. `~/.toolbox/bin`, where a managed distribution may ship the external agent CLI) and the adapter forwards it to the SDK as `pathToClaudeCodeExecutable` (no version check). If none is found the var is left unset (with a warning) so the adapter's native-binary error surfaces rather than a guessed bad path; an explicit operator-set value always wins.
@@ -424,6 +438,17 @@ Subprocess lifecycle:
   carry that error. These sites authorize on a **freshly verified** probe
   (`verified_ready`, 30s ceiling), never the bare latch — a stale `ready=True`
   would green-light exactly the signed-out spawn the gate exists to prevent.
+  Fork (KlaudeCrew): `slack/gateway.py` sets `assume_kiro_ready` whenever
+  `agent.acp_backend != "kiro"` so the first-run SPA gate doesn't block a
+  claude-backend install — but that also makes `verified_ready()` an
+  unconditional pass-through, which would otherwise let these two spawn
+  sites reach a REAL, unauthenticated `kiro-cli` and pop its browser sign-in
+  tab on every poll even though kiro-cli isn't the configured backend at
+  all. `reject_if_not_kiro_backend()` (`kiro_readiness.py`) is a SEPARATE
+  guard, called BEFORE `reject_if_kiro_unverified()` at both sites only —
+  deliberately not folded into that shared function, whose other three
+  callers (the destructive reruns, the OpenAI-compat endpoint) drive the
+  normal ACP session/turn machinery and must keep working on any backend.
 - **`AcpAuthRequired` is the authoritative logout signal.** Readiness is probed
   at gateway start and on explicit user action only, so a mid-session sign-out is
   discovered when the ACP attempt fails, not by a poll. `AcpRuntime`/`AcpClient`
