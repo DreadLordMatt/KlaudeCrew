@@ -2224,7 +2224,35 @@ class AcpClient:
             self._model = DEFAULT_MODEL
             return
         if self._is_claude:
-            await self.set_config_option("model", self._model)
+            # Fork (KlaudeCrew): resolve the configured/persisted value against
+            # THIS session's just-captured advertised set (session/new ran two
+            # steps ago -- see _capture_available_models / acp-client.md "Model
+            # Advertisement") and send the verbatim advertised wire id. On
+            # Bedrock the registry translation already produced the correct id
+            # upstream in the provider factory, so send as-is. A no-match
+            # withholds, mirroring the kiro branch above: this is the
+            # non-explicit path, and failing session init over a stale
+            # persisted value would be strictly worse than the account default.
+            if os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1":
+                await self.set_config_option("model", self._model)
+            else:
+                wire = model_registry.resolve_claude_wire_id(
+                    self._model, self._advertised_model_ids()
+                )
+                if wire is None:
+                    _withheld_log, _ = redact_exfiltration_urls(str(self._model))
+                    _withheld_log, _ = redact_credentials(_withheld_log)
+                    logger.warning(
+                        "ACP model %s has no match in this session's advertised "
+                        "set; staying on the backend default %s (advertised: %s)",
+                        _withheld_log,
+                        self._resolved_model_id or DEFAULT_MODEL,
+                        ", ".join(self._advertised_model_ids()),
+                    )
+                    self._model = DEFAULT_MODEL
+                    return
+                await self.set_config_option("model", wire)
+                self._model = wire
         else:
             await self._send_request(
                 METHOD_SET_MODEL,

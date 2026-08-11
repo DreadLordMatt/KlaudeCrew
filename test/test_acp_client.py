@@ -9771,14 +9771,60 @@ class TestModelEntitlementPreflight:
         assert client._model == "claude-opus-4.8"
 
     @pytest.mark.asyncio
-    async def test_startup_leaves_claude_backend_alone(self):
-        """The claude backend advertises BARE ids while _model is prefixed.
-
-        Comparing the two namespaces would call every legitimate model unusable,
-        so that backend keeps its own session/new substitution advisory.
+    async def test_startup_resolves_claude_model_to_advertised_spelling(self):
+        """Fork (KlaudeCrew): the claude backend advertises BARE ids while
+        _model may be a prefixed provider id (or a canonical key). Instead of
+        sending the prefixed value verbatim and hoping (the old behavior --
+        which a claude-login session rejects), _apply_startup_model resolves
+        through resolve_claude_wire_id and sends the ADVERTISED spelling.
         """
         client = self._client(
             ["claude-opus-4-8[1m]"],
+            "global.anthropic.claude-opus-4-8[1m]",
+            is_claude=True,
+        )
+        applied = []
+
+        async def _set_config_option(config_id, value):
+            applied.append((config_id, value))
+
+        client.set_config_option = _set_config_option
+
+        await client._apply_startup_model()
+
+        # Both spellings canonicalize to opus-4.8-1m -> the verbatim advertised
+        # string wins the wire.
+        assert applied == [("model", "claude-opus-4-8[1m]")]
+        assert client._model == "claude-opus-4-8[1m]"
+
+    @pytest.mark.asyncio
+    async def test_startup_withholds_unmatched_claude_model(self):
+        """No advertised match -> withhold (stay on backend default), never
+        fail session init over a stale persisted value. Non-explicit path."""
+        client = self._client(
+            ["sonnet", "haiku"],
+            "opus-4.7-1m",
+            is_claude=True,
+        )
+        applied = []
+
+        async def _set_config_option(config_id, value):
+            applied.append((config_id, value))
+
+        client.set_config_option = _set_config_option
+
+        await client._apply_startup_model()
+
+        assert applied == []
+        assert client._model == "auto"  # DEFAULT_MODEL sentinel
+
+    @pytest.mark.asyncio
+    async def test_startup_bedrock_opt_in_sends_model_verbatim(self, monkeypatch):
+        """CLAUDE_CODE_USE_BEDROCK=1: the factory already produced the correct
+        Bedrock id upstream -- send as-is, no advertised-set resolution."""
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+        client = self._client(
+            [],
             "global.anthropic.claude-opus-4-8[1m]",
             is_claude=True,
         )

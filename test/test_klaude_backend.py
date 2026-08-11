@@ -58,14 +58,16 @@ class TestFactoryBackendSelection:
         provider = cfg.create_provider_factory()(session_key="t-fallback")
         assert provider.is_claude_backend is True
 
-    def test_claude_model_translation_skipped_without_bedrock(self, _home, monkeypatch) -> None:
+    def test_claude_model_passed_through_unresolved_without_bedrock(self, _home, monkeypatch) -> None:
         # The claude_code registry column is Bedrock-only (every entry is an
         # AWS cross-region inference-profile id) -- a plain `claude login`
         # session rejects those outright. Without CLAUDE_CODE_USE_BEDROCK=1,
-        # no override is sent at all; the adapter uses the account's own
-        # default model. See config/loader.py's _acp() closure.
+        # the factory passes the value through UNRESOLVED: the session's real
+        # advertised list only exists after session/new, so the wire-id
+        # resolution happens in AcpClient._apply_startup_model (via
+        # resolve_claude_wire_id), which withholds on a no-match. See
+        # config/loader.py's _acp() closure.
         monkeypatch.delenv("CLAUDE_CODE_USE_BEDROCK", raising=False)
-        from kiro_crew.acp.client import DEFAULT_MODEL
         from kiro_crew import model_registry
 
         cfg = KiroCrewConfig()
@@ -73,12 +75,9 @@ class TestFactoryBackendSelection:
         provider = cfg.create_provider_factory()(
             session_key="t-model", model_override=canonical
         )
-        # No override sent -- AcpClient normalizes the empty string to its
-        # own DEFAULT_MODEL sentinel, which _apply_startup_model treats as
-        # "let the adapter use the account's own default" (skips the
-        # set_config_option call entirely).
-        assert provider._client._model == DEFAULT_MODEL
-        # Never the Bedrock-shaped id.
+        # Passed through untouched -- resolution is deferred to session init.
+        assert provider._client._model == canonical
+        # Never the Bedrock-shaped id at this stage.
         assert provider._client._model != model_registry.to_provider_id(canonical, "claude_code")
 
     def test_claude_model_translation_applied_with_bedrock_opt_in(self, _home, monkeypatch) -> None:
