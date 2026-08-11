@@ -2860,12 +2860,28 @@ class AcpClient:
             # cli/<sid>.json; a missing transcript falls back to session/new
             # (a genuinely fresh start).
             if self._is_claude:
-                # Dormant seam: claude session/load takes no file path, and the
-                # SDK transcript-path resolver lived in the deleted cc cleanup
-                # helper. The internal companion re-adds it; the public core
-                # simply attempts the load.
+                # claude session/load takes no file path -- the SDK resolves
+                # its own transcript from cwd + sessionId. The existence check
+                # is a getattr hook (see klaude/transcripts.py, attached by
+                # klaude/registry.py): the public core has no such method, so
+                # this defaults to True (attempt the load) there, matching the
+                # prior unconditional behavior; a companion that can actually
+                # locate the SDK's transcript file gets the same stale-SID
+                # protection the kiro branch below has.
                 session_file = ""
-                file_ok = True
+                _check = getattr(self, "_claude_session_transcript_exists", None)
+                if callable(_check):
+                    try:
+                        file_ok = bool(_check(resume_sid))
+                    except (OSError, ValueError, TypeError):
+                        logger.warning(
+                            "claude transcript existence check failed; "
+                            "attempting session/load anyway",
+                            exc_info=True,
+                        )
+                        file_ok = True
+                else:
+                    file_ok = True
             else:
                 session_file = str(
                     kiro_sessions_dir() / f"{resume_sid}.json"

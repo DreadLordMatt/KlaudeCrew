@@ -1258,12 +1258,26 @@ class AcpProvider(LLMProvider):
         return self._client._session_id if self._client and self._client._session_id else ""
 
     async def cleanup_session(self, session_id: str) -> None:
-        """Delete kiro-cli session files (.json + .jsonl) at ~/.kiro/sessions/cli.
+        """Delete this session's transcript file(s) from disk.
 
-        (The claude seam's SDK transcript cleanup, ~/.claude/projects/, is
-        re-added by the internal companion alongside its Claude backend.)
+        kiro-cli: ``.json`` + ``.jsonl`` at ``~/.kiro/sessions/cli``.
+        claude: the SDK's own transcript under ``~/.claude/projects/`` --
+        deletion is a getattr hook (``_claude_cleanup_transcript``, see
+        klaude/transcripts.py, attached by klaude/registry.py). The public
+        core has no such method, so this is a no-op there.
         """
         if not session_id:
+            return
+        if self.is_claude_backend:
+            _cleanup = getattr(self._client, "_claude_cleanup_transcript", None)
+            if callable(_cleanup):
+                try:
+                    _cleanup(session_id)
+                except (OSError, ValueError, TypeError):
+                    logger.warning(
+                        "claude transcript cleanup failed for session %s",
+                        session_id, exc_info=True,
+                    )
             return
         sessions_dir = kiro_sessions_dir()
         for suffix in (".json", ".jsonl"):
