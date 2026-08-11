@@ -153,6 +153,17 @@ beforeEach(() => {
   ] as const) {
     apiMocks[key].mockResolvedValue({})
   }
+  // `dispatch` is the one exception to the bare `{}` above: its onSuccess commits
+  // `response.segment` into the transcript cache, and mergeTranscriptSegments reads
+  // `segment.id`. A bare `{}` throws inside onSuccess, which react-query reports as
+  // a failed mutation — turning a successful broadcast into an error notice.
+  apiMocks.dispatch.mockResolvedValue({
+    dispatched: 1,
+    text: 'please summarize',
+    segment: {
+      id: 'seg-1', timestamp: '2024-01-01T00:00:00Z', source: 'typed', text: 'please summarize',
+    },
+  })
 })
 
 afterEach(() => {

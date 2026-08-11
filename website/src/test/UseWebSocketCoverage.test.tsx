@@ -471,6 +471,10 @@ describe('useWebSocket frame router', () => {
       ws.simulateMessage({ type: 'chat_message', data: { slot: ACTIVE, role: 'user', content: 'go', ts: '2024-01-01T00:00:00Z' } })
     })
     expect(chat().slotStatusDetail[ACTIVE]?.kind).toBe('thinking')
+    // The recency bump is coalesced into one dispatch per animation frame, and this
+    // suite's requestAnimationFrame stub only records callbacks. Drain the pending
+    // frame so the buffered touchSlotActivity lands before asserting last_ts.
+    act(() => { const pending = rafCbs; rafCbs = []; pending.forEach(cb => cb(0)) })
     expect(dash().slots[0].last_ts).toBe('2024-01-01T00:00:00Z')
   })
 
