@@ -6,7 +6,7 @@ created: 2026-08-11
 last-audited: 2026-08-11
 audited-at: f4d3327a7
 doc-pr: 2744
-implementation-prs: []
+implementation-prs: [2764]
 tracking-issues: []
 supersedes: []
 superseded-by: []
@@ -25,6 +25,10 @@ superseded-by: []
 * Two PRs. **M1: memory is backed up off-host and comes back** — the policy seam, a
   self-contained `memory` component, S3 up and down. **M2: sessions are backed up**,
   riding M1's seam and destination.
+* The destination is **created once by a human**, not named per run. A backup job that
+  must decide whether an arbitrary bucket is safe to write memory into is being asked
+  a question that does not close (D5); creating the bucket ourselves and refusing
+  every other one answers it once, visibly.
 * Memory first because it is 22 MB against 385 MB, carries no `config.json` and so
   no secret question, and proves upload plus restore before the heavy part.
 * Scheduling is not a milestone: a `command`-kind cron already runs a shell command
@@ -36,7 +40,8 @@ superseded-by: []
   filenames happen to be on an allowlist.
 * One decision still open, and it blocks neither milestone: the bundle needs an
   explicit secret policy per purpose — a backup keeps credentials so recovery is
-  turnkey, a shared export must not carry them (O1).
+  turnkey, a shared export must not carry them (O1). Retention (O5) is now closed by
+  versioning plus a lifecycle rule.
 
 Motivating incident: an operator's cloud desktop went unreachable — no login, no
 SSH, no reboot — taking every conversation and every learned memory with it.
@@ -101,10 +106,16 @@ neither deploy nor cloud uses it. Follow that: shell out, add no hard dependency
 
 Continuous replication (RPO is one interval, honestly stated). Sharing state
 between users — that is the portability export. Backing up the whole 30 GB
-kiro-cli replay store, most of which is orphaned logs (see O2). Bucket versioning
-and lifecycle rules — teardown cannot handle versioned buckets, which is why deploy
-avoids them. Replacing a hosted runtime; this is local-host disaster recovery, an
-orthogonal axis.
+kiro-cli replay store, most of which is orphaned logs (see O2). Replacing a hosted
+runtime; this is local-host disaster recovery, an orthogonal axis.
+
+An earlier revision of this document also ruled out bucket versioning and lifecycle
+rules, on the grounds that teardown cannot empty a versioned bucket. That reasoning
+was inherited from `deploy`, which has a teardown path. **Backup has none** — there
+is no destroy verb and nothing reaps a backup bucket. The constraint therefore does
+not apply here, and versioning is load-bearing rather than optional: without it, a
+bundle overwritten by a truncated or corrupt run is unrecoverable. D5 adopts it, and
+that is what closes O5.
 
 ## Design
 
@@ -148,10 +159,50 @@ reasoning `session_storage.cotenant_sids` already applies, explicitly not the wh
 directory — which buys real resume instead of a lossy prefix. Measured: 1.17 GB
 selected versus 30 GB unselected.
 
-**D5 — `--to s3://bucket/prefix`** on snapshot and restore, via `engine.run_aws`,
-`create_private_bucket` and `_harden_bucket`, so a backup bucket is born private
-and encrypted and re-running is idempotent. A backup bucket must never be a deploy
-site bucket: those exist to be read through CloudFront.
+**D5 — the destination is provisioned once, by a human, and the backup path takes
+no destination from its caller.**
+
+```
+kirocrew backup setup                                  # once
+kirocrew snapshot --components memory --to-s3           # every run
+```
+
+`setup` **creates** the bucket via `engine.run_aws`, `create_private_bucket` and
+`harden_bucket`, applies versioning and a noncurrent-expiration lifecycle rule, then
+**reads the controls back from the API** and records `{bucket, region, account}` only
+if AWS confirms them. Re-running repairs a bucket weakened out of band. The backup
+path writes only to what setup recorded; no flag names a bucket.
+
+A pre-existing bucket of that name is accepted only if it demonstrably carries **no
+bucket policy**, and an unreadable policy fails closed. Hardening sets public-access,
+ownership and encryption controls, none of which revoke a policy, so adopting a bucket
+that already grants read elsewhere would publish the memory it is about to receive.
+"Is there a policy" is decidable in one call; "is this policy safe" is the question
+that does not close. That is what keeps `--bucket` from reopening the hole below, while
+still admitting a bucket an earlier host created — which is how several machines share
+one destination.
+
+The lifecycle rule bounds the history of a *replaced* bundle, not the number of
+bundles: keys are timestamped per run, so nothing becomes noncurrent in normal use.
+See O5 for why expiring current bundles is refused rather than merely unimplemented.
+
+The rejected alternative is worth recording, because it is the obvious one. Accepting
+`--to s3://bucket/prefix` forces the write path to answer "is this bucket safe to put
+memory in" on every run, unattended. That question does not close: a tag records who
+*intended* a bucket for backup but not who can read it, so the policy must be parsed;
+Block Public Access does not neutralise a CloudFront origin grant; an unreadable
+policy has to fail closed; and a foreign account's IAM principal is structurally
+identical to one of ours. Each is a real hole, and the shape of the design is what
+generates them — a trust decision placed on an automated path has to be perfect
+forever, whereas the same decision made once, with a human present, is merely
+correct. So the destination is created rather than adopted, and every other bucket is
+refused by construction.
+
+One check survives on the write path, and **S3 enforces it, not this code**: every
+upload carries `--expected-bucket-owner`, so a bucket that is no longer ours — deleted
+and re-created by a third party under the same name — fails the write. Keys are
+namespaced `backups/<hostid>/`, so several hosts share one bucket without
+interleaving.
 
 **D6 — `kirocrew restore s3://…/<object>`** downloads, then hands off to the
 existing `restore_main` merge/replace. Bootstrap needs only the CLI, a profile, and
@@ -178,15 +229,22 @@ a registration, not code.
 self-contained `memory` component, the S3 destination, and restore from it.
 
 *Exit criteria*
-* `kirocrew snapshot --components memory --to s3://bucket/prefix` produces an object
-  listable with `aws s3 ls`.
+* `kirocrew backup setup` creates a bucket that reports itself private, encrypted
+  and versioned when read back, and `kirocrew snapshot --components memory --to-s3`
+  produces an object listable with `aws s3 ls`.
 * On a host with only the CLI and a profile, `kirocrew restore s3://…/<object>`
   reproduces every semantic key, episodic row, lesson, and the markdown memory
   files, asserted by test and by count — without requiring the `workspace`
   component.
-* The created bucket reports all four Block Public Access flags and SSE from the
-  API response, not assumed from the create call; a second run is idempotent and
-  weakens nothing.
+* The created bucket reports all four Block Public Access flags, SSE and versioning
+  from the API response, not assumed from the create call; a second run is idempotent
+  and weakens nothing. Nothing is recorded as a destination unless that read-back
+  passes.
+* The backup path accepts no bucket from its caller, and refuses with an actionable
+  message when `setup` has never run — while still leaving the local bundle intact,
+  so an unconfigured destination costs no backup.
+* Every object write carries `--expected-bucket-owner`, asserted by a mutation that
+  removes it.
 * The manifest carries `purpose` and each component's declared policy, and a
   component whose declaration is missing is refused at staging rather than
   defaulting to permissive.
@@ -194,7 +252,9 @@ self-contained `memory` component, the S3 destination, and restore from it.
 * A denied AWS call yields an actionable IAM hint; no credential material appears in
   any object key, log line, or manifest.
 * Mutations that fail a test: dropping `workspace/memory/` from staging; dropping the
-  policy check.
+  policy check; dropping the ownership assertion from a write; recording a
+  destination that failed read-back; dropping versioning from the definition of
+  private.
 
 **M2 — sessions are backed up.** The `sessions` component riding M1's seam and
 destination. Also resolves P2.
@@ -222,11 +282,20 @@ for a host loss to be survivable and each is blocked on a decision: attaching
 A new restore reads old bundles, reporting missing components rather than inferring
 them. An old restore meeting a new bundle **refuses with a version message** rather
 than extracting the subset it understands — silently dropping the conversations is
-the failure this document exists to prevent. Invocations without `--to` behave as
-today.
+the failure this document exists to prevent. A snapshot that does not ask for an
+off-host copy behaves exactly as today.
 
 ## Security considerations
 
+* **The recorded destination is a trust anchor and must be agent-unwritable.**
+  Because the backup path takes no bucket from its caller, the recorded file *is* the
+  decision: an agent able to author it could redirect every future backup to a bucket
+  it controls, and `--expected-bucket-owner` would then verify the attacker's
+  ownership rather than refusing. Format validation does not help — a well-formed
+  record naming a hostile bucket passes it. The file therefore belongs behind the same
+  sensitive-path floor as the pointer deciding which checkout the gateway executes,
+  which is the existing precedent for "a pointer whose writer controls where
+  privileged work goes".
 * **`sel_hmac.key` stays out.** `NEVER_SNAPSHOT_FILES`:46 excludes it so audit-log
   HMACs stay bound to the host that wrote them. A backup must not become the
   mechanism that clones a trust root.
@@ -255,9 +324,13 @@ today.
   agent was ever shown, including content redacted at display time. Private bucket,
   ownership enforced, encrypted at rest, TLS in transit, no presigned URLs by
   default, never readable by CloudFront or any public policy.
-* **Bucket-name collision is a real hazard.** Landing a backup in a bucket deploy
-  serves publicly would publish every transcript. The write path asserts by tag
-  that the target is not a known deploy site bucket, and refuses otherwise.
+* **Landing a backup in a publicly-served bucket would publish every transcript.**
+  An earlier revision guarded this by inspecting the target bucket — by tag, then by
+  policy — and that guard is what proved unclosable (D5). It is replaced by
+  construction rather than by a better check: the only writable destination is one
+  `backup setup` created and recorded, so a `deploy` site bucket is not refused after
+  inspection, it is never a candidate. The backup bucket also never carries deploy's
+  managed tag, so deploy's teardown and reaper cannot claim it.
 * **Least privilege.** `PutObject`/`GetObject`/`ListBucket` on one prefix, plus
   bucket creation on first run. `deploy/iam.py` is not reusable as-is — it carries
   CloudFront permissions a backup has no business holding.
@@ -294,5 +367,17 @@ today.
 * **O4 — consolidate the two bundle formats?** They already disagree about what
   belongs in a bundle (P2 is one instance). Leaving both answers every future
   component question twice.
-* **O5 — retention.** How many backups are kept, and what deletes the rest, with
-  lifecycle rules out of scope.
+* **O5 — retention, partly answered.** Versioning plus a noncurrent-version
+  expiration rule (both applied by `backup setup`) bound the history of a *replaced*
+  bundle, which is what makes a corrupt or truncated re-upload recoverable. They do
+  **not** bound how many bundles accumulate: each run writes a new timestamped key, so
+  every bundle is a current version and none ever becomes noncurrent. An earlier
+  revision of this document claimed O5 closed on that basis; it was wrong.
+  What remains open is deliberately narrow, because automatic expiry of *current*
+  bundles is refused rather than unimplemented: a lifecycle rule can express "delete
+  older than N days" but never "keep the newest N", so on a host that stopped backing
+  up — the dead machine this document exists for — such a rule would delete the last
+  surviving copy of its memory exactly when it is needed. Unbounded growth is the
+  cheaper failure (a few gigabytes a year at M1 sizes). The open question is therefore
+  whether operators want an opt-in, count-based remote prune, which needs a lister and
+  a deleter rather than a lifecycle rule.
