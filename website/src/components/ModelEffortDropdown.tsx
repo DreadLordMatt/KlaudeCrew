@@ -100,7 +100,7 @@ export default function ModelEffortDropdown({
                 placeholder={i18nT('components.modelEffortDropdown.type_to_filter')}
                 value={filter}
                 onChange={e => setFilter(e.target.value)}
-                className="w-full px-2 py-1 text-[13px] font-mono"
+                className="w-full px-2 py-1 text-[13px]"
               />
             </div>
             <div role="listbox" aria-label={i18nT('components.modelEffortDropdown.model_list')} className="overflow-y-auto max-h-[280px]">

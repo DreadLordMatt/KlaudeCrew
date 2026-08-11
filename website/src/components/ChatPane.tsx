@@ -279,7 +279,7 @@ export default function ChatPane({
   // app-sdk/ChatMessageList stays Redux-free for the embed SDK.
   const renderTool = useCallback((m: ChatMessage) => <ToolCallLine message={m} running={running} slot={slotKey} />, [slotKey, running])
 
-  const ddInputCls = 'w-full px-2 py-1 text-[13px] font-mono bg-bg border border-border rounded text-text outline-none focus:border-accent'
+  const ddInputCls = 'w-full px-2 py-1 text-[13px] font-body bg-bg border border-border rounded text-text outline-none focus:border-accent'
 
   return (
     <SlotProvider slotId={slotKey}>
