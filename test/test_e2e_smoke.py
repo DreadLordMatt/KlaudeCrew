@@ -460,3 +460,37 @@ def test_claude_tool_call_renders(claude_gateway):
 
     reply = _await_assistant_reply(claude_gateway, slot)
     assert "pong from the fake ACP backend" in json.dumps(reply)
+
+
+def test_claude_api_models_serves_advertised_list(claude_gateway):
+    """Fork (KlaudeCrew) picker feature, end to end through a REAL gateway:
+    after a session has spawned (the chat turn), GET /api/models on the
+    claude backend serves the fake's advertised catalog -- real HTTP, real
+    subprocess, the fake's live-verified configOptions[id="model"] wire
+    shape, agents.py's _cc_models merge, no kiro-cli anywhere."""
+    slot = _api_post(claude_gateway, "/api/chat/slots", {})["key"]
+    _api_post(
+        claude_gateway,
+        "/api/chat?ws=1",
+        {"message": "ping", "slot": slot, "agent": "kirocrew"},
+    )
+    _await_assistant_reply(claude_gateway, slot)
+
+    # The session's advertised list is captured at session/new; poll briefly
+    # in case the capture races the reply assertion.
+    deadline = time.monotonic() + 15.0
+    rows = None
+    while time.monotonic() < deadline:
+        try:
+            rows = _api_get(claude_gateway, "/api/models")
+            break
+        except Exception:
+            time.sleep(0.5)  # 503 cc_models_cold_start until a session captures
+
+    assert rows, "GET /api/models never served the advertised list"
+    names = [r["model_name"] for r in rows]
+    assert names[0] == "auto"
+    assert "opus[1m]" in names  # verbatim advertised wire value
+    assert "sonnet-4.6-1m" in names  # advertised "sonnet" folded onto canonical
+    # Never a Bedrock id on the non-Bedrock claude path.
+    assert not any(n.startswith("global.anthropic.") for n in names)

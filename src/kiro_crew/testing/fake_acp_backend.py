@@ -184,6 +184,40 @@ def _dialect() -> str:
     return "claude" if os.environ.get("FAKE_ACP_DIALECT") == "claude" else "kiro"
 
 
+# Fork (KlaudeCrew): the claude dialect's advertised model catalog, shaped
+# exactly like the real claude-agent-acp v0.66.0 wire (live-verified): the
+# model list is one configOptions entry, values are short human-facing
+# strings. Kept small but realistic; session/set_config_option(model) rejects
+# anything not listed here, mirroring the real adapter.
+_CLAUDE_MODEL_OPTIONS = [
+    {"value": "default", "name": "Default (recommended)", "description": "Fake default"},
+    {"value": "opus[1m]", "name": "Opus (1M context)", "description": "Fake opus"},
+    {"value": "sonnet", "name": "Sonnet", "description": "Fake sonnet"},
+    {"value": "haiku", "name": "Haiku", "description": "Fake haiku"},
+]
+
+
+def _claude_config_options() -> list[dict[str, Any]]:
+    """The configOptions array a claude-dialect session/new response carries."""
+    return [
+        {
+            "id": "model",
+            "name": "Model",
+            "description": "AI model to use",
+            "type": "select",
+            "currentValue": "opus[1m]",
+            "options": [dict(o) for o in _CLAUDE_MODEL_OPTIONS],
+        },
+        {
+            "id": "effort",
+            "name": "Effort",
+            "type": "select",
+            "currentValue": "high",
+            "options": [{"value": v} for v in ("low", "medium", "high")],
+        },
+    ]
+
+
 def _record_mcp_servers(params: dict[str, Any]) -> None:
     """Write the received ``mcpServers`` array to ``FAKE_ACP_MCP_PROBE_PATH``.
 
@@ -441,10 +475,36 @@ def _handle(msg: dict[str, Any]) -> None:
         )
     elif method == "session/new":
         _record_mcp_servers(msg.get("params") or {})
-        _result(req_id, {"sessionId": _SESSION_ID})
+        resp: dict[str, Any] = {"sessionId": _SESSION_ID}
+        if _dialect() == "claude":
+            # The real claude-agent-acp wire shape (live-verified v0.66.0):
+            # the model catalog is one entry of configOptions, NOT a
+            # models.availableModels field. See acp-client.md "Model
+            # Advertisement".
+            resp["configOptions"] = _claude_config_options()
+        _result(req_id, resp)
     elif method == "session/load":
         _record_mcp_servers(msg.get("params") or {})
-        _result(req_id, {"modes": ["chat"]})
+        resp = {"modes": ["chat"]}
+        if _dialect() == "claude":
+            resp["configOptions"] = _claude_config_options()
+        _result(req_id, resp)
+    elif method == "session/set_config_option" and _dialect() == "claude":
+        params = msg.get("params") or {}
+        if params.get("configId") == "model":
+            value = params.get("value")
+            advertised = [o["value"] for o in _CLAUDE_MODEL_OPTIONS]
+            if value in advertised:
+                _result(req_id, {})
+            else:
+                # Mirrors the real adapter's rejection shape observed live:
+                # -32603 with an "Invalid value" detail.
+                _error(
+                    req_id,
+                    message=f"Invalid value for config option model: {value}",
+                )
+        else:
+            _result(req_id, {})
     elif method == "session/prompt":
         params = msg.get("params") or {}
         session_id = str(params.get("sessionId", _SESSION_ID))
