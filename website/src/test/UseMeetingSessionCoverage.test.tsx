@@ -153,6 +153,20 @@ beforeEach(() => {
   ] as const) {
     apiMocks[key].mockResolvedValue({})
   }
+  // dispatch's response is READ, not merely awaited: the success path commits
+  // response.segment into the transcript cache, and DispatchResponse.segment is
+  // non-optional. A bare {} makes that commit throw, so the mutation lands in
+  // onError and reports a failure that never happened.
+  apiMocks.dispatch.mockResolvedValue({
+    dispatched: 1,
+    text: 'dispatched text',
+    segment: {
+      id: 'seg-1',
+      timestamp: '2026-08-10T00:00:00Z',
+      source: 'typed',
+      text: 'dispatched text',
+    },
+  })
 })
 
 afterEach(() => {

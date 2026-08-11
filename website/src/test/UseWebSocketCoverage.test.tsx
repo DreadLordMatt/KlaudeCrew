@@ -199,6 +199,13 @@ describe('useWebSocket frame router', () => {
       createElement(QueryClientProvider, { client: qc }, children))
   }
 
+  /** Run every frame queued on the stubbed requestAnimationFrame. Coalesced
+   *  work (streaming chunks, slot recency) lands here, not on the event. */
+  function runFrames() {
+    const pending = rafCbs.splice(0)
+    act(() => { pending.forEach(cb => cb(performance.now())) })
+  }
+
   function mount() {
     const hook = renderHook(() => useWebSocket(), { wrapper })
     const ws = WS_INSTANCES[0]
@@ -470,7 +477,12 @@ describe('useWebSocket frame router', () => {
     act(() => {
       ws.simulateMessage({ type: 'chat_message', data: { slot: ACTIVE, role: 'user', content: 'go', ts: '2024-01-01T00:00:00Z' } })
     })
+    // Status is dispatched per event, so it is observable immediately.
     expect(chat().slotStatusDetail[ACTIVE]?.kind).toBe('thinking')
+    // Recency is coalesced into one dispatch per frame, so it lands at the
+    // flush. Asserting before it reads the store one frame too early.
+    expect(dash().slots[0].last_ts).toBeUndefined()
+    runFrames()
     expect(dash().slots[0].last_ts).toBe('2024-01-01T00:00:00Z')
   })
 
