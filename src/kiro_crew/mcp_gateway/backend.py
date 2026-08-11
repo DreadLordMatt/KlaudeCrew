@@ -313,9 +313,12 @@ def _mcp_apps_enabled() -> bool:
        environment.
     3. ``KIROCREW_MCP_APPS`` on -> enabled (explicit override for tests and the
        e2e harness), having cleared the opt-out above.
-    4. Otherwise ``mcp_gateway.enabled`` — the broker must be running, because
-       the render and callback paths live inside it, so ``apps_enabled`` alone
-       can never grant the feature.
+    4. Otherwise ``apps_enabled`` alone is enough. Deliberately NOT gated on
+       ``mcp_gateway.enabled``: that switch decides whether a backend may be
+       SHARED, not whether a stub exists, and the stub carries the app-call
+       relay either way. With pooling off each connection gets a private backend
+       that is still addressable by ``storage_digest``, so both the render and
+       the callback resolve -- see ``test_apps_enabled_alone_is_enough``.
 
     ``apps_enabled`` defaults True when absent, so step 2 fires only on a value
     an operator actually wrote: "not configured" is not an opt-out.
