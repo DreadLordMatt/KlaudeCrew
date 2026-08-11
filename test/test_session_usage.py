@@ -783,7 +783,13 @@ class TestPollDoesNotSpendCredits:
     @pytest.fixture(autouse=True)
     def _reset(self):
         _reset_usage_globals()
-        yield
+        # This class is specifically about the kiro-cli /usage timer, so pin
+        # acp_backend="kiro" -- otherwise fork (KlaudeCrew)
+        # reject_if_not_kiro_backend() would 503 with kiro_not_backend before
+        # the mocked reject_if_kiro_unverified() below is ever reached.
+        cfg = SimpleNamespace(agent=SimpleNamespace(acp_backend="kiro"))
+        with patch("kiro_crew.config.loader.KiroCrewConfig.load", return_value=cfg):
+            yield
         _reset_usage_globals()
 
     def _request(self):

@@ -62,7 +62,10 @@ def _kiro_request(tmp_path: Path) -> MagicMock:
 
 def _kiro_cfg() -> SimpleNamespace:
     # Any non-"claude_code" provider takes the subprocess path under test.
-    return SimpleNamespace(agent=SimpleNamespace(provider="kiro"))
+    # acp_backend="kiro" is required too: reject_if_not_kiro_backend() (fork,
+    # KlaudeCrew) short-circuits api_models before this subprocess path when
+    # it isn't "kiro".
+    return SimpleNamespace(agent=SimpleNamespace(provider="kiro", acp_backend="kiro"))
 
 
 def _run(coro):

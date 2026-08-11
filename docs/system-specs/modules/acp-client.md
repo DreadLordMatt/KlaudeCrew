@@ -438,6 +438,17 @@ Subprocess lifecycle:
   carry that error. These sites authorize on a **freshly verified** probe
   (`verified_ready`, 30s ceiling), never the bare latch — a stale `ready=True`
   would green-light exactly the signed-out spawn the gate exists to prevent.
+  Fork (KlaudeCrew): `slack/gateway.py` sets `assume_kiro_ready` whenever
+  `agent.acp_backend != "kiro"` so the first-run SPA gate doesn't block a
+  claude-backend install — but that also makes `verified_ready()` an
+  unconditional pass-through, which would otherwise let these two spawn
+  sites reach a REAL, unauthenticated `kiro-cli` and pop its browser sign-in
+  tab on every poll even though kiro-cli isn't the configured backend at
+  all. `reject_if_not_kiro_backend()` (`kiro_readiness.py`) is a SEPARATE
+  guard, called BEFORE `reject_if_kiro_unverified()` at both sites only —
+  deliberately not folded into that shared function, whose other three
+  callers (the destructive reruns, the OpenAI-compat endpoint) drive the
+  normal ACP session/turn machinery and must keep working on any backend.
 - **`AcpAuthRequired` is the authoritative logout signal.** Readiness is probed
   at gateway start and on explicit user action only, so a mid-session sign-out is
   discovered when the ACP attempt fails, not by a poll. `AcpRuntime`/`AcpClient`

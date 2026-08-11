@@ -244,7 +244,11 @@ def test_api_models_returns_only_entitled_rows(tmp_path):
         tmp_path, _provider([{"modelId": "auto"}, {"modelId": "claude-sonnet-5"}])
     )
     with patch.object(
-        agents.KiroCrewConfig, "load", return_value=SimpleNamespace(agent=SimpleNamespace(provider="kiro"))
+        agents.KiroCrewConfig,
+        "load",
+        return_value=SimpleNamespace(
+            agent=SimpleNamespace(provider="kiro", acp_backend="kiro")
+        ),
     ), patch(
         "kiro_crew.acp.client._resolve_kiro_bin_for_spawn", return_value="/usr/bin/kiro-cli"
     ), patch(

@@ -30,6 +30,16 @@ _KIRO_NOT_READY_RESPONSE = {
     "code": "kiro_prerequisite_required",
 }
 
+# Fork (KlaudeCrew): distinct from _KIRO_NOT_READY_RESPONSE -- this path is
+# reached when kiro-cli isn't even the configured backend, not when it's
+# signed out. Same 503 "degraded, use the fallback" contract both callers
+# already handle, just an accurate reason code instead of a misleading
+# sign-in prompt for a claude-backend gateway.
+_KIRO_NOT_BACKEND_RESPONSE = {
+    "error": "kiro-cli is not the configured agent backend (agent.acp_backend).",
+    "code": "kiro_not_backend",
+}
+
 # How stale a probe may be and still authorize a destructive or spawning call.
 # Small enough that an external logout cannot linger behind this gate, large
 # enough that a burst of callers collapses onto one probe.
@@ -107,3 +117,29 @@ async def reject_if_kiro_unverified(request: web.Request) -> web.Response | None
     if await kiro_verified_ready(_service(request)):
         return None
     return web.json_response(_KIRO_NOT_READY_RESPONSE, status=503)
+
+
+def reject_if_not_kiro_backend() -> web.Response | None:
+    """Fork (KlaudeCrew): block the two RAW ``kiro-cli`` one-shot spawn sites
+    (``/api/models``, ``/api/sessions/usage``) when kiro-cli isn't even the
+    configured backend.
+
+    Deliberately a SEPARATE guard from :func:`reject_if_kiro_unverified`, not
+    folded into it: that function's other three callers (the destructive
+    reruns, the OpenAI-compat endpoint) drive the NORMAL ACP session/turn
+    machinery, which already dispatches correctly to whichever backend is
+    configured -- they must keep working on the claude backend. Only these
+    two callers shell out to a raw ``kiro-cli <subcommand>`` process directly,
+    bypassing ACP entirely, so only they need this extra check. Called
+    BEFORE :func:`reject_if_kiro_unverified` at each site: an unauthenticated
+    ``kiro-cli`` auto-opens an interactive browser sign-in for any subcommand
+    (``--no-interactive`` does not suppress it, see the callers' own
+    comments), and ``assume_kiro_ready`` (set for any non-kiro backend --
+    see ``slack/gateway.py``) makes the OTHER guard a pass-through, so
+    without this check every poll spawns kiro-cli and pops that browser tab.
+    """
+    from kiro_crew.config.loader import KiroCrewConfig
+
+    if KiroCrewConfig.load().agent.acp_backend == "kiro":
+        return None
+    return web.json_response(_KIRO_NOT_BACKEND_RESPONSE, status=503)
