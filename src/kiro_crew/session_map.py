@@ -387,16 +387,70 @@ class SessionMap:
             if isinstance(sid := entry.get("sid"), str) and sid
         }
 
+    @staticmethod
+    def _is_self_derived(key: str, thread_ts: str) -> bool:
+        """True when *key* derives from *thread_ts* itself (``slack:<ts>``).
+
+        Mirrors the predicate in ``_rebuild_thread_index``: a self-derived
+        claimant is the fork (or a self-link) and holds a contested thread
+        only when nothing else claims it.
+        """
+        return is_channel_session_key(key) and key.endswith(thread_ts)
+
+    def _evict_rival_claimants(self, key: str, thread_ts: str) -> list[str]:
+        """Clear the Slack link fields of every OTHER entry claiming *thread_ts*.
+
+        Returns the evicted keys. Only link fields are cleared (entry and
+        ``sid`` preserved, mirroring ``clear_slack_link``); the caller owns the
+        reverse-index write and the ``_save()``. A self-derived claimant — a
+        channel key whose ts IS the thread — never evicts: the load-time
+        tie-break in ``_rebuild_thread_index`` awards a contested thread to the
+        non-derived session, and stripping that owner's fields here would leave
+        the heal with nothing to restore.
+        """
+        if self._is_self_derived(key, thread_ts):
+            return []
+        evicted: list[str] = []
+        for other_key, other_entry in self._data.items():
+            if other_key != key and other_entry.get("slack_thread_ts") == thread_ts:
+                other_entry.pop("slack_thread_ts", None)
+                other_entry.pop("slack_channel_id", None)
+                evicted.append(other_key)
+        if evicted:
+            logger.info(
+                "Slack thread %s reassigned to session %s from %s",
+                thread_ts,
+                key,
+                ", ".join(evicted),
+            )
+        return evicted
+
     def set_slack_link(self, key: str, thread_ts: str, channel_id: str | None) -> None:
-        """Link a session to a Slack thread. Creates entry if needed."""
+        """Link a session to a Slack thread. Creates entry if needed.
+
+        A thread has at most one owner: a non-derived claim evicts every other
+        entry claiming *thread_ts* (see :meth:`_evict_rival_claimants`), and the
+        eviction lands in the same ``_save()`` as the new claim so a crash
+        between the two cannot persist a two-owner map. A self-derived claim
+        never evicts — the load-time tie-break resolves that contest instead.
+        An empty *thread_ts* is the clear sentinel and neither evicts anyone
+        nor enters the reverse index.
+        """
         key = canonical_key(key)
         entry = self._data.get(key)
+        evicted = self._evict_rival_claimants(key, thread_ts) if thread_ts else []
         if entry:
             if (
                 entry.get("slack_thread_ts") == thread_ts
                 and entry.get("slack_channel_id") == channel_id
             ):
-                self._thread_to_session.setdefault(thread_ts, key)
+                if thread_ts:
+                    if evicted:
+                        self._thread_to_session[thread_ts] = key
+                    else:
+                        self._thread_to_session.setdefault(thread_ts, key)
+                if evicted:
+                    self._save()
                 return
             old_ts = entry.get("slack_thread_ts")
             if old_ts and old_ts != thread_ts:
@@ -409,7 +463,15 @@ class SessionMap:
                 "slack_thread_ts": thread_ts,
                 "slack_channel_id": channel_id,
             }
-        self._thread_to_session[thread_ts] = key
+        if thread_ts:
+            # Same policy as the tie-break: a self-derived claim never
+            # displaces a live owner from the reverse index — it routes the
+            # thread only when nothing else claims it. A non-derived claim
+            # (which just swept its rivals) takes the index outright.
+            if self._is_self_derived(key, thread_ts):
+                self._thread_to_session.setdefault(thread_ts, key)
+            else:
+                self._thread_to_session[thread_ts] = key
         self._save()
 
     def get_slack_link(self, key: str) -> tuple[str | None, str | None]:
