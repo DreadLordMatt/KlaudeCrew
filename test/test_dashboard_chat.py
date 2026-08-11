@@ -13205,14 +13205,20 @@ class TestBulkModelSwitch:
     async def test_canonical_key_rejected_no_slot_touched(self, tmp_path):
         # A canonical registry key (the /api/models cold-start fallback trap)
         # is rejected 400 for the acp provider; no slot is switched or reset.
+        # Fork (KlaudeCrew): kiro-only now -- the claude backend resolves
+        # canonical keys against the live advertised set instead. Pin kiro.
+        from types import SimpleNamespace as _NS
+
         state = _make_state(tmp_path)
         state.sessions.reset = AsyncMock()
         state.get_or_create_slot("a", model="claude-fable-5")
         state.push_slots_update = MagicMock()
 
-        async with TestClient(TestServer(self._app(state))) as client:
-            resp = await client.post("/api/chat/slots/model", json={"model": "fable-5-1m"})
-            data = await resp.json()
+        cfg = _NS(agent=_NS(provider="acp", acp_backend="kiro"))
+        with patch("kiro_crew.config.loader.KiroCrewConfig.load", return_value=cfg):
+            async with TestClient(TestServer(self._app(state))) as client:
+                resp = await client.post("/api/chat/slots/model", json={"model": "fable-5-1m"})
+                data = await resp.json()
 
         assert resp.status == 400
         assert "fable-5-1m" in data["error"]
@@ -13222,7 +13228,21 @@ class TestBulkModelSwitch:
 
 class TestSlotModelGuard:
     """POST /api/chat/slots/{slot}/model — reject canonical registry keys the
-    ACP CLI cannot accept (the /api/models cold-start fallback -32603 trap)."""
+    ACP CLI cannot accept (the /api/models cold-start fallback -32603 trap).
+
+    Fork (KlaudeCrew): this front-door rejection is now KIRO-only -- on the
+    claude backend canonical keys are valid input that _wire_model_id
+    resolves against the live advertised set (see TestSlotModelLiveSwitch's
+    claude cases). The fixture pins acp_backend="kiro" accordingly.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _kiro_backend(self):
+        from types import SimpleNamespace as _NS
+
+        cfg = _NS(agent=_NS(provider="acp", acp_backend="kiro"))
+        with patch("kiro_crew.config.loader.KiroCrewConfig.load", return_value=cfg):
+            yield
 
     @staticmethod
     def _app(state: DashboardState) -> web.Application:
@@ -13468,9 +13488,57 @@ class TestSlotModelLiveSwitch:
         state.sessions.reset.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_claude_backend_switch_uses_provider_id(self, tmp_path):
+    async def test_claude_backend_switch_sends_verbatim_advertised_id(self, tmp_path):
+        """Fork (KlaudeCrew): the claude wire value comes from the LIVE
+        session's advertised set (resolve_claude_wire_id), never fabricated
+        from the registry's Bedrock-only claude_code column. "sonnet" is the
+        real live-verified advertised spelling; picking its canonical
+        registry key must resolve to that verbatim advertised string."""
+        state = _make_state(tmp_path)
+        state.sessions.reset = AsyncMock()
+        provider = self._provider(claude=True, models=("default", "opus[1m]", "sonnet", "haiku"))
+        state.sessions.get_provider = MagicMock(return_value=provider)
+        state.get_or_create_slot("a", model="claude-opus-4.6")
+        state.push_slots_update = MagicMock()
+
+        async with TestClient(TestServer(self._app(state))) as client:
+            resp = await client.post("/api/chat/slots/a/model", json={"model": "sonnet-4.6-1m"})
+
+        assert resp.status == 200
+        sent = provider.client.set_model.await_args.args[0]
+        assert sent == "sonnet"  # the verbatim advertised value, nothing invented
+        state.sessions.reset.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_claude_backend_unadvertised_pick_is_rejected(self, tmp_path):
+        """An explicit pick with no verified advertised match answers 4xx and
+        rolls the slot back -- never a silent fabricated-Bedrock-id send (the
+        old behavior this replaces) and never a reset-to-a-different-model."""
+        state = _make_state(tmp_path)
+        state.sessions.reset = AsyncMock()
+        provider = self._provider(claude=True, models=("sonnet", "haiku"))
+        state.sessions.get_provider = MagicMock(return_value=provider)
+        state.get_or_create_slot("a", model="claude-opus-4.6")
+        state.push_slots_update = MagicMock()
+
+        async with TestClient(TestServer(self._app(state))) as client:
+            resp = await client.post("/api/chat/slots/a/model", json={"model": "opus-4.7-1m"})
+            body = await resp.json()
+
+        assert resp.status == 400
+        assert body.get("code") == "model_unavailable"
+        provider.client.set_model.assert_not_awaited()
+        state.sessions.reset.assert_not_awaited()
+        assert state._slots["a"].model == "claude-opus-4.6"  # rolled back
+
+    @pytest.mark.asyncio
+    async def test_claude_backend_bedrock_opt_in_uses_provider_id(self, tmp_path, monkeypatch):
+        """CLAUDE_CODE_USE_BEDROCK=1 restores the registry translation -- the
+        Bedrock path's ids ARE correct for that account type (regression
+        guard: the fix must not move the Bedrock behavior)."""
         from kiro_crew import model_registry
 
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
         state = _make_state(tmp_path)
         state.sessions.reset = AsyncMock()
         provider = self._provider(claude=True)
