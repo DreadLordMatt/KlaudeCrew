@@ -1380,6 +1380,8 @@ _MOVED_CONFIG_FIELDS: dict[str, str] = {
 
 _EDITABLE_CONFIG: dict[str, dict] = {
     "agent.provider": {"type": "enum", "values": ["acp"]},
+    # Fork (KlaudeCrew): which agent drives ACP sessions. Default "claude".
+    "agent.acp_backend": {"type": "enum", "values": ["claude", "kiro"]},
     # Default model for new sessions. Membership can NOT be validated against a
     # fixed list: the real vocabulary is whatever the live kiro-cli advertises
     # (/api/models spawns it to find out), and it spans both canonical registry
@@ -1786,7 +1788,7 @@ async def api_kirocrew_config_patch(request: web.Request) -> web.Response:
     cfg = KiroCrewConfig.load()
 
     # If provider changed, reload the factory so new sessions use the new provider
-    if path_key == "agent.provider":
+    if path_key in ("agent.provider", "agent.acp_backend"):
         state: DashboardState = request.app["state"]
         # Refresh agent artifacts so the target provider is immediately usable.
         # For claude_code this (re)writes ~/.claude/agents/kirocrew.mcp.json —

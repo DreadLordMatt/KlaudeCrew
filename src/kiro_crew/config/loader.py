@@ -871,6 +871,16 @@ class AgentConfig:
         default="acp",
         metadata=_meta("Provider", "LLM provider backend (KiroACP / kiro-cli).", enum=["acp"]),
     )
+    acp_backend: str = field(
+        default="claude",
+        metadata=_meta(
+            "ACP Backend",
+            "Which agent drives ACP sessions: 'claude' spawns claude-agent-acp "
+            "(Claude Code); 'kiro' spawns kiro-cli. Both speak the same "
+            "protocol; agent.provider stays 'acp' either way.",
+            enum=["claude", "kiro"],
+        ),
+    )
     default_agent: str = field(
         default="",
         metadata=_meta("Default Agent", "Default agent name for new sessions."),
@@ -5164,6 +5174,7 @@ class KiroCrewConfig:
                 role_efforts=coerce_role_efforts(agent_data.get("role_efforts")),
                 reasoning_effort=agent_data.get("reasoning_effort", ""),
                 provider=agent_data.get("provider", "acp"),
+                acp_backend=agent_data.get("acp_backend", "claude"),
                 default_agent=agent_data.get("default_agent", ""),
                 sandbox=agent_data.get("sandbox", "auto"),
                 sandbox_allow_no_isolation=bool(
@@ -6073,9 +6084,14 @@ class KiroCrewConfig:
         the kiro-cli backend. The factory accepts an optional ``session_key`` to
         create a per-session subdirectory under ``workspace_root()``.
         """
+        from kiro_crew.acp.types import ACP_BACKEND_CLAUDE
         from kiro_crew.providers.acp import (
             AcpProvider,  # circular: acp -> client -> session -> config.loader
         )
+
+        # Fork (KlaudeCrew): backend selection through the ACP_BACKEND seam.
+        # Anything but an explicit "kiro" opt-out drives claude-agent-acp.
+        acp_backend = ACP_BACKEND_CLAUDE if self.agent.acp_backend != "kiro" else ""
 
         model = self.agent.model
         if model == DEFAULT_MODEL:
@@ -6151,7 +6167,16 @@ class KiroCrewConfig:
             # …) are DISTINCT real kiro models and must pass through unchanged,
             # not get folded to Sonnet the way the claude_code path downgrades
             # them (the claude backend has no Haiku).
-            m = model_registry.to_acp_id(m) if m else m
+            # On the claude backend the inverse holds: claude-agent-acp only
+            # accepts its own advertised ids, so resolve through the claude_code
+            # provider column (which deliberately folds kiro-only aliases like
+            # Haiku onto models the claude backend serves).
+            if m:
+                m = (
+                    model_registry.to_provider_id(m, "claude_code")
+                    if acp_backend
+                    else model_registry.to_acp_id(m)
+                )
             # Thread the slot's effort into a per-model override so the kiro
             # cli.json overlay is written from it at spawn — without this, a
             # kiro cold start (or the handler's reset-then-respawn) would only
@@ -6169,10 +6194,18 @@ class KiroCrewConfig:
             _eff = reasoning_effort_override or base_effort
             if m and _eff and is_valid_effort(_eff) and model_supports_effort(m):
                 _eff_per_model[m] = _eff
+            # Claude backend: point the adapter's SettingsManager and the SDK
+            # at KiroCrew's isolated config root instead of the user's global
+            # ~/.claude. The project-scope <work_dir>/.claude/settings.local.json
+            # (permission routing) is written separately at spawn.
+            if acp_backend and os.environ.get("KIROCREW_CC_ISOLATE") != "0":
+                extra_env = {**(extra_env or {})}
+                extra_env.setdefault("CLAUDE_CONFIG_DIR", str(config_dir() / "cc-config"))
             return AcpProvider(
                 work_dir=wdir,
                 model=m,
                 agent=agent,
+                acp_backend=acp_backend,
                 sandbox_mode=sandbox,
                 session_key=session_key,
                 channel_id=channel_id,

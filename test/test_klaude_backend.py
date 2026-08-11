@@ -1,0 +1,107 @@
+"""Fork (KlaudeCrew): the claude ACP backend is live and default.
+
+Covers the fork-owned wiring that upstream deliberately keeps dormant:
+``agent.acp_backend`` config → ``create_provider_factory`` → ``AcpProvider``.
+Upstream's kiro-cli path must stay byte-identical when the operator opts out
+with ``acp_backend = "kiro"``.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from kiro_crew.acp.types import ACP_BACKEND_CLAUDE
+from kiro_crew.config.loader import KiroCrewConfig
+
+
+class TestAcpBackendConfig:
+    def test_default_is_claude(self) -> None:
+        assert KiroCrewConfig().agent.acp_backend == "claude"
+
+    def test_load_defaults_to_claude(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
+        (tmp_path / "config.json").write_text('{"agent": {}}')
+        cfg = KiroCrewConfig.load()
+        assert cfg.agent.acp_backend == "claude"
+
+    def test_load_kiro_opt_out(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
+        (tmp_path / "config.json").write_text('{"agent": {"acp_backend": "kiro"}}')
+        cfg = KiroCrewConfig.load()
+        assert cfg.agent.acp_backend == "kiro"
+
+
+class TestFactoryBackendSelection:
+    @pytest.fixture
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KIROCREW_HOME", str(tmp_path))
+        return tmp_path
+
+    def test_default_factory_builds_claude_provider(self, _home) -> None:
+        provider = KiroCrewConfig().create_provider_factory()(session_key="t-claude")
+        try:
+            assert provider.is_claude_backend is True
+        finally:
+            provider = None
+
+    def test_kiro_opt_out_builds_kiro_provider(self, _home) -> None:
+        cfg = KiroCrewConfig()
+        cfg.agent.acp_backend = "kiro"
+        provider = cfg.create_provider_factory()(session_key="t-kiro")
+        assert provider.is_claude_backend is False
+
+    def test_unknown_value_falls_back_to_claude(self, _home) -> None:
+        # Anything but the explicit "kiro" opt-out drives the claude backend —
+        # a typo must not silently revive the kiro-cli dependency.
+        cfg = KiroCrewConfig()
+        cfg.agent.acp_backend = "clod"
+        provider = cfg.create_provider_factory()(session_key="t-fallback")
+        assert provider.is_claude_backend is True
+
+    def test_claude_model_translation(self, _home) -> None:
+        # Canonical registry keys resolve through the claude_code provider
+        # column on the claude path, not kiro's dotted ids.
+        from kiro_crew import model_registry
+
+        cfg = KiroCrewConfig()
+        canonical = None
+        for key in model_registry._REGISTRY:
+            if model_registry.to_provider_id(key, "claude_code") != model_registry.to_acp_id(key):
+                canonical = key
+                break
+        if canonical is None:
+            pytest.skip("registry has no key that diverges between backends")
+        provider = cfg.create_provider_factory()(
+            session_key="t-model", model_override=canonical
+        )
+        assert provider._client._model == model_registry.to_provider_id(canonical, "claude_code")
+
+    def test_kiro_model_translation_unchanged(self, _home) -> None:
+        from kiro_crew import model_registry
+
+        cfg = KiroCrewConfig()
+        cfg.agent.acp_backend = "kiro"
+        canonical = next(iter(model_registry._REGISTRY))
+        provider = cfg.create_provider_factory()(
+            session_key="t-model-kiro", model_override=canonical
+        )
+        assert provider._client._model == model_registry.to_acp_id(canonical)
+
+    def test_claude_env_carries_config_dir_isolation(self, _home, monkeypatch) -> None:
+        monkeypatch.delenv("KIROCREW_CC_ISOLATE", raising=False)
+        provider = KiroCrewConfig().create_provider_factory()(session_key="t-env")
+        env = provider._client._extra_env or {}
+        assert env.get("CLAUDE_CONFIG_DIR", "").endswith("cc-config")
+
+    def test_isolation_opt_out(self, _home, monkeypatch) -> None:
+        monkeypatch.setenv("KIROCREW_CC_ISOLATE", "0")
+        provider = KiroCrewConfig().create_provider_factory()(session_key="t-env-optout")
+        env = provider._client._extra_env or {}
+        assert "CLAUDE_CONFIG_DIR" not in env
+
+    def test_kiro_env_untouched(self, _home) -> None:
+        cfg = KiroCrewConfig()
+        cfg.agent.acp_backend = "kiro"
+        provider = cfg.create_provider_factory()(session_key="t-env-kiro")
+        env = provider._client._extra_env or {}
+        assert "CLAUDE_CONFIG_DIR" not in env
