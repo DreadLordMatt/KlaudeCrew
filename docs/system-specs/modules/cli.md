@@ -161,6 +161,24 @@ The saved project dir enables running `kirocrew` from any directory.
 
 ### First-run Kiro CLI prerequisite onboarding
 
+Fork (KlaudeCrew): this whole section — the `KiroPrerequisiteService`
+readiness contract, the install/sign-in gate — applies only when
+`agent.acp_backend == "kiro"`. On the default `"claude"` backend the service
+isn't even constructed (`assume_kiro_ready` short-circuits it in
+`slack/gateway.py`'s boot sequence, since probing kiro-cli's install/sign-in
+state is meaningless for a backend that isn't kiro-cli). In its place,
+`klaude/prerequisite.check_claude_backend_ready()` runs a much lighter,
+non-blocking check at boot — `AcpClient._resolve_claude_acp_bin()` and
+`_resolve_claude_code_executable()` are cheap synchronous PATH/filesystem
+lookups, not subprocess probes, so it needs none of the latch/poll/SPA-gate
+machinery below. A missing adapter or `claude` binary logs one CRITICAL line
+per gap with the exact install command; it never blocks boot (kiro-cli stays
+a live fallback via `agent.acp_backend: "kiro"`, and every other subsystem —
+Slack, cron, the dashboard itself — works regardless of whether chat can
+start a session). There is currently no dashboard-visible first-run gate for
+the claude path (no SPA blocking screen) — see the fork plan's M3 for
+richer UI, if that's ever warranted.
+
 KiroCrew exposes the same two-step readiness contract on every supported
 platform: an executable candidate must answer `kiro-cli --version`, then
 `kiro-cli whoami` must confirm authentication. Candidate discovery includes
@@ -497,6 +515,14 @@ The wrapper sets `KIROCREW_PROJECT_DIR` and routes to the right runtime based on
 Each step checks if the tool is already installed and skips if present.
 
 ## Doctor Checks
+
+Fork (KlaudeCrew): the Dependencies section reports whichever agent
+`agent.acp_backend` selects (default `"claude"`) as THE backend and the other
+as an optional fallback, rather than always treating kiro-cli as the sole
+backend. On the claude path it resolves `claude-agent-acp` and `claude`
+through the same resolvers `AcpClient` itself uses
+(`_resolve_claude_acp_bin`, `_resolve_claude_code_executable`) so doctor's
+verdict cannot drift from what a real session spawn would see.
 
 1. `kiro-cli` binary in PATH
 2. Project directory and git repo

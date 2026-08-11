@@ -1,3 +1,13 @@
+> **KlaudeCrew fork.** This is a fork of
+> [kirodotdev/KiroCrew](https://github.com/kirodotdev/KiroCrew) that makes
+> **Claude Code** (`claude-agent-acp`) the default agent backend instead of
+> `kiro-cli` — see [`AGENTS.md`](AGENTS.md#this-fork-claude-code-is-the-default-acp-backend)
+> for what changed and why. kiro-cli stays fully supported; set
+> `agent.acp_backend: "kiro"` to use it instead. The rest of this README is
+> upstream's and still describes `kiro-cli` as the backend in most places —
+> read it with that substitution in mind until it's updated section by
+> section.
+
 <p align="center">
   <img src="assets/banner.svg" alt="Kiro Crew. Keep work moving. Runs on your hardware, remembers across sessions, keeps working unattended.">
 </p>

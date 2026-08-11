@@ -146,8 +146,28 @@ def _ensure_prerequisites() -> bool:
         _header()
         print(f"  ⚠️  node not found on PATH — install Node.js >= {MIN_NODE_MAJOR} from https://nodejs.org\n")
 
-    # kiro-cli is the agent backend. Note its absence so the user can install it.
-    if not shutil.which(KIRO_CLI_BIN):
+    # Fork (KlaudeCrew): agent.acp_backend selects the agent backend, default
+    # "claude". Note whichever one is configured but unresolvable so setup can
+    # still finish (this never blocks) while pointing at the real gap.
+    from kiro_crew.acp.client import _resolve_claude_acp_bin, _resolve_claude_code_executable
+    from kiro_crew.config.loader import KiroCrewConfig
+    from kiro_crew.klaude.prerequisite import (
+        CLAUDE_AGENT_ACP_INSTALL_HINT,
+        CLAUDE_CODE_INSTALL_HINT,
+    )
+
+    claude_is_backend = KiroCrewConfig.load().agent.acp_backend != "kiro"
+    if claude_is_backend:
+        if not _resolve_claude_acp_bin():
+            _header()
+            print(
+                "  ℹ️  claude-agent-acp not found (the agent backend) — install "
+                f"it: {CLAUDE_AGENT_ACP_INSTALL_HINT}\n"
+            )
+        if not _resolve_claude_code_executable():
+            _header()
+            print(f"  ℹ️  claude not found — {CLAUDE_CODE_INSTALL_HINT}\n")
+    elif not shutil.which(KIRO_CLI_BIN):
         _header()
         print(
             "  ℹ️  kiro-cli not found on PATH — install it (the agent backend) "

@@ -6,7 +6,15 @@ The ACP layer spans **five** modules: the legacy per-session client (`acp/client
 
 ## Backend Selection
 
-`AcpClient(acp_backend=...)` selects which subprocess to launch:
+`AcpClient(acp_backend=...)` selects which subprocess to launch. Fork
+(KlaudeCrew): the value is config-driven — `agent.acp_backend` (enum
+`["claude", "kiro"]`, **default `"claude"`**) is read by
+`KiroCrewConfig.create_provider_factory()`, which passes
+`ACP_BACKEND_CLAUDE` unless the operator opts out with `"kiro"`. The factory
+also branches model translation (`to_provider_id(m, "claude_code")` on claude
+vs `to_acp_id(m)` on kiro) and injects `CLAUDE_CONFIG_DIR` (below) on the
+claude path. Upstream keeps this seam dormant; this fork is the "internal
+companion" that re-registers it.
 
 - `""` (default): `kiro-cli acp --agent <name>` (resolved by `_resolve_kiro_bin`). Per-session kiro settings are layered in via the workspace overlay `<work_dir>/.kiro/settings/cli.json` (written by `AcpProvider`, not the client): reasoning **effort** (`chat.modelDefaults`) and **MCP Tool Search** (`toolSearch.enabled` + zeroed thresholds, gated by `agent.tool_search`, default on) — see providers.md.
 - `"claude"` (`ACP_BACKEND_CLAUDE`): `claude-agent-acp` (resolved by `_resolve_claude_acp_bin` → `list[str] | None`). Resolution order: `CLAUDE_AGENT_ACP_BIN` env var, then the **vendored copy** (`_resolve_vendored_claude_acp` — `<node_modules>/@agentclientprotocol/claude-agent-acp/dist/index.js` found under the package's `_vendor/node_modules` from the distribution bundle, the sibling `KiroCrewWebsite/node_modules` in a source checkout, or `KIROCREW_PROJECT_DIR`; needs no global npm install or network — matters on hosts that have no package-registry token at gateway runtime), then `mise which claude-agent-acp` (respects MISE_DATA_DIR and all mise config), then `~/.local/share/mise/installs/node/*/bin/claude-agent-acp` (direct glob fallback), then augmented PATH (`env.augmented_path` — mise shims, `~/.npm-packages/bin`, `~/.volta/bin`, `/opt/homebrew/bin`, plus globbed nvm/fnm node bins via `_node_version_manager_bins`, so a non-login launchd/systemd gateway also finds globally-installed binaries). The adapter is vendored into the distribution bundle and the pip build by `setup.py` (`_vendor_acp_into_pkg` → `kiro_crew/_vendor/node_modules`), so every install method ships it without asking the user to `npm i -g`. Vendoring copies the adapter **plus its full transitive dependency closure** (`_acp_dependency_closure` walks `dependencies`/`optionalDependencies` from the resolved website `node_modules`, ~96 flat top-level packages) — npm hoists deps like `@agentclientprotocol/sdk` flat, so copying only the adapter package crashes the ESM loader with `ERR_MODULE_NOT_FOUND`. `_resolve_vendored_claude_acp` accepts a root only when the hoisted dependency marker `@agentclientprotocol/sdk` is present alongside the entry, so an incomplete vendored copy is skipped in favour of a complete one instead of being spawned and crashed. For scripts under mise installs, returns `[node_binary, script_path]` to bypass `#!/usr/bin/env node` shebang resolution which fails in non-interactive daemon contexts. For standalone binaries, returns `[binary_path]`. Pre-spawn the client writes `<work_dir>/.claude/settings.local.json` with `defaultMode: default` so the adapter routes every tool decision back to KiroCrew via `session/request_permission`. This makes claude-agent-acp participate in the same approve / trust_reads / trust / yolo protocol as kiro-cli — dashboard, subagents, channel agents, cron, and heartbeat all share the path. KiroCrew still enforces per-tool security via `HooksConfig.auto_deny_tools` (evaluated by `HookManager.on_tool_call` in `hooks.py`) on every `session/request_permission` event. The subprocess env also carries `CLAUDE_CONFIG_DIR=<config_dir>/cc-config` (isolated config root, distinct from the project-scope `<work_dir>/.claude/settings.local.json` which stays) so the adapter's `SettingsManager` and the SDK read KiroCrew's seeded settings (creds/models kept, plugins stripped) instead of the user's global `~/.claude` — see claude-code-provider.md "Config Isolation" (the "Standalone provider — removed" record). Disable via `KIROCREW_CC_ISOLATE=0`. The env also carries `CLAUDE_CODE_EXECUTABLE` (claude backend only, set in `_spawn` when unset): the adapter delegates the model turn to `@anthropic-ai/claude-agent-sdk`, which needs a per-platform native Claude binary (~250 MB each) shipped as npm `optionalDependencies` that the website install omits — so the vendored closure does **not** include it and the SDK fails `session/new` with `Claude native binary not found for <platform>`. The SDK does **not** search PATH for `claude` itself (so the host merely having the external agent CLI installed is not enough), and bundling a quarter-GB binary per platform is not viable; instead `_resolve_claude_code_executable` finds an existing `claude` (`CLAUDE_CODE_EXECUTABLE` override → `mise which claude` → augmented PATH incl. `~/.toolbox/bin`, where a managed distribution may ship the external agent CLI) and the adapter forwards it to the SDK as `pathToClaudeCodeExecutable` (no version check). If none is found the var is left unset (with a warning) so the adapter's native-binary error surfaces rather than a guessed bad path; an explicit operator-set value always wins.
@@ -89,15 +97,22 @@ Sending the wrong shape yields `-32602 Invalid params` or `-32601 Method not fou
 
 This same method-aware discipline is enforced in `_wait_for_response()`. While it awaits a specific `req_id`, an inbound server→client **request** (method + id — e.g. a colliding `session/request_permission`) or a **foreign-id response** (id ≠ req_id, no method) must not be misread as the awaited response, must not be dropped, and must not be re-appended to `self._buffer` and `continue`-d. The last is the critical hazard: `_read_message()` pops `self._buffer` first, so re-buffering + looping immediately re-reads the same frame and **spins until the deadline** (the original bug — stuck `init`/`load`/`set_config_option` ending in `AcpTimeoutError`). Instead, non-matching survivable frames are collected into a **local `deferred` list** and re-injected at the **front** of `self._buffer` *in arrival order* once the matching response arrives (or on timeout/shutdown), so a later `_prompt_loop`/`_process_message` can still answer a deferred permission request. Notifications (method, no id) continue to go to `_mcp_notifications` for `_drain_notifications`.
 
-### Removed agent-renderer translation (cc_agent.py, deleted)
+### Agent-config translation for the claude backend
 
-When the removed agent renderer generated its agent artifacts, `cc_agent.py` translated kiro-native field names to the removed provider's equivalents using module-level translation tables:
-
-- `_KIRO_TO_CC_TOOL_NAME` — maps kiro tool names (`fs_read`, `execute_bash`, `shell`, `code`, etc.) to the removed provider's names (`Read`, `Bash`, `Edit`, etc.). `@server` prefix becomes `mcp__server`. `use_aws` is dropped (no equivalent).
-- `_KIRO_TO_CC_HOOK_EVENT` — maps kiro hook events (lowerCamel: `preToolUse`, `agentSpawn`) to the removed provider's hook events (PascalCase: `PreToolUse`, `SessionStart`).
-- `_translate_matcher(glob)` — converts kiro glob matchers to the removed provider's regex matchers (escapes regex metacharacters, `*` becomes `.*`, `?` becomes `.`).
-
-MCP server fields translated: `disabled: true` entries are omitted; `autoApprove: [tool]` maps to `mcp__<server>__<tool>` in settings allow-list; `disabledTools: [tool]` maps to agent-level `disallowedTools`.
+The original standalone provider's `cc_agent.py` translated kiro-native field
+names to that provider's equivalents (tool names, hook event names, glob
+matchers) so a full agent artifact — tools, hooks, prompt — could be rendered
+for it. That renderer is gone and is **not** what this fork's claude-agent-acp
+backend needs: claude-agent-acp doesn't consume a rendered agent artifact at
+all, it drives the model directly and only needs the `mcpServers` array
+(above) plus the ACP protocol's own tool/permission negotiation — tool
+allow/deny still routes entirely through `session/request_permission` and
+`hooks.py`'s `HooksConfig.auto_deny_tools`, not a translated hooks file. The
+only translation this fork performs is the MCP-server reshape in
+`klaude/mcp_servers.py` described above (`disabled: true` entries are
+omitted; kiro's `autoApprove`/`disabledTools` per-server lists are not
+currently forwarded — the permission gate in `hooks.py` is what actually
+enforces tool access either way, so the security floor holds without them).
 
 ## Agent Configuration
 
@@ -133,14 +148,18 @@ flag passed to `kiro-cli acp` at spawn time drives all configuration:
     MCP tab writes directly to the global config.
   - **claude-agent-acp**: does NOT read any config file or `--agent` flag, so
     `session/new` (and `session/load`) must carry the servers in the
-    `mcpServers` param. `_claude_acp_mcp_servers()` reads the KiroCrew-owned
-    `~/.claude/agents/kirocrew.mcp.json` (kept current by
-    `agent.install_cc_agent_config`) and reshapes it to the ACP array via
-    `cc_agent.acp_servers_from_cc_map` (stdio → `{name,command,args,env:[{name,value}],type}`;
-    url → `{name,type:"http"|"sse",url,headers}`). kirocrew-core/cron are forced
-    to their canonical stdio command (overriding any stale `url`) and always
-    injected even when the registry is missing. Read per spawn so MCP
-    installs/toggles apply on the next session without a gateway restart.
+    `mcpServers` param. Fork (KlaudeCrew): `AcpClient._claude_session_mcp_servers()`
+    (the seam upstream ships as a `[]` stub) is attached by
+    `klaude/registry.py` to `klaude/mcp_servers.claude_session_servers()`,
+    which reads the SAME merged agent spec kiro-cli itself consults
+    (`~/.kiro/agents/<agent>.json` — no separate sidecar file; nothing in the
+    tree still writes `~/.claude/agents/kirocrew.mcp.json`) and reshapes it to
+    the ACP array (stdio → `{name,command,args,env:[{name,value}],type}`; url
+    → `{name,type:"http"|"sse",url,headers}`). kirocrew-core/cron/computer are
+    forced to their canonical stdio command (overriding any stale `url`) and
+    always injected even when the spec is missing or unreadable. Read per
+    spawn so MCP installs/toggles apply on the next session without a gateway
+    restart.
 - **Tools/allowedTools/toolsSettings**: Applied by kiro-cli via `set_mode`.
 - **Prompt/resources/hooks**: Applied by kiro-cli via `set_mode`.
 - **deniedCommands**: Enforced by KiroCrew's `_enforce_denied_commands()` on

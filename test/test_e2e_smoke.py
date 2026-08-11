@@ -325,3 +325,138 @@ def test_chat_tool_call_renders(acp_gateway):
 
     reply = _await_assistant_reply(acp_gateway, slot)
     assert "pong from the fake ACP backend" in json.dumps(reply)
+
+
+# --- Fork (KlaudeCrew): claude-backend send -> assert -------------------------
+#
+# The two sections above exercise the kiro dialect via KIROCREW_KIRO_BIN, which
+# only the kiro branch of the ACP client consults. This section is the claude
+# equivalent: the fake ACP backend is already directly executable
+# (shebang + exec bit, same as the kiro path resolves it), so pointing
+# CLAUDE_AGENT_ACP_BIN at it exercises the SAME _is_claude branches a real
+# claude-agent-acp spawn would, end to end through a real gateway subprocess --
+# the offline smoke test for M2's MCP-injection contract and the general
+# claude wire shape (integer protocolVersion, session/set_config_option, etc.),
+# without needing the actual Node adapter or a live `claude` install.
+
+
+@pytest.fixture()
+def claude_gateway(tmp_path, monkeypatch):
+    """Gateway whose claude-agent-acp is the offline fake ACP backend, in
+    claude-dialect mode.
+
+    Mirrors ``acp_gateway`` above but for the claude branch:
+    ``spawn_feature_gateway(acp_backend="claude")`` sets
+    ``KIROCREW_TEST_ACP_BACKEND=claude`` so the spawned gateway's
+    ``agent.acp_backend`` resolves to claude regardless of the real default,
+    and ``CLAUDE_AGENT_ACP_BIN`` + ``FAKE_ACP_DIALECT=claude`` route that
+    spawn to the fake's claude wire shape instead of a real Node adapter.
+    """
+    from kiro_crew.testing import fake_acp_backend
+    from kiro_crew.testing.harness import spawn_feature_gateway
+
+    mcp_probe = tmp_path / "mcp_probe.json"
+    monkeypatch.setenv("CLAUDE_AGENT_ACP_BIN", str(fake_acp_backend.__file__))
+    monkeypatch.setenv("FAKE_ACP_DIALECT", "claude")
+    monkeypatch.setenv("FAKE_ACP_MCP_PROBE_PATH", str(mcp_probe))
+    # The claude path writes <work_dir>/.claude/settings.local.json against
+    # the real filesystem (klaude/settings_seed.py) -- isolate it under the
+    # harness's own tmp KIROCREW_HOME rather than the operator's ~/.claude.
+    monkeypatch.setenv("KIROCREW_CC_ISOLATE", "1")
+
+    with spawn_feature_gateway(
+        fixture="minimal", approval="reads", acp_backend="claude"
+    ) as handle:
+        cfg = handle.home / "config.json"
+        if cfg.is_file():
+            backend = (
+                json.loads(cfg.read_text(encoding="utf-8"))
+                .get("agent", {})
+                .get("acp_backend", "claude")
+            )
+            assert backend != "kiro", (
+                "claude_gateway needs the spawned gateway to resolve the "
+                "claude backend; config.json explicitly pinned it to kiro"
+            )
+        yield handle
+
+
+def test_claude_chat_send_receives_reply(claude_gateway):
+    """A chat turn against the claude-dialect fake yields a non-empty reply.
+
+    Proves the whole path -- gateway HTTP -> chat runner -> subprocess spawn
+    via CLAUDE_AGENT_ACP_BIN -> the claude `initialize` handshake (integer
+    protocolVersion) -> `session/new` with a real mcpServers array ->
+    `session/prompt` -> streamed `agent_message_chunk` -> assembled reply --
+    works with the fork's claude backend selected, not just kiro.
+    """
+    slot = _api_post(claude_gateway, "/api/chat/slots", {})["key"]
+    assert slot
+
+    _api_post(
+        claude_gateway,
+        "/api/chat?ws=1",
+        {"message": "ping", "slot": slot, "agent": "kirocrew"},
+    )
+
+    reply = _await_assistant_reply(claude_gateway, slot)
+    assert "pong from the fake ACP backend" in json.dumps(reply)
+
+
+def test_claude_session_new_carries_mcp_servers(claude_gateway, tmp_path):
+    """The claude branch actually populates `session/new`'s `mcpServers`.
+
+    This is M2's whole point: claude-agent-acp reads no config file, so
+    without `klaude/mcp_servers.claude_session_servers()` a claude session
+    gets ZERO MCP tools (no cron, no subagents, no memory). The fake records
+    exactly what it received in FAKE_ACP_MCP_PROBE_PATH -- assert the
+    managed kirocrew-core/-cron servers are actually in that array, not just
+    that a turn completed (which would also "pass" with an empty array).
+
+    ``tmp_path`` here resolves to the SAME directory the ``claude_gateway``
+    fixture used to build ``FAKE_ACP_MCP_PROBE_PATH`` -- pytest hands one
+    ``tmp_path`` per test node, shared by every fixture the test requests.
+    """
+    mcp_probe = tmp_path / "mcp_probe.json"
+    slot = _api_post(claude_gateway, "/api/chat/slots", {})["key"]
+    _api_post(
+        claude_gateway,
+        "/api/chat?ws=1",
+        {"message": "ping", "slot": slot, "agent": "kirocrew"},
+    )
+    _await_assistant_reply(claude_gateway, slot)
+
+    deadline = time.monotonic() + 10.0
+    servers = None
+    while time.monotonic() < deadline:
+        if mcp_probe.is_file():
+            try:
+                servers = json.loads(mcp_probe.read_text())
+            except (OSError, json.JSONDecodeError):
+                servers = None
+            if servers is not None:
+                break
+        time.sleep(0.2)
+
+    assert servers, "fake ACP backend never received a populated mcpServers array"
+    names = {s.get("name") for s in servers if isinstance(s, dict)}
+    assert "kirocrew-core" in names
+    assert "kirocrew-cron" in names
+
+
+def test_claude_tool_call_renders(claude_gateway):
+    """A ``[[TOOL]]`` prompt drives the fake's tool-call path over the claude
+    branch too -- same structural coverage as the kiro-side
+    ``test_chat_tool_call_renders``, proving tool_call/tool_call_update
+    handling isn't kiro-dialect-specific."""
+    slot = _api_post(claude_gateway, "/api/chat/slots", {})["key"]
+    assert slot
+
+    _api_post(
+        claude_gateway,
+        "/api/chat?ws=1",
+        {"message": "please [[TOOL]] run the demo", "slot": slot, "agent": "kirocrew"},
+    )
+
+    reply = _await_assistant_reply(claude_gateway, slot)
+    assert "pong from the fake ACP backend" in json.dumps(reply)

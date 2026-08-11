@@ -49,20 +49,42 @@ so ``main()`` reads on a background thread into a queue rather than looping
 read->handle. Calling ``_handle`` directly (as the unit tests do) leaves that
 queue empty, every wait times out, and the default behaviour is unchanged.
 
-Deterministic, offline, no network, no auth, stdlib-only. Reachable ONLY via
-the ``KIROCREW_KIRO_BIN`` override (the provider stays ``acp``); it is never
-selectable from a real gateway. Run standalone as
-``python -m kiro_crew.testing.fake_acp_backend`` (the pytest harness and the
-live-test harness both point ``KIROCREW_KIRO_BIN`` at a launcher that runs it).
-``AcpClient`` invokes it as ``<launcher> acp [--agent NAME ...]`` -- argv is
-ignored on that path and the protocol is driven entirely over stdio. The
+Deterministic, offline, no network, no auth, stdlib-only. Reachable via
+``KIROCREW_KIRO_BIN`` (kiro dialect, the default) or ``CLAUDE_AGENT_ACP_BIN``
+(claude dialect, see below) -- it is never selectable from a real gateway.
+Run standalone as ``python -m kiro_crew.testing.fake_acp_backend`` (the
+pytest harness and the live-test harness both point one of those env vars at
+a launcher that runs it). ``AcpClient`` invokes the kiro path as
+``<launcher> acp [--agent NAME ...]`` -- argv is ignored on that path and the
+protocol is driven entirely over stdio; the claude path invokes the launcher
+with NO argv at all (claude-agent-acp reads no ``--agent`` flag). The
 ``--version`` and ``whoami`` commands return deterministic success so the
 offline gateway exercises the same first-run readiness gate as production.
+
+Fork (KlaudeCrew) -- claude dialect: set ``FAKE_ACP_DIALECT=claude`` (the
+launcher script the claude-dialect harness/tests point ``CLAUDE_AGENT_ACP_BIN``
+at sets this) to flip the two wire-shape divergences that matter for exercising
+the ``_is_claude`` branches in ``acp/client.py``:
+
+* ``initialize`` replies with an INTEGER ``protocolVersion`` (``1``) instead
+  of the kiro dialect's date string -- see ``PROTOCOL_VERSION_CLAUDE``.
+* ``[[THOUGHT]]`` in the prompt emits an ``agent_thought_chunk`` update (a
+  claude-only ``session/update`` kind kiro-cli never sends) ahead of the
+  normal reply chunk.
+
+Independent of dialect: ``session/new`` and ``session/load`` always record
+the received ``mcpServers`` param to ``FAKE_ACP_MCP_PROBE_PATH`` (as JSON)
+when that env var is set, so a test can assert on exactly what the client
+sent without parsing stdout -- the claude backend's whole MCP-injection
+contract (``klaude/mcp_servers.py``) is that this array is populated even
+though kiro-cli always sends ``[]`` here (it gets its servers via ``--agent``
+instead), so this is the one field worth a dedicated probe.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import queue
 import sys
 import threading
@@ -70,6 +92,9 @@ import time
 from typing import Any, Callable
 
 PROTOCOL_VERSION = "2025-08-22"
+# Fork (KlaudeCrew): the claude dialect's protocolVersion is an INTEGER, not
+# a date string -- see module docstring "claude dialect".
+PROTOCOL_VERSION_CLAUDE = 1
 
 # Stable, searchable marker the send->assert test asserts on. Kept distinctive
 # so a real backend's output could never masquerade as this fake's reply.
@@ -96,6 +121,9 @@ SLOW_LATEACK_TRIGGER = "[[SLOW_LATEACK]]"
 ERROR_TRIGGER = "[[ERROR]]"
 MAX_TOKENS_TRIGGER = "[[MAXTOKENS]]"
 REFUSAL_TRIGGER = "[[REFUSAL]]"
+# Fork (KlaudeCrew): claude-only session/update kind -- see "claude dialect"
+# in the module docstring. No-op (ignored) outside FAKE_ACP_DIALECT=claude.
+THOUGHT_TRIGGER = "[[THOUGHT]]"
 
 # Slow-stream shape. Module-level so unit tests can shrink them to run fast:
 # 30 x 0.5s = ~15s, comfortably longer than the 0.5s-60s soft_stop_budget_secs
@@ -149,6 +177,28 @@ def _update(session_id: str, update: dict[str, Any]) -> None:
 
 def _error(req_id: Any, code: int = ERROR_CODE, message: str = ERROR_MESSAGE) -> None:
     _send({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
+
+
+def _dialect() -> str:
+    """``"claude"`` or ``"kiro"`` (default) -- see module docstring."""
+    return "claude" if os.environ.get("FAKE_ACP_DIALECT") == "claude" else "kiro"
+
+
+def _record_mcp_servers(params: dict[str, Any]) -> None:
+    """Write the received ``mcpServers`` array to ``FAKE_ACP_MCP_PROBE_PATH``.
+
+    No-op when the env var is unset (the common case -- most tests don't
+    need this). Fail-soft: a probe write must never break the fake's own
+    protocol handling.
+    """
+    probe_path = os.environ.get("FAKE_ACP_MCP_PROBE_PATH")
+    if not probe_path:
+        return
+    try:
+        with open(probe_path, "w", encoding="utf-8") as f:
+            json.dump(params.get("mcpServers"), f)
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -383,12 +433,18 @@ def _handle(msg: dict[str, Any]) -> None:
         _result(
             req_id,
             {
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": (
+                    PROTOCOL_VERSION_CLAUDE if _dialect() == "claude" else PROTOCOL_VERSION
+                ),
                 "agentCapabilities": {"loadSession": False},
             },
         )
     elif method == "session/new":
+        _record_mcp_servers(msg.get("params") or {})
         _result(req_id, {"sessionId": _SESSION_ID})
+    elif method == "session/load":
+        _record_mcp_servers(msg.get("params") or {})
+        _result(req_id, {"modes": ["chat"]})
     elif method == "session/prompt":
         params = msg.get("params") or {}
         session_id = str(params.get("sessionId", _SESSION_ID))
@@ -403,6 +459,17 @@ def _handle(msg: dict[str, Any]) -> None:
             _emit_tool_call(session_id, with_permission=True)
         elif TOOL_TRIGGER in text:
             _emit_tool_call(session_id, with_permission=False)
+
+        if THOUGHT_TRIGGER in text and _dialect() == "claude":
+            # Claude-only update kind (see module docstring) -- ahead of the
+            # reply chunk, mirroring how a real reasoning turn streams.
+            _update(
+                session_id,
+                {
+                    "sessionUpdate": "agent_thought_chunk",
+                    "content": {"type": "text", "text": "fake reasoning trace"},
+                },
+            )
 
         if SLOW_NOACK_TRIGGER in text:
             _stream_slowly(session_id, cancel_aware=False)

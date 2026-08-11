@@ -13,8 +13,8 @@ model, no credentials, no network, no cost.
 
 | File | What it covers |
 |---|---|
-| `test/test_e2e_smoke.py` | Gateway boot and HTTP-level smoke checks. |
-| `test/test_playwright_e2e.py` | The dashboard browser suite, folded in so one command is the whole gate. |
+| `test/test_e2e_smoke.py` | Gateway boot and HTTP-level smoke checks, over both the kiro dialect (`KIROCREW_KIRO_BIN`, the default fake wire shape) and — fork (KlaudeCrew) — the claude dialect (`claude_gateway` fixture: `CLAUDE_AGENT_ACP_BIN` + `FAKE_ACP_DIALECT=claude`, proving M2's MCP-server injection actually reaches the wire through a real gateway boot). |
+| `test/test_playwright_e2e.py` | The dashboard browser suite, folded in so one command is the whole gate. Still kiro-dialect only. |
 
 ## What the command sets up
 

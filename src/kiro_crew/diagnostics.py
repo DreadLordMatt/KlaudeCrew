@@ -289,6 +289,30 @@ def _kiro_cli_version() -> str:
         return "unavailable"
 
 
+def _claude_acp_version() -> str:
+    """Fork (KlaudeCrew): claude-agent-acp's own reported version.
+
+    Same best-effort shape as :func:`_kiro_cli_version` -- a missing/unusable
+    adapter must not break bundle collection, it just reports "unavailable".
+    """
+    try:
+        from kiro_crew.acp.client import _resolve_claude_acp_bin
+
+        argv = _resolve_claude_acp_bin()
+        if not argv:
+            return "unavailable"
+        out = subprocess.run(
+            [*argv, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return (out.stdout or out.stderr).strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unavailable"
+
+
 #: PEP 440 prerelease segment — see
 #: :data:`kiro_crew.release_channel._PEP440_PRERELEASE`, which owns the rule.
 #: Kept here only so the pattern is greppable from this module's tests.
@@ -339,6 +363,7 @@ def _versions_text(note: str) -> str:
         f"kirocrew_version: {__version__}",
         f"channel: {_channel()}",
         f"kiro_cli_version: {_kiro_cli_version()}",
+        f"claude_acp_version: {_claude_acp_version()}",
         f"python: {platform.python_version()}",
         f"platform: {platform.platform()}",
         f"machine: {platform.machine()}",

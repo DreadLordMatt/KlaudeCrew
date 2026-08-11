@@ -1,25 +1,36 @@
-# Standalone provider — removed
+# Claude Code ACP backend — live in this fork (KlaudeCrew)
 
-> **This provider no longer exists in KiroCrew.** The public fork drives a single
-> backend — `kiro-cli` over the Agent Client Protocol (`agent.provider` is fixed
-> to `acp`). The removed standalone provider, the removed Bedrock provider, the
-> removed agent-renderer / mirror modules, their config fields, and the dashboard
-> provider selector were all removed during de-Amazoning. There is no provider to
-> choose.
+> **Fork note:** this doc originally recorded a DIFFERENT, older removal — a
+> standalone (non-ACP) Claude provider and a Bedrock provider, both deleted
+> during upstream's de-Amazoning along with their agent-renderer/mirror
+> modules and the dashboard's provider selector. Those stay gone; they were a
+> separate code path (a full alternate `LLMProvider` implementation) from
+> what this section now describes. What upstream ALSO ships — and what this
+> fork changes — is a second, still-ACP seam: `acp/client.py`'s
+> `ACP_BACKEND_CLAUDE` / `_is_claude` branch, which upstream keeps dormant
+> (`agent.provider` fixed to `acp`, kiro-cli the only backend selected) so
+> that "an internal companion package can re-register" it. **This fork is
+> that companion.** See `AGENTS.md` § "This fork: Claude Code is the default
+> ACP backend" for the overview.
 
-## What remains (the dormant ACP seam)
+## How the fork re-enables it
 
-`acp/client.py` keeps an inert protocol seam (`ACP_BACKEND_CLAUDE` / the
-`_is_claude` branch) so an internal companion package can re-register an
-alternate `claude-agent-acp` backend without forking the client. The public core
-never selects it: `_resolve_kiro_bin` is the only backend the provider factory
-wires, and the dashboard exposes no provider choice. **Do not re-add the
-registration glue or a provider selector** — see the repo-root `CLAUDE.md`.
+`agent.acp_backend` (config, enum `"claude"`/`"kiro"`, default `"claude"`)
+drives `KiroCrewConfig.create_provider_factory()`'s `_acp()` closure, which
+passes `acp_backend=ACP_BACKEND_CLAUDE` into `AcpProvider`/`AcpClient` unless
+the operator opts out. The ~30 `_is_claude` branches already in
+`acp/client.py` (protocol version, `session/set_config_option` vs
+`session/set_model`, permission-option field names, etc.) needed no changes
+— they were written for exactly this. The registration glue two of those
+branches look up via `getattr` — MCP server injection, the
+`settings.local.json` permission seed, and session-transcript lifecycle — is
+supplied by the new `src/kiro_crew/klaude/` package, attached through the
+`ProviderRegistry` extension point (`klaude/registry.py`, swapped in at
+`platform/bootstrap.py`) rather than by editing `acp/client.py` itself.
 
 The seam's binary-resolution details (`_resolve_claude_acp_bin`, the per-session
 `settings.local.json` permission routing, `CLAUDE_CONFIG_DIR` isolation) are
-documented in [`acp-client.md`](../modules/acp-client.md) for the companion that
-re-enables it — they are not user-facing in the public build.
+documented in [`acp-client.md`](../modules/acp-client.md) §Backend Selection.
 
 ## Model registry
 

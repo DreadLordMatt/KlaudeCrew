@@ -772,9 +772,12 @@ def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False
 
     # ── Dependencies ──
     print("Dependencies")
-    # kiro-cli is THE agent backend for the public build. claude-agent-acp is
-    # only the dormant protocol seam (re-registered by an internal companion),
-    # so report it as optional and report kiro-cli as the backend.
+    # Fork (KlaudeCrew): agent.acp_backend selects which agent is THE backend
+    # (default "claude"); the other is reported as optional/fallback rather
+    # than hardcoding kiro-cli as the only real one.
+    _backend_cfg = KiroCrewConfig.load()
+    _claude_is_backend = _backend_cfg.agent.acp_backend != "kiro"
+
     kiro = shutil.which(KIRO_CLI_BIN)
     if kiro:
         print(f"  kiro-cli:    ✅ {kiro}")
@@ -792,13 +795,35 @@ def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False
                 print("  kiro login:  ⏹ not logged in (run: kiro-cli login)")
         except Exception:
             print("  kiro login:  ⚠️  could not check")
+    elif _claude_is_backend:
+        print("  kiro-cli:    ⏭  not found (optional fallback backend)")
     else:
         print("  kiro-cli:    ⏭  not found (the agent backend)")
         print("               Install kiro-cli per its docs, then: kiro-cli login")
 
-    claude_acp = shutil.which(_CLAUDE_ACP_BIN)
-    if claude_acp:
-        print(f"  claude-acp:  ✅ {claude_acp} (dormant seam — not used by the public core)")
+    from kiro_crew.acp.client import _resolve_claude_acp_bin, _resolve_claude_code_executable
+    from kiro_crew.klaude.prerequisite import (
+        CLAUDE_AGENT_ACP_INSTALL_HINT,
+        CLAUDE_CODE_INSTALL_HINT,
+    )
+
+    claude_acp = shutil.which(_CLAUDE_ACP_BIN) or _resolve_claude_acp_bin()
+    claude_exe = _resolve_claude_code_executable()
+    if _claude_is_backend:
+        if claude_acp:
+            shown = claude_acp if isinstance(claude_acp, str) else " ".join(claude_acp)
+            print(f"  claude-acp:  ✅ {shown} (the agent backend)")
+        else:
+            print("  claude-acp:  ⏭  not found (the agent backend)")
+            print(f"               Fix: {CLAUDE_AGENT_ACP_INSTALL_HINT}")
+        if claude_exe:
+            print(f"  claude:      ✅ {claude_exe}")
+        else:
+            print("  claude:      ⏭  not found")
+            print(f"               Fix: {CLAUDE_CODE_INSTALL_HINT}")
+    elif claude_acp:
+        shown = claude_acp if isinstance(claude_acp, str) else " ".join(claude_acp)
+        print(f"  claude-acp:  ✅ {shown} (optional fallback backend)")
 
     git = shutil.which("git")
     if git:

@@ -38,7 +38,6 @@ from kiro_crew.platform.defaults import (
     DefaultMcpToolingProvider,
     DefaultPackageManager,
     DefaultPromptSourceProvider,
-    DefaultProviderRegistry,
     DefaultPublishRegistry,
     DefaultSandboxPolicy,
     DefaultSlackEnterpriseGate,
@@ -53,6 +52,10 @@ from kiro_crew.platform.governance import (
 )
 from kiro_crew.platform.profile import resolve_profile
 from kiro_crew.platform.security_authority import PolicyAuthority, assert_security_floor
+
+# Fork (KlaudeCrew): re-enables the dormant ACP_BACKEND_CLAUDE seam via the
+# sanctioned ProviderRegistry extension point -- see klaude/registry.py.
+from kiro_crew.klaude.registry import KlaudeProviderRegistry
 
 if TYPE_CHECKING:
     from kiro_crew.config.loader import KiroCrewConfig
@@ -122,7 +125,11 @@ def build_default_context(
         contract_version=CONTRACT_VERSION,
         profile=profile,
         cfg=cfg,
-        providers=DefaultProviderRegistry(),
+        # Fork (KlaudeCrew): upstream wires DefaultProviderRegistry() here
+        # (Kiro-CLI-ACP only, register_acp_backends() a no-op). This is the
+        # fork's one-line swap that re-enables the dormant ACP_BACKEND_CLAUDE
+        # seam -- see klaude/registry.py.
+        providers=KlaudeProviderRegistry(),
         publish=DefaultPublishRegistry(),
         agent_runtime=DefaultAgentRuntime(),
         agent_executable=DefaultAgentExecutableResolver(),
