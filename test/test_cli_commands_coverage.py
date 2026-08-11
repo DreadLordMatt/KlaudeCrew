@@ -1833,7 +1833,7 @@ class TestTelemetryCli:
             patch.object(KiroCrewConfig, "load", return_value=KiroCrewConfig()),
             patch("kiro_crew.cli_commands.config_path", return_value=path),
             patch("kiro_crew.cli_commands.beacon"),
-            patch("kiro_crew.cli_commands.atomic_write", side_effect=OSError("disk full")),
+            patch("kiro_crew.config.loader.atomic_write", side_effect=OSError("disk full")),
             pytest.raises(SystemExit) as exc,
         ):
             cc._telemetry(_ns(telemetry_action="disable"))
