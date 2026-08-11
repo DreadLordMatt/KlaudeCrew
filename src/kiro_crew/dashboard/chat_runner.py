@@ -162,6 +162,7 @@ from kiro_crew.llm_helpers import (
     transient_retry_delay,
 )
 from kiro_crew.mcp_discovery import kirocrew_managed_names
+from kiro_crew.members import record_activity
 from kiro_crew.messaging.identity import publish_turn_identity
 from kiro_crew.messaging.link import SLACK_NAMESPACE, telemetry_channel_of
 from kiro_crew.messaging.renderer import chunk_text
@@ -3614,6 +3615,26 @@ async def _run_chat(
             reasoning_effort_override=slot.reasoning_effort or None,
         )
         _acquired = True
+        # Member activity pointer — once per SESSION, not per turn: the log
+        # answers "which sessions did this member take part in", so a per-turn
+        # append would inflate every count taken from it. `slot.agent` is the
+        # member the human picked; `kiro_agent` is the template it resolved to,
+        # and only the member identity is recorded.
+        #
+        # Offloaded: this opens and appends to a file, and `_run_chat` shares the
+        # single gateway event loop with every other session — matching the
+        # to_thread offloads used for the other file IO in this function.
+        # record_activity is total, so no guard is needed here.
+        if is_new and slot.agent:
+            await asyncio.to_thread(
+                record_activity,
+                slot.agent,
+                session_key,
+                slot.memory_mode or "",
+                project=slot.project or "",
+                via="chat",
+                dedupe_session=True,
+            )
         # Publish the live inner AcpClient onto the slot so a concurrent request
         # (the dashboard steer handler) can reach the running session's client
         # to inject a mid-turn steer. Cleared in the finally below.

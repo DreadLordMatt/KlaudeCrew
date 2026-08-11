@@ -1754,19 +1754,19 @@ class ContextBuilder:
         if not is_custom:
             ws_name = workspace or "default"
             ws_path = workspace_dir_for(ws_name)
+            # Deliberately does NOT advertise scope="workspace" for lessons. That
+            # scope no longer reaches a prompt (see the lessons block above), so
+            # telling the agent to use it would make it save corrections that
+            # silently never apply — the exact failure the unwire removes.
             parts.append(
                 "[WORKSPACE IDENTITY]\n"
                 f"You are operating in workspace: {ws_name}\n"
                 f"Workspace path: {ws_path}\n"
-                "A workspace is an isolated context with its own memory (preferences, "
-                "projects, daily history) and files. Different workspaces have different "
-                "memory — what you learn in one workspace stays in that workspace.\n\n"
-                "Lessons have two scopes (use learn_add tool to save):\n"
-                "- scope=global (default): shared across ALL workspaces. "
-                "Use for universal preferences (e.g. 'always use dark mode').\n"
-                f"- scope=workspace: only visible in this workspace ({ws_name}). "
-                "Use for project-specific rules "
-                "(e.g. 'this repo uses pytest-asyncio strict mode').\n"
+                "A workspace is a shared space holding your knowledge base, "
+                "preferences, project notes, daily history and files.\n\n"
+                "Lessons saved with the learn_add tool apply across all "
+                "workspaces. Use them for durable corrections and preferences, "
+                "not for one-off facts.\n"
                 "[End of workspace identity]\n\n"
             )
 
@@ -1924,8 +1924,22 @@ class ContextBuilder:
                     skills_ctx = skills_ctx[: caps.skills] + "\n...[skills truncated]\n"
                 parts.append(skills_ctx)
 
-        # Lessons: merge global + workspace-scoped — inject for ALL agents
-        # (skipped for temporary sessions)
+        # Lessons: global only — injected for ALL agents (skipped for temporary
+        # sessions).
+        #
+        # Workspace-scoped lessons are deliberately NOT merged here. The scope
+        # dates from when a workspace WAS a project, so "workspace lessons" meant
+        # "this project's rules"; project identity now lives on the session
+        # (``slot.project``), leaving the scope with nothing to anchor to. The
+        # merge it replaced was also unreachable in practice: it required
+        # ``workspace != "default"`` while every member resolves to ``default``,
+        # so a lesson saved with ``scope="workspace"`` reported success and then
+        # never reached a prompt. Removing the read keeps that silent failure
+        # from looking like a working feature.
+        #
+        # ``LessonStore`` and ``get_lessons_for`` are intentionally left intact:
+        # the per-member memory work re-targets the write side onto them, so the
+        # store is dormant here, not dead.
         lessons_ctx = ""
         if not blocks_reads and _group_included(context_groups, CONTEXT_GROUP_LESSONS):
             # One query, not two: get_lessons_context() already returns "" when the
@@ -1935,19 +1949,6 @@ class ContextBuilder:
             lessons_ctx = memory.vector_store.get_lessons_context() if memory.vector_store else ""
             if not lessons_ctx:
                 lessons_ctx = self.lessons.get_context()
-            # Merge workspace-scoped lessons if workspace differs from default
-            if workspace and workspace != "default":
-                ws_lessons = self.get_lessons_for(workspace)
-                ws_ctx = ws_lessons.get_context()
-                if ws_ctx and lessons_ctx:
-                    # Append workspace lessons inside the same block
-                    lessons_ctx = (
-                        lessons_ctx.rstrip().removesuffix("[End of learned corrections]").rstrip()
-                        + "\n"
-                        + ws_ctx.split("]", 1)[-1].lstrip()
-                    )
-                elif ws_ctx:
-                    lessons_ctx = ws_ctx
             if lessons_ctx:
                 if len(lessons_ctx) > caps.lessons:
                     over = len(lessons_ctx) - caps.lessons
