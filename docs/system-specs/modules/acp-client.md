@@ -399,6 +399,17 @@ kiro can return a `-32603` error that is an *advisory* that it substituted a dif
 
 **Per-turn kiro billing credits.** `_track_metadata()` parses each `_kiro.dev/metadata` notification via the shared `parse_metadata()`, capturing `meteringUsage` entries with `unit=="credit"` (kiro bills in credits; token fields are 0 for the acp provider) into `AcpPromptStats.credits`, accumulated across the turn and surfaced on `EVENT_COMPLETE`.
 
+## Model Advertisement
+
+`AcpClient._capture_available_models(session_resp)` records the backend's advertised model catalog into `self._available_models` (`{modelId, name, description}` rows) and `self._resolved_model_id`. Two wire shapes exist, checked in order, first usable one wins:
+
+1. A `models` object on the `session/new`/`session/load` response itself: `{availableModels: [{modelId, name, description}], currentModelId}`. The ACP-spec shape this code originally assumed.
+2. **Fork (KlaudeCrew), live-verified** against a real gateway + real `claude` + `claude-agent-acp` v0.66.0: that adapter does **not** send shape 1 at all. It advertises models as one entry of the `configOptions` array every `session/new`/`session/load` response already carries — the same array `get_valid_effort_levels()` reads for `id == "effort"` — shaped `{id: "model", currentValue, options: [{value, name, description}, ...]}`. Observed values are short, human-facing strings (`"opus[1m]"`, `"sonnet"`, `"haiku"`, `"default"`, `"claude-fable-5[1m]"`) with **no mechanical relationship** to `model_registry.json`'s `claude_code` column (which is Bedrock cross-region-profile ids, e.g. `global.anthropic.claude-opus-4-8[1m]`) — confirmed no reliable prefix-strip exists between the two (`"opus[1m]"` vs. `"global.anthropic.claude-opus-4-8[1m]"`). `_apply_model_config_option()` is the shared extraction (module-level `_parse_model_options()` reshapes either wire shape into the one internal row shape), called from `_capture_available_models()` (initial capture, parsed directly off the raw response — both call sites invoke this *before* `_store_session_config()` populates `self._acp_config_options`) and from `_handle_config_option_update()` (live mid-session refresh, mirroring `_sync_effort_levels()`'s existing dual call sites on the same array).
+
+`model_registry.resolve_claude_wire_id(preferred, advertised)` is the one function that matches a `preferred` value (a canonical registry key, a registry alias, or an already-bare wire value) against this live-advertised set via `canonicalize_for_provider()`, returning the **verbatim advertised string** on match or `None` — never a fabricated/transformed id. This is the claude-backend counterpart to `model_is_unusable()`/`resolve_usable_model()` (kiro path), which compares against the SAME namespace the advertised ids and `session/set_model` share — a comparison that does not hold for claude, whose advertised ids share no namespace with the registry's Bedrock provider column.
+
+`available_models()`, `_advertised_model_ids()`, `advertised_model_ids()` (module-level, shared by ~10 call sites across `session.py`/`chat_runner.py`/`agents.py`/`core.py`/`providers/acp.py`), and `agents.py`'s `_advertised_cc_models`/`_cc_models` all consume `self._available_models` unchanged regardless of which wire shape populated it.
+
 ## Exceptions
 
 `AcpError` (base), `AcpTimeoutError` (has `partial_output`), `AcpPermissionNeeded`, `AcpProcessDied`, `AcpAuthRequired`, `AcpPromptBusy`.

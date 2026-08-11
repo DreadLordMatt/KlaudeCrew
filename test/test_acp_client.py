@@ -6797,6 +6797,87 @@ class TestCaptureAvailableModels:
         assert c.available_models()[0]["modelId"] == "m1"
 
 
+class TestCaptureAvailableModelsFromConfigOptions:
+    """Fork (KlaudeCrew): the real claude-agent-acp wire shape, live-verified
+    (v0.66.0, a real gateway + real `claude`) -- no top-level `models` field
+    at all; the model list is one entry of `configOptions`, the same array
+    `get_valid_effort_levels()` reads for `id == "effort"`."""
+
+    def _client(self):
+        return AcpClient(acp_backend=ACP_BACKEND_CLAUDE)
+
+    def _resp(self, **extra):
+        return {
+            "sessionId": "s",
+            "configOptions": [
+                {"id": "mode", "options": [{"value": "default"}]},
+                {
+                    "id": "model",
+                    "currentValue": "opus[1m]",
+                    "options": [
+                        {"value": "default", "name": "Default (recommended)", "description": "..."},
+                        {"value": "opus[1m]", "name": "Opus (1M context)", "description": "..."},
+                        {"value": "sonnet", "name": "Sonnet", "description": "..."},
+                    ],
+                },
+                {"id": "effort", "options": [{"value": "low"}, {"value": "high"}]},
+            ],
+            **extra,
+        }
+
+    def test_captures_from_config_options_when_models_key_absent(self):
+        c = self._client()
+        c._capture_available_models(self._resp())
+        assert [m["modelId"] for m in c.available_models()] == ["default", "opus[1m]", "sonnet"]
+        assert c._resolved_model_id == "opus[1m]"
+
+    def test_names_and_descriptions_preserved(self):
+        c = self._client()
+        c._capture_available_models(self._resp())
+        sonnet = next(m for m in c.available_models() if m["modelId"] == "sonnet")
+        assert sonnet["name"] == "Sonnet"
+
+    def test_models_shape_takes_priority_when_both_present(self):
+        # Shape 1 (models.availableModels) wins if a future adapter sends both.
+        c = self._client()
+        resp = self._resp(
+            models={
+                "currentModelId": "from-models-key",
+                "availableModels": [{"modelId": "from-models-key", "name": "X"}],
+            }
+        )
+        c._capture_available_models(resp)
+        assert [m["modelId"] for m in c.available_models()] == ["from-models-key"]
+        assert c._resolved_model_id == "from-models-key"
+
+    def test_falls_back_to_config_options_when_models_availablemodels_empty(self):
+        # An empty (not absent) models.availableModels doesn't block the fallback.
+        c = self._client()
+        resp = self._resp(models={"availableModels": []})
+        c._capture_available_models(resp)
+        assert [m["modelId"] for m in c.available_models()] == ["default", "opus[1m]", "sonnet"]
+
+    def test_no_model_entry_in_config_options_leaves_empty(self):
+        c = self._client()
+        c._capture_available_models(
+            {"configOptions": [{"id": "effort", "options": [{"value": "low"}]}]}
+        )
+        assert c.available_models() == []
+        assert c._resolved_model_id is None
+
+    def test_malformed_options_list_skipped(self):
+        c = self._client()
+        c._capture_available_models(
+            {"configOptions": [{"id": "model", "options": "not-a-list"}]}
+        )
+        assert c.available_models() == []
+
+    def test_neither_shape_present_leaves_empty(self):
+        c = self._client()
+        c._capture_available_models({"sessionId": "s"})
+        assert c.available_models() == []
+
+
 def _scripted_process(lines, *, returncode=None):
     """Build a mock subprocess whose stdout.readline yields *lines* in order.
 

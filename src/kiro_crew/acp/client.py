@@ -1082,6 +1082,31 @@ def advertised_model_ids(entries: object) -> list[str]:
     return ids
 
 
+def _parse_model_options(entries: list) -> list[dict[str, str]]:
+    """Reshape a raw ``availableModels``/``configOptions[model].options``
+    list into this client's internal ``self._available_models`` shape
+    (``{modelId, name, description}``). Same ``modelId``/``value`` id-key
+    fallback as :func:`advertised_model_ids`, plus the display fields that
+    function intentionally drops. Defensive like its sibling: tolerates
+    anything that isn't a list of dicts, skips entries with no usable id.
+    """
+    captured: list[dict[str, str]] = []
+    for m in entries:
+        if not isinstance(m, dict):
+            continue
+        model_id = m.get("modelId") or m.get("value") or ""
+        if not model_id:
+            continue
+        captured.append(
+            {
+                "modelId": str(model_id),
+                "name": str(m.get("name") or model_id),
+                "description": str(m.get("description") or ""),
+            }
+        )
+    return captured
+
+
 def model_is_unusable(model_id: str, advertised: Sequence[str] | None) -> bool:
     """True when *advertised* is known and excludes *model_id*.
 
@@ -1100,12 +1125,16 @@ def model_is_unusable(model_id: str, advertised: Sequence[str] | None) -> bool:
     Only meaningful where the advertised ids share a namespace with *model_id*,
     and callers gate on that. kiro-cli's advertised ids are exactly the ids
     ``session/set_model`` accepts, so an id absent from the list is genuinely
-    unusable. The claude backend advertises BARE ids (``claude-opus-4-8[1m]``)
-    while the configured model is the prefixed provider id
-    (``global.anthropic.claude-opus-4-8[1m]``), so comparing those two
-    namespaces would call every legitimate model unusable; that backend
+    unusable. Fork (KlaudeCrew), live-verified: the claude backend's advertised
+    ids are short human-facing values (``"opus[1m]"``, ``"sonnet"``,
+    ``"haiku"``) with NO mechanical relationship to the registry's Bedrock
+    provider ids (``global.anthropic.claude-opus-4-8[1m]``) — comparing those
+    two namespaces would call every legitimate model unusable, so claude
+    callers match against the advertised set via
+    ``model_registry.resolve_claude_wire_id`` (canonical-key-aware) rather
+    than this simple case-folded string predicate; that backend also
     announces its own substitutions through the ``session/new`` advisory
-    instead (see ``_new_session_following_substitution``).
+    (see ``_new_session_following_substitution``).
     """
     if not advertised:
         return False
@@ -2060,41 +2089,71 @@ class AcpClient:
     def _capture_available_models(self, session_resp: dict) -> None:
         """Record the model list the backend advertised in a session response.
 
-        The ACP ``session/new`` / ``session/load`` response carries a
-        ``models`` object ``{availableModels: [{modelId, name, description}],
-        currentModelId}``. We keep the list so the dashboard dropdown shows the
-        real backend models (e.g. the versioned Claude list from
-        claude-agent-acp) instead of a hardcoded guess. Best-effort and never
-        raises — a backend that omits ``models`` simply leaves the list empty.
+        Two wire shapes exist, and this reads whichever the live backend
+        actually sent (checked in order, first usable one wins):
 
-        Also records ``currentModelId`` for ``_track_metadata``'s context
+        1. A ``models`` object on the response itself:
+           ``{availableModels: [{modelId, name, description}], currentModelId}``.
+           This is the shape the ACP spec / this codebase's naming
+           historically assumed.
+        2. Fork (KlaudeCrew) — live-verified against a real gateway + real
+           ``claude`` + ``claude-agent-acp`` v0.66.0: that adapter does NOT
+           send shape 1 at all. It advertises models as one entry of the
+           ``configOptions`` array every ``session/new``/``session/load``
+           response already carries (the SAME array
+           ``get_valid_effort_levels()`` reads for ``id == "effort"``):
+           ``{id: "model", currentValue, options: [{value, name,
+           description}, ...]}``. See ``docs/system-specs/modules/
+           acp-client.md`` "Model advertisement" for the confirmed shape.
+
+        We keep the list so the dashboard dropdown shows the real backend
+        models instead of a hardcoded guess. Best-effort and never raises —
+        a backend that omits both shapes simply leaves the list empty.
+
+        Also records the current model id for ``_track_metadata``'s context
         window lookup.
         """
         models = session_resp.get("models")
-        if not isinstance(models, dict):
+        if isinstance(models, dict):
+            current_model_id = models.get("currentModelId")
+            if isinstance(current_model_id, str) and current_model_id:
+                self._resolved_model_id = current_model_id
+            advertised = models.get("availableModels")
+            if isinstance(advertised, list):
+                captured = _parse_model_options(advertised)
+                if captured:
+                    self._available_models = captured
+                    return
+        # Shape 2 fallback -- see docstring. Parsed directly from the raw
+        # response rather than self._acp_config_options: both call sites
+        # invoke this BEFORE _store_session_config populates that cache.
+        config_options = session_resp.get("configOptions")
+        if not isinstance(config_options, list):
             return
-        current_model_id = models.get("currentModelId")
-        if isinstance(current_model_id, str) and current_model_id:
-            self._resolved_model_id = current_model_id
-        advertised = models.get("availableModels")
-        if not isinstance(advertised, list):
+        self._apply_model_config_option(config_options)
+
+    def _apply_model_config_option(self, config_options: list) -> None:
+        """Extract the ``id == "model"`` entry from a ``configOptions`` array
+        (shape 2 in ``_capture_available_models``'s docstring) and record it.
+
+        Shared by ``_capture_available_models`` (initial capture, parsed
+        directly off the raw response) and ``_handle_config_option_update``
+        (live mid-session refresh, mirrors ``_sync_effort_levels``'s dual
+        call sites for the same array).
+        """
+        for opt in config_options:
+            if not isinstance(opt, dict) or opt.get("id") != "model":
+                continue
+            options = opt.get("options")
+            if not isinstance(options, list):
+                return
+            captured = _parse_model_options(options)
+            if captured:
+                self._available_models = captured
+            current_value = opt.get("currentValue")
+            if isinstance(current_value, str) and current_value:
+                self._resolved_model_id = current_value
             return
-        captured: list[dict[str, str]] = []
-        for m in advertised:
-            if not isinstance(m, dict):
-                continue
-            model_id = m.get("modelId") or m.get("value") or ""
-            if not model_id:
-                continue
-            captured.append(
-                {
-                    "modelId": str(model_id),
-                    "name": str(m.get("name") or model_id),
-                    "description": str(m.get("description") or ""),
-                }
-            )
-        if captured:
-            self._available_models = captured
 
     def available_models(self) -> list[dict[str, str]]:
         """Models advertised by the backend at session init (may be empty)."""
@@ -2223,6 +2282,11 @@ class AcpClient:
             self._acp_config_options = config_options
             logger.debug("ACP config options updated: %d entries", len(config_options))
             self._sync_effort_levels()
+            # Fork (KlaudeCrew): live-refresh the advertised model list the
+            # same way effort levels refresh here -- see
+            # _capture_available_models's docstring for why claude backends
+            # carry the model list in this array instead of a `models` field.
+            self._apply_model_config_option(config_options)
 
     def _sync_effort_levels(self) -> None:
         """Push ACP-reported effort levels to the global validation set."""
