@@ -2058,10 +2058,15 @@ class AcpClient:
         # conversation and then land on a different model anyway.
         #
         # Callers passing an INHERITED value (warm-pool post-claim re-apply of a
-        # persisted slot model) must pre-check with model_is_unusable and skip
-        # instead of calling into here — otherwise the same stale setting that is
-        # quietly withheld on a cold start would raise and kill a warm claim,
-        # making the outcome depend on whether a pooled process happened to exist.
+        # persisted slot model) must pre-check and skip instead of calling into
+        # here — otherwise the same stale setting that is quietly withheld on a
+        # cold start would raise and kill a warm claim, making the outcome
+        # depend on whether a pooled process happened to exist. The kiro/Bedrock
+        # pre-check is model_is_unusable; the claude non-Bedrock pre-check is
+        # model_registry.resolve_claude_wire_id against the live advertised set
+        # (see session.py's pool-claim branch and "Model translation is
+        # Bedrock-gated" in acp-client.md) — a None result means skip, never call
+        # set_model at all.
         if not self._is_claude and self._model_is_unusable(model_id):
             _rejected_log, _ = redact_exfiltration_urls(str(model_id))
             _rejected_log, _ = redact_credentials(_rejected_log)
