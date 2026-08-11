@@ -408,6 +408,7 @@ def spawn_feature_gateway(
     *,
     crons: bool = False,
     timeout: Optional[float] = None,
+    acp_backend: str = "kiro",
 ) -> Iterator[GatewayHandle]:
     """Spin up an isolated gateway from the current workspace checkout.
 
@@ -431,6 +432,18 @@ def spawn_feature_gateway(
         timeout: Override the ready-line timeout in seconds. Falls back to
             ``KIROCREW_HARNESS_READY_TIMEOUT`` env var, then to
             ``DEFAULT_READY_TIMEOUT``.
+        acp_backend: Fork (KlaudeCrew) — which ACP backend the spawned
+            gateway resolves to, via the ``KIROCREW_TEST_ACP_BACKEND`` env
+            escape hatch (``config/loader.py``). Defaults to ``"kiro"``
+            because every fixture/test this harness currently seeds was
+            written against ``kiro_crew.testing.fake_acp_backend``'s kiro
+            dialect and ``KIROCREW_KIRO_BIN`` — leaving the real
+            ``agent.acp_backend`` default (``"claude"``) in force here would
+            silently break them (the fake wouldn't be reachable at all: it's
+            resolved via ``KIROCREW_KIRO_BIN``, which only the kiro branch
+            consults). Pass ``"claude"`` for a claude-dialect test — pair it
+            with ``CLAUDE_AGENT_ACP_BIN`` pointed at a claude-dialect fake
+            launcher, not ``KIROCREW_KIRO_BIN``.
 
     Yields:
         ``GatewayHandle`` once the gateway has bound its dashboard port
@@ -469,6 +482,8 @@ def spawn_feature_gateway(
             # Embeddings are default-on; never let a harness-spawned gateway
             # kick the 610MB embedding-model download during a test run.
             "KIROCREW_SKIP_MODEL_DOWNLOAD": "1",
+            # Fork (KlaudeCrew): see the acp_backend docstring above.
+            "KIROCREW_TEST_ACP_BACKEND": acp_backend,
         }
 
         cmd = [

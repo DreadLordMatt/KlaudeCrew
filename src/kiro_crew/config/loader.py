@@ -5174,7 +5174,17 @@ class KiroCrewConfig:
                 role_efforts=coerce_role_efforts(agent_data.get("role_efforts")),
                 reasoning_effort=agent_data.get("reasoning_effort", ""),
                 provider=agent_data.get("provider", "acp"),
-                acp_backend=agent_data.get("acp_backend", "claude"),
+                # KIROCREW_TEST_ACP_BACKEND is a narrow test/harness escape
+                # hatch (same convention as KIROCREW_KIRO_BIN,
+                # KIROCREW_CC_ISOLATE): testing/harness.py's
+                # spawn_feature_gateway() sets it so the many existing
+                # KIROCREW_KIRO_BIN-based e2e fixtures (written for the
+                # kiro-only fake ACP backend, before acp_backend existed)
+                # keep routing to kiro without every call site needing an
+                # explicit config override. Never consulted outside a test
+                # process; unset in production.
+                acp_backend=os.environ.get("KIROCREW_TEST_ACP_BACKEND")
+                or agent_data.get("acp_backend", "claude"),
                 default_agent=agent_data.get("default_agent", ""),
                 sandbox=agent_data.get("sandbox", "auto"),
                 sandbox_allow_no_isolation=bool(

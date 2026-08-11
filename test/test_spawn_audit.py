@@ -171,6 +171,14 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # version into versions.txt. The binary name is a module constant; a
         # resource ceiling / sandbox adds nothing to a `--version` call.
         "diagnostics.py::_kiro_cli_version",
+        # Fork (KlaudeCrew): the claude-backend twin of the probe above.
+        # Fixed argv (``[*resolved_claude_acp_argv, "--version"]``) with a 5s
+        # timeout, no shell, no cwd. The binary path comes from
+        # ``AcpClient._resolve_claude_acp_bin()`` -- the same trusted
+        # resolution chain (env override / vendored copy / mise / PATH) the
+        # real ACP spawn uses, not agent/user input -- and only stamps the
+        # adapter's version into versions.txt.
+        "diagnostics.py::_claude_acp_version",
         # Tailnet origin derivation + forwarded-peer whois (RFC:
         # rfc-tailnet-dashboard-access): one fixed argv — ``["<tailscale>",
         # "status", "--json"]`` or ``["<tailscale>", "whois", "--json",
