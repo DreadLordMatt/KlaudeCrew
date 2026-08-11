@@ -4087,11 +4087,41 @@ class TestPinnedModelWithheld:
         client = self._client(["claude-opus-4-8[1m]"])
         assert not _pinned_model_withheld(client, "opus-4.8-1m", "claude_code")
 
-    def test_claude_backend_provider_is_exempt(self):
+    def test_claude_backend_matched_pin_is_kept(self):
+        """Fork (KlaudeCrew): no more blanket claude exemption -- the check
+        routes through resolve_claude_wire_id (canonical-key-aware), so a pin
+        that matches an advertised value in ANY spelling is kept."""
         from kiro_crew.dashboard.chat_runner import _pinned_model_withheld
 
         client = self._client(["claude-opus-4-8[1m]"], claude_backend=True)
+        # "claude-opus-4.8" is a registry alias; "claude-opus-4-8[1m]" is a
+        # bare Bedrock-shaped alias -- both canonicalize to opus-4.8-1m.
         assert not _pinned_model_withheld(client, "claude-opus-4.8", "acp")
+
+    def test_claude_backend_unmatched_pin_is_withheld(self):
+        from kiro_crew.dashboard.chat_runner import _pinned_model_withheld
+
+        client = self._client(["sonnet", "haiku"], claude_backend=True)
+        assert _pinned_model_withheld(client, "opus-4.7-1m", "acp")
+
+    def test_claude_backend_empty_advertised_keeps_the_pin(self):
+        from kiro_crew.dashboard.chat_runner import _pinned_model_withheld
+
+        # Entitlement unknown is not entitlement denied -- same fail-open rule
+        # as the kiro branch.
+        client = self._client([], claude_backend=True)
+        assert not _pinned_model_withheld(client, "opus-4.7-1m", "acp")
+
+    def test_claude_backend_bedrock_opt_in_is_exempt(self, monkeypatch):
+        from kiro_crew.dashboard.chat_runner import _pinned_model_withheld
+
+        # Bedrock ids don't share the advertised namespace; that posture keeps
+        # its own substitution-advisory reporting.
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+        client = self._client(["sonnet"], claude_backend=True)
+        assert not _pinned_model_withheld(
+            client, "global.anthropic.claude-opus-4-8[1m]", "acp"
+        )
 
     def test_provider_without_getter_keeps_the_pin(self):
         from kiro_crew.dashboard.chat_runner import _pinned_model_withheld
