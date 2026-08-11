@@ -381,6 +381,13 @@ the `tools/list` payload in `mcp_core.py`):
 - **Crew routing:** `select_crew`
 - **Sessions and history:** `list_sessions`, `get_chat_session`,
   `search_chat_history`
+- **Chat folders (the sidebar tree):** `chat_folder_tree`,
+  `chat_folder_create`, `chat_folder_move`, `chat_folder_move_session` — read
+  the tree with the live sessions filed in it, create a folder/subfolder
+  (`parent` is an id or a `/`-path, mkdir -p), reparent a folder, and file a
+  live session into one. Create and move only: there is deliberately no delete
+  or rename tool, and an ARCHIVED (history) session cannot be re-filed because
+  no endpoint rewrites a history row's `folder_id` — only a live slot's
 - **Artifacts:** `artifact_list`, `artifact_get`, `artifact_save`,
   `artifact_update`, `artifact_delete`, `artifact_move`, `artifact_versions`,
   `artifact_revert`, `artifact_folder_list`, `artifact_folder_create`,

@@ -1712,6 +1712,42 @@ ARTIFACT_FOLDER_DELETE_SCHEMA = ToolSchema(
     ],
 )
 
+# Chat (sidebar) folders. Same reference model as the artifact folders above —
+# a folder is addressed by id OR by a ``/``-separated human path — so the two
+# bounds are shared. Folder names cap at 100 chars server-side
+# (chat_folders.api_chat_folder_create truncates); reject longer input here
+# instead of silently filing the session under a truncated name.
+CHAT_FOLDER_TREE_SCHEMA = ToolSchema(
+    tool_name="chat_folder_tree",
+    fields=[],
+)
+
+CHAT_FOLDER_CREATE_SCHEMA = ToolSchema(
+    tool_name="chat_folder_create",
+    fields=[
+        FieldSpec("name", str, required=True, max_len=_ARTIFACT_FOLDER_NAME_MAX),
+        FieldSpec("parent", str, max_len=_ARTIFACT_FOLDER_REF_MAX),
+    ],
+)
+
+CHAT_FOLDER_MOVE_SCHEMA = ToolSchema(
+    tool_name="chat_folder_move",
+    fields=[
+        FieldSpec("folder", str, required=True, max_len=_ARTIFACT_FOLDER_REF_MAX),
+        FieldSpec("new_parent", str, max_len=_ARTIFACT_FOLDER_REF_MAX),
+    ],
+)
+
+CHAT_FOLDER_MOVE_SESSION_SCHEMA = ToolSchema(
+    tool_name="chat_folder_move_session",
+    fields=[
+        # A session reference is a slot key, a ``dashboard:`` session key, or an
+        # exact session title — none share a charset, so only bound the length.
+        FieldSpec("session", str, required=True, max_len=512),
+        FieldSpec("folder", str, max_len=_ARTIFACT_FOLDER_REF_MAX),
+    ],
+)
+
 ARTIFACT_MOVE_SCHEMA = ToolSchema(
     tool_name="artifact_move",
     fields=[
@@ -2211,6 +2247,10 @@ MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "artifact_folder_rename": ARTIFACT_FOLDER_RENAME_SCHEMA,
     "artifact_folder_move": ARTIFACT_FOLDER_MOVE_SCHEMA,
     "artifact_folder_delete": ARTIFACT_FOLDER_DELETE_SCHEMA,
+    "chat_folder_tree": CHAT_FOLDER_TREE_SCHEMA,
+    "chat_folder_create": CHAT_FOLDER_CREATE_SCHEMA,
+    "chat_folder_move": CHAT_FOLDER_MOVE_SCHEMA,
+    "chat_folder_move_session": CHAT_FOLDER_MOVE_SESSION_SCHEMA,
     "artifact_move": ARTIFACT_MOVE_SCHEMA,
     # These tools validate their args internally via validate_tool_args(); they
     # MUST be registered here so the outer guard in call_tool_with_logging
