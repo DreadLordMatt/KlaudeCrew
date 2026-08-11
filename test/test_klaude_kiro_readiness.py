@@ -24,7 +24,9 @@ from kiro_crew.dashboard.kiro_readiness import reject_if_not_kiro_backend
 
 
 def _cfg(acp_backend: str) -> SimpleNamespace:
-    return SimpleNamespace(agent=SimpleNamespace(acp_backend=acp_backend))
+    # `model` is read by api_models's claude branch (_cc_models's
+    # configured_default); "auto" mirrors the real dataclass default.
+    return SimpleNamespace(agent=SimpleNamespace(acp_backend=acp_backend, model="auto"))
 
 
 class TestRejectIfNotKiroBackend:
@@ -53,6 +55,12 @@ class TestRejectIfNotKiroBackend:
 class TestApiModelsNeverSpawnsKiroCliOnClaudeBackend:
     @pytest.mark.asyncio
     async def test_never_reaches_resolve_or_spawn(self):
+        """The claude branch serves (or 503s cold-start) WITHOUT ever touching
+        kiro-cli. The bare SimpleNamespace state (no .sessions) exercises
+        _advertised_cc_models's fail-soft path -> nothing advertised -> the
+        cc_models_cold_start 503, never the kiro_not_backend response (that
+        code now only escapes api_models via /api/sessions/usage, which has
+        no claude-appropriate data to serve instead)."""
         request = MagicMock()
         request.app = {"kiro_prerequisite_service": None, "state": SimpleNamespace()}
         with (
@@ -67,7 +75,43 @@ class TestApiModelsNeverSpawnsKiroCliOnClaudeBackend:
         resolve.assert_not_called()
         spawn.assert_not_called()
         assert resp.status == 503
-        assert json.loads(resp.body)["code"] == "kiro_not_backend"
+        assert json.loads(resp.body)["code"] == "cc_models_cold_start"
+
+    @pytest.mark.asyncio
+    async def test_serves_advertised_models_without_kiro(self):
+        """Once a live session has advertised models, the claude branch
+        returns them 200 -- still with zero kiro-cli involvement."""
+
+        class _Provider:
+            def available_models(self):
+                return [
+                    {"modelId": "opus[1m]", "name": "Opus (1M context)", "description": "..."},
+                    {"modelId": "sonnet", "name": "Sonnet", "description": "..."},
+                ]
+
+        state = SimpleNamespace(
+            sessions=SimpleNamespace(active_providers=lambda: [_Provider()])
+        )
+        request = MagicMock()
+        request.app = {"kiro_prerequisite_service": None, "state": state}
+        with (
+            patch("kiro_crew.config.loader.KiroCrewConfig.load", return_value=_cfg("claude")),
+            patch(
+                "kiro_crew.acp.client._resolve_kiro_bin_for_spawn", AsyncMock()
+            ) as resolve,
+            patch("asyncio.create_subprocess_exec", AsyncMock()) as spawn,
+        ):
+            resp = await agents.api_models(request)
+
+        resolve.assert_not_called()
+        spawn.assert_not_called()
+        assert resp.status == 200
+        rows = json.loads(resp.body)
+        names = [r["model_name"] for r in rows]
+        assert names[0] == "auto"  # sentinel always leads
+        assert "opus[1m]" in names  # raw wire value passes through
+        # "sonnet" is a registry alias -> folded onto its canonical key.
+        assert "sonnet-4.6-1m" in names
 
 
 class TestApiSessionsUsageNeverSpawnsKiroCliOnClaudeBackend:

@@ -229,3 +229,63 @@ class TestCcModelsMerge:
         assert all(m["model_name"] for m in out)
         # the canonical "auto" row is still present, exactly once.
         assert names.count("auto") == 1
+
+
+class TestCcModelsNonBedrock:
+    """Fork (KlaudeCrew): bedrock=False -- the non-Bedrock `claude login`
+    posture, where the registry's claude_code column (Bedrock-only ids) must
+    never be offered as a fallback catalog."""
+
+    # The real advertised shape observed live (claude-agent-acp v0.66.0).
+    _LIVE = [
+        {"modelId": "default", "name": "Default (recommended)", "description": "Opus 5..."},
+        {"modelId": "opus[1m]", "name": "Opus (1M context)", "description": "Opus 5..."},
+        {"modelId": "sonnet", "name": "Sonnet", "description": "Sonnet 5..."},
+        {"modelId": "haiku", "name": "Haiku", "description": "Haiku 4.5..."},
+    ]
+
+    def test_nothing_advertised_returns_only_auto(self):
+        out = _cc_models(_request_with_providers({}), bedrock=False)
+        assert [m["model_name"] for m in out] == ["auto"]
+        assert "context_window" in out[0]
+
+    def test_nothing_advertised_skips_configured_default_resurrection(self):
+        # With bedrock=True this inserts the configured default unverified;
+        # with bedrock=False it must NOT -- there is no way to confirm a
+        # non-advertised id can succeed on a non-Bedrock account.
+        out = _cc_models(
+            _request_with_providers({}),
+            configured_default="opus-4.8-1m",
+            bedrock=False,
+        )
+        assert [m["model_name"] for m in out] == ["auto"]
+
+    def test_advertised_rows_served_with_auto_first(self):
+        prov = _FakeProvider(self._LIVE)
+        out = _cc_models(_request_with_providers({"s": prov}), bedrock=False)
+        names = [m["model_name"] for m in out]
+        assert names[0] == "auto"
+        # Raw wire values with no registry alias pass through verbatim.
+        assert "opus[1m]" in names
+        assert "haiku" in names
+        # The adapter's "default" entry means "let the backend pick" -- same
+        # as KiroCrew's own "auto" sentinel, so _normalize_model_key folds
+        # them to one row (deliberate: two spellings of the same choice).
+        assert "default" not in names
+        # "sonnet" IS a registry alias -> folds onto its canonical key.
+        assert "sonnet-4.6-1m" in names
+
+    def test_no_bedrock_ids_ever_appear(self):
+        prov = _FakeProvider(self._LIVE)
+        for providers in ({}, {"s": prov}):
+            out = _cc_models(_request_with_providers(providers), bedrock=False)
+            for m in out:
+                assert not m["model_name"].startswith("global.anthropic."), m
+
+    def test_bedrock_true_default_preserves_existing_behavior(self):
+        # Regression guard: the kwarg's default must leave every pre-existing
+        # call site byte-identical -- full registry when nothing advertised.
+        out_default = _cc_models(_request_with_providers({}))
+        out_explicit = _cc_models(_request_with_providers({}), bedrock=True)
+        assert out_default == out_explicit
+        assert len(out_default) > 1  # the full registry, not just "auto"
