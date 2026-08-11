@@ -21,10 +21,15 @@ class TestAcpPerAgentModel:
 
     @staticmethod
     def _acp_cfg():
-        # KiroCrew is KiroACP-only, so the factory is always acp; a plain
-        # instance keeps construction side-effect-free (AcpProvider.__init__
-        # builds an AcpClient without spawning kiro-cli).
-        return KiroCrewConfig()
+        # This class asserts KIRO-specific model threading (to_acp_id
+        # translation, _is_claude False), so pin acp_backend="kiro" -- fork
+        # (KlaudeCrew) defaults it to "claude", which broke these assertions
+        # when the default flipped. A plain instance keeps construction
+        # side-effect-free (AcpProvider.__init__ builds an AcpClient without
+        # spawning kiro-cli).
+        cfg = KiroCrewConfig()
+        cfg.agent.acp_backend = "kiro"
+        return cfg
 
     def test_custom_agent_threads_its_declared_model(self):
         cfg = self._acp_cfg()
