@@ -36,9 +36,7 @@ from kiro_crew.apps import registry
 @pytest.fixture(autouse=True)
 def _explicit_registry_execution_admission(monkeypatch):
     """These tests must reach admitted registry subprocess paths."""
-    monkeypatch.setattr(
-        "kiro_crew.apps.execution.third_party_execution_allowed", lambda: True
-    )
+    monkeypatch.setattr("kiro_crew.apps.execution.third_party_execution_allowed", lambda: True)
 
 
 # A portable long-lived child: sleeps well past any test timeout without
@@ -94,9 +92,7 @@ def _record_tree_kill(monkeypatch) -> list[int]:
         killed.append(pid)
         return True
 
-    monkeypatch.setattr(
-        registry.platform_compat, "kill_process_tree_async", _fake_tree_kill
-    )
+    monkeypatch.setattr(registry.platform_compat, "kill_process_tree_async", _fake_tree_kill)
     return killed
 
 
@@ -136,9 +132,7 @@ async def test_communicate_with_timeout_kills_whole_process_tree(monkeypatch):
         killed.append((pid, sig))
         return True
 
-    monkeypatch.setattr(
-        registry.platform_compat, "kill_process_tree_async", _fake_tree_kill
-    )
+    monkeypatch.setattr(registry.platform_compat, "kill_process_tree_async", _fake_tree_kill)
     with pytest.raises(asyncio.TimeoutError):
         await registry._communicate_with_timeout(proc, timeout=0.01)
 
@@ -158,9 +152,7 @@ async def test_communicate_with_timeout_falls_back_when_group_kill_fails(monkeyp
     async def _boom(pid, sig):
         raise ProcessLookupError  # subclass of OSError
 
-    monkeypatch.setattr(
-        registry.platform_compat, "kill_process_tree_async", _boom
-    )
+    monkeypatch.setattr(registry.platform_compat, "kill_process_tree_async", _boom)
     with pytest.raises(asyncio.TimeoutError):
         await registry._communicate_with_timeout(proc, timeout=0.01)
 
@@ -236,9 +228,7 @@ async def test_list_registry_reaps_detect_probe_tree_on_timeout(monkeypatch):
     monkeypatch.setattr(registry, "_resolve_manifest", _resolve)
     # Return the entries themselves: list_registry's tail now feeds this
     # result into _apply_trust_fields, which iterates rows as dicts.
-    monkeypatch.setattr(
-        registry, "_enrich_with_install_status", lambda e, m, d: e
-    )
+    monkeypatch.setattr(registry, "_enrich_with_install_status", lambda e, m, d: e)
 
     proc = _TimeoutProc()
     killed = _record_tree_kill(monkeypatch)
@@ -550,9 +540,7 @@ async def test_cloned_manifest_admission_is_revalidated_before_build(monkeypatch
 
     monkeypatch.setattr(registry, "_run_app_build", _fake_run_build)
 
-    result = await registry._clone_build_app(
-        "https://example.com/demo.git", "demoapp", []
-    )
+    result = await registry._clone_build_app("https://example.com/demo.git", "demoapp", [])
 
     assert result["ok"] is False
     assert "admission" in result["error"]
@@ -576,6 +564,11 @@ async def test_reused_checkout_pull_never_repoints_origin(monkeypatch, tmp_path)
 
     monkeypatch.setattr(registry, "_clone_origin_url", _fake_origin)
 
+    async def _branch_matches(path, branch):
+        return True
+
+    monkeypatch.setattr(registry, "_clone_branch_matches", _branch_matches)
+
     spawned: list[list[str]] = []
 
     class _Proc:
@@ -593,9 +586,7 @@ async def test_reused_checkout_pull_never_repoints_origin(monkeypatch, tmp_path)
     monkeypatch.setattr(registry, "wrap_argv", lambda cmd, mode="": (cmd, None))
     monkeypatch.setattr(registry, "cgroup_scope_argv", lambda cmd: cmd)
 
-    err = await registry._git_clone_or_pull(
-        "https://example.com/new-home.git", "main", dest, []
-    )
+    err = await registry._git_clone_or_pull("https://example.com/new-home.git", "main", dest, [])
 
     assert err is None
     assert spawned[0][:2] == ["git", "pull"]
@@ -639,6 +630,11 @@ async def test_failed_pull_aborts_instead_of_installing_stale_code(monkeypatch, 
 
     monkeypatch.setattr(registry, "_clone_origin_url", _fake_origin)
 
+    async def _branch_matches(path, branch):
+        return True
+
+    monkeypatch.setattr(registry, "_clone_branch_matches", _branch_matches)
+
     class _Proc:
         pid = 4242
 
@@ -657,9 +653,7 @@ async def test_failed_pull_aborts_instead_of_installing_stale_code(monkeypatch, 
     monkeypatch.setattr(registry, "wrap_argv", lambda cmd, mode="": (cmd, None))
     monkeypatch.setattr(registry, "cgroup_scope_argv", lambda cmd: cmd)
 
-    err = await registry._git_clone_or_pull(
-        "https://example.com/demo.git", "main", dest, []
-    )
+    err = await registry._git_clone_or_pull("https://example.com/demo.git", "main", dest, [])
 
     assert err is not None and err["ok"] is False
     assert "stale" in err["error"]
@@ -675,7 +669,7 @@ async def test_provenance_signer_uses_post_script_manifest(monkeypatch, tmp_path
     manifest; provenance must record the FINAL manifest's signer."""
     src = tmp_path / "app-sources" / "demoapp"
     script = (
-        "python3 -c \"import json;json.dump("
+        'python3 -c "import json;json.dump('
         "{'name':'demoapp','version':'2.0.0'},open('app.json','w'))\""
     )
     _identity_harness(
@@ -738,9 +732,7 @@ async def test_admission_rejection_deletes_fresh_clone(monkeypatch, tmp_path):
         return None
 
     monkeypatch.setattr(registry, "_git_clone_or_pull", _fake_clone)
-    monkeypatch.setattr(
-        registry, "app_admission_denied", lambda *a, **k: "unsigned under policy"
-    )
+    monkeypatch.setattr(registry, "app_admission_denied", lambda *a, **k: "unsigned under policy")
 
     result = await registry._clone_build_app("https://example.com/demo.git", "demoapp", [])
 
@@ -763,9 +755,7 @@ async def test_admission_rejection_rolls_back_preexisting_checkout(monkeypatch, 
         return None
 
     monkeypatch.setattr(registry, "_git_clone_or_pull", _fake_clone)
-    monkeypatch.setattr(
-        registry, "app_admission_denied", lambda *a, **k: "unsigned under policy"
-    )
+    monkeypatch.setattr(registry, "app_admission_denied", lambda *a, **k: "unsigned under policy")
 
     spawned: list[list[str]] = []
 
@@ -907,9 +897,7 @@ async def test_postscript_admission_rejection_rolls_back_preexisting_checkout(
     def _fake_killpg(pgid, sig):
         reaped.append(pgid)
 
-    monkeypatch.setattr(
-        registry.platform_compat, "kill_process_tree_async", _fake_tree_kill
-    )
+    monkeypatch.setattr(registry.platform_compat, "kill_process_tree_async", _fake_tree_kill)
     monkeypatch.setattr(registry.os, "killpg", _fake_killpg, raising=False)
 
     result = await registry.install_from_registry("demoapp")
@@ -923,9 +911,7 @@ async def test_postscript_admission_rejection_rolls_back_preexisting_checkout(
     assert 4242 in reaped
     # The manifest file is restored from HEAD as well: a script rewriting
     # app.json is a working-tree edit the reset alone cannot undo.
-    assert any(
-        cmd[:4] == ["git", "--literal-pathspecs", "checkout", "--"] for cmd in spawned
-    )
+    assert any(cmd[:4] == ["git", "--literal-pathspecs", "checkout", "--"] for cmd in spawned)
 
 
 @pytest.mark.asyncio
@@ -954,9 +940,7 @@ async def test_moveaside_reclone_treated_as_fresh_on_rejection(monkeypatch, tmp_
         return None
 
     monkeypatch.setattr(registry, "_git_clone_or_pull", _fake_clone)
-    monkeypatch.setattr(
-        registry, "app_admission_denied", lambda *a, **k: "unsigned under policy"
-    )
+    monkeypatch.setattr(registry, "app_admission_denied", lambda *a, **k: "unsigned under policy")
 
     spawned: list[list[str]] = []
 
@@ -1102,9 +1086,7 @@ async def test_identity_refusal_rolls_back_preexisting_checkout(monkeypatch, tmp
     # ... but un-poisoned: rolled back to the pre-pull commit AND the manifest
     # restored from HEAD.
     assert any(cmd[:4] == ["git", "reset", "--keep", "b" * 40] for cmd in spawned)
-    assert any(
-        cmd[:4] == ["git", "--literal-pathspecs", "checkout", "--"] for cmd in spawned
-    )
+    assert any(cmd[:4] == ["git", "--literal-pathspecs", "checkout", "--"] for cmd in spawned)
 
 
 @pytest.mark.asyncio
@@ -1151,7 +1133,10 @@ def test_entry_git_url_tolerates_non_string_values():
     assert registry._entry_git_url({"gitUrl": {"evil": True}}) == ""
     assert registry._entry_git_url({"gitUrl": ["x"], "repo": None}) == ""
     assert registry._entry_git_url({"repo": 42}) == ""
-    assert registry._entry_git_url({"gitUrl": " https://ok.example/r.git "}) == "https://ok.example/r.git"
+    assert (
+        registry._entry_git_url({"gitUrl": " https://ok.example/r.git "})
+        == "https://ok.example/r.git"
+    )
 
 
 class TestMinimalEnvHonorsWindowsCaseInsensitivity:
@@ -1214,9 +1199,9 @@ class TestApplyTrustFields:
         entry = {
             "name": "evil-app",
             "_registry": "evil-registry",
-            "author": "KiroCrew",       # brand-ok: author-spoof fixture
-            "origin": "builtin",        # origin spoof
-            "featured": True,           # spotlight self-flag
+            "author": "KiroCrew",  # brand-ok: author-spoof fixture
+            "origin": "builtin",  # origin spoof
+            "featured": True,  # spotlight self-flag
         }
         (out,) = registry._apply_trust_fields([entry])
         assert out["provenance"] == "external"
@@ -1248,10 +1233,17 @@ class TestApplyTrustFields:
         """A third-party core repo publishing ``"author": "kirocrew"`` in its
         app.json gains nothing: the merged ``author`` display field is not
         consulted, only the pre-merge index snapshot is."""
-        entry = {"name": "sneaky", "author": "KiroCrew"}  # merged, no snapshot  # brand-ok: author-spoof fixture
+        entry = {
+            "name": "sneaky",
+            "author": "KiroCrew",
+        }  # merged, no snapshot  # brand-ok: author-spoof fixture
         (out,) = registry._apply_trust_fields([entry])
         assert out["verified"] is False
-        entry = {"name": "sneaky2", "author": "KiroCrew", "_index_author": "third-party"}  # brand-ok: author-spoof fixture
+        entry = {
+            "name": "sneaky2",
+            "author": "KiroCrew",
+            "_index_author": "third-party",
+        }  # brand-ok: author-spoof fixture
         (out,) = registry._apply_trust_fields([entry])
         assert out["verified"] is False
 
@@ -1293,12 +1285,19 @@ class TestApplyTrustFields:
         """End-to-end: every row returned by ``list_registry`` carries the
         server-computed fields; external spoofs and a manifest-published
         ``author: "kirocrew"`` are all neutralized."""
-        core = {"name": "core-app", "author": "KiroCrew", "featured": 1}  # brand-ok: author-spoof fixture
+        core = {
+            "name": "core-app",
+            "author": "KiroCrew",
+            "featured": 1,
+        }  # brand-ok: author-spoof fixture
         # Third-party core entry whose REPO manifest claims the first-party
         # author (index declares none) — must not mint the badge.
         sneaky = {"name": "sneaky-app"}
         # Index entry trying to pre-seed the internal snapshot key directly.
-        preseed = {"name": "preseed-app", "_index_author": "KiroCrew"}  # brand-ok: author-spoof fixture
+        preseed = {
+            "name": "preseed-app",
+            "_index_author": "KiroCrew",
+        }  # brand-ok: author-spoof fixture
         ext = {
             "name": "ext-app",
             "_registry": "labs",
@@ -1306,9 +1305,7 @@ class TestApplyTrustFields:
             "origin": "builtin",
             "featured": True,
         }
-        monkeypatch.setattr(
-            registry, "_load_registry_file", lambda: [core, sneaky, preseed]
-        )
+        monkeypatch.setattr(registry, "_load_registry_file", lambda: [core, sneaky, preseed])
 
         async def _fake_external():
             return [ext]

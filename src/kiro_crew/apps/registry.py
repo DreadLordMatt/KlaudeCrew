@@ -1618,9 +1618,7 @@ async def list_registry() -> list[dict[str, Any]]:
         except (asyncio.TimeoutError, OSError):
             pass  # detection failed, treat as not installed
 
-    return _apply_trust_fields(
-        _enrich_with_install_status(entries, installed_map, detected)
-    )
+    return _apply_trust_fields(_enrich_with_install_status(entries, installed_map, detected))
 
 
 def get_server_platform() -> dict[str, str]:
@@ -2248,11 +2246,49 @@ async def _git_clone_or_pull(
                 pass
 
     if dest.is_dir() and (dest / ".git").is_dir():
-        # Already cloned from the verified origin — fetch and fast-forward.
-        # (The origin-mismatch gate above guarantees this checkout's origin is
-        # byte-identical to git_url: a mismatched checkout was moved aside and
-        # never reused, so the fetch source and the provenance record are the
-        # same URL by construction.)
+        # Origin is verified — but the checked-out branch may have drifted
+        # (e.g. a registry entry changed from branch A to branch B). If so,
+        # the same move-aside/re-clone treatment applies: do NOT checkout in
+        # place (local edits would be carried over silently), move the old
+        # checkout aside so it is preserved for manual recovery, then fall
+        # through to a fresh clone of the correct branch.
+        if not await _clone_branch_matches(dest, branch):
+            log_lines.append(
+                f"Existing clone branch does not match requested branch "
+                f"{branch!r}; moving aside for re-clone"
+            )
+            stale_name = f"{dest.name}.stale-{uuid.uuid4().hex[:8]}"
+            moved_aside = dest.with_name(stale_name)
+            try:
+                await asyncio.to_thread(dest.rename, moved_aside)
+            except OSError as exc:
+                log_lines.append(
+                    f"Could not move aside the branch-mismatched clone at "
+                    f"{dest}: {exc}; refusing to pull wrong branch"
+                )
+                return {
+                    "ok": False,
+                    "name": dest.name,
+                    "error": "stale_clone_not_removed",
+                    "message": (
+                        "A checkout on the wrong branch is present and could not be "
+                        f"moved aside: {exc}. Remove it manually and retry the install."
+                    ),
+                }
+            # Refresh mtime so the retention clock starts now (same as origin
+            # mismatch — round-7 lesson: rename preserves mtime).
+            try:
+                await asyncio.to_thread(os.utime, moved_aside)
+            except OSError:
+                pass
+
+    if dest.is_dir() and (dest / ".git").is_dir():
+        # Already cloned from the verified origin AND branch — fast-forward.
+        # (The origin-mismatch gate and the branch-mismatch gate above
+        # guarantee this checkout's origin is byte-identical to git_url and
+        # has the correct branch checked out: a mismatched checkout was moved
+        # aside and never reused, so the fetch source and the provenance
+        # record are the same URL/branch by construction.)
         log_lines.append(f"Updating {git_url} (branch: {branch})...")
         # Route through wrap_argv (OS sandbox) THEN cgroup_scope_argv, matching
         # the fresh-clone path below — the cgroup DoS ceiling is the outermost

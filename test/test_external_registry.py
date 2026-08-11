@@ -2020,6 +2020,9 @@ class TestStaleCloneOriginVerification:
 
         dest = tmp_path / "app"
         (dest / ".git").mkdir(parents=True)
+        # Branch must match for the pull path to be taken (branch-mismatch
+        # gate introduced alongside the origin gate).
+        (dest / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
 
         captured: dict = {}
         vetted_url = "ssh://git.example.com/team/MyRegistry"
@@ -3982,3 +3985,315 @@ class TestManifestBranchGate:
         assert result is not None
         assert result.get("stale") is not True
         assert result.get("version") == "2.0.0"
+
+
+class TestBranchMismatchMoveAside:
+    """Branch change on a persistent clone triggers move-aside + re-clone.
+
+    After the fix, when a registry entry changes from branch A to branch B:
+    1. The existing clone (on branch A) is moved aside (.stale-*).
+    2. A fresh clone of branch B is created.
+    3. On subsequent manifest fetches, _clone_branch_matches passes (fast
+       path restored — the re-convergence point).
+    """
+
+    @pytest.mark.asyncio
+    async def test_branch_change_moves_aside_and_reclones(self, tmp_path):
+        """Clone on branch A, entry now wants branch B -> move-aside + re-clone.
+        After re-clone, _clone_branch_matches passes again (re-convergence)."""
+        import kiro_crew.apps.registry as reg
+
+        git_url = "https://example.com/team/myapp.git"
+        dest = tmp_path / "app-sources" / "myapp"
+        dest.mkdir(parents=True)
+        git_dir = dest / ".git"
+        git_dir.mkdir()
+        # Origin matches — only the branch differs.
+        (git_dir / "config").write_text(
+            f'[remote "origin"]\n\turl = {git_url}\n',
+            encoding="utf-8",
+        )
+        (git_dir / "HEAD").write_text(
+            "ref: refs/heads/old-branch\n",
+            encoding="utf-8",
+        )
+        (dest / "old-code.py").write_text("# old branch code", encoding="utf-8")
+
+        def _fake_wrap_argv(argv, mode="standard"):
+            return list(argv), None
+
+        class _SuccessProc:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"Cloning into 'myapp'...", None)
+
+        async def _fake_create_subprocess(*args, **kwargs):
+            # Simulate successful fresh clone on the new branch.
+            dest.mkdir(parents=True, exist_ok=True)
+            new_git = dest / ".git"
+            new_git.mkdir(parents=True, exist_ok=True)
+            (new_git / "config").write_text(
+                f'[remote "origin"]\n\turl = {git_url}\n',
+                encoding="utf-8",
+            )
+            (new_git / "HEAD").write_text(
+                "ref: refs/heads/new-branch\n",
+                encoding="utf-8",
+            )
+            (dest / "new-code.py").write_text("# new branch code", encoding="utf-8")
+            return _SuccessProc()
+
+        log_lines: list[str] = []
+        pending_cleanup: list[Path] = []
+        with (
+            patch("kiro_crew.apps.registry.is_clone_host_trusted", return_value=True),
+            patch("kiro_crew.apps.registry.wrap_argv", side_effect=_fake_wrap_argv),
+            patch(
+                "kiro_crew.apps.registry.cgroup_scope_argv",
+                side_effect=lambda a: a,
+            ),
+            patch(
+                "kiro_crew.apps.registry.create_subprocess_limited",
+                side_effect=_fake_create_subprocess,
+            ),
+            patch(
+                "kiro_crew.apps.registry._clone_origin_url",
+                new=AsyncMock(return_value=git_url),
+            ),
+        ):
+            err = await reg._git_clone_or_pull(
+                git_url,
+                "new-branch",
+                dest,
+                log_lines,
+                index_originated=False,
+                pending_cleanup=pending_cleanup,
+            )
+
+        # Success — fresh clone from new branch.
+        assert err is None
+        # The BRANCH-mismatch path was taken (not origin-mismatch).
+        assert any("branch does not match" in line for line in log_lines)
+        # New branch content present.
+        assert (dest / "new-code.py").exists()
+        assert (dest / "new-code.py").read_text() == "# new branch code"
+        # Old branch content gone from dest (now in moved-aside dir).
+        assert not (dest / "old-code.py").exists()
+        # Moved-aside dir in pending_cleanup with .stale- prefix.
+        assert len(pending_cleanup) == 1
+        stale_dir = pending_cleanup[0]
+        assert ".stale-" in stale_dir.name
+        assert stale_dir.exists()
+        # Old branch code preserved in the moved-aside dir.
+        assert (stale_dir / "old-code.py").exists()
+        assert (stale_dir / "old-code.py").read_text() == "# old branch code"
+        # mtime was refreshed (file was recently touched).
+        assert stale_dir.stat().st_mtime > 0
+
+        # Re-convergence proven: the fresh clone has the correct branch
+        # so _clone_branch_matches now passes.
+        assert reg._read_clone_branch(dest) == "new-branch"
+
+    @pytest.mark.asyncio
+    async def test_same_branch_pulls_without_move_aside(self, tmp_path):
+        """When clone branch matches the requested branch, pull path is used
+        — no move-aside occurs."""
+        import kiro_crew.apps.registry as reg
+
+        git_url = "https://example.com/team/myapp.git"
+        dest = tmp_path / "app-sources" / "myapp"
+        dest.mkdir(parents=True)
+        git_dir = dest / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text(
+            f'[remote "origin"]\n\turl = {git_url}\n',
+            encoding="utf-8",
+        )
+        (git_dir / "HEAD").write_text(
+            "ref: refs/heads/main\n",
+            encoding="utf-8",
+        )
+        (dest / "existing.py").write_text("# existing code", encoding="utf-8")
+
+        def _fake_wrap_argv(argv, mode="standard"):
+            return list(argv), None
+
+        captured_calls: list = []
+
+        class _PullProc:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"Already up to date.", None)
+
+        async def _fake_create_subprocess(*args, **kwargs):
+            captured_calls.append(_real_argv(list(args)))
+            return _PullProc()
+
+        log_lines: list[str] = []
+        pending_cleanup: list[Path] = []
+        with (
+            patch("kiro_crew.apps.registry.is_clone_host_trusted", return_value=True),
+            patch("kiro_crew.apps.registry.wrap_argv", side_effect=_fake_wrap_argv),
+            patch(
+                "kiro_crew.apps.registry.cgroup_scope_argv",
+                side_effect=lambda a: a,
+            ),
+            patch(
+                "kiro_crew.apps.registry.create_subprocess_limited",
+                side_effect=_fake_create_subprocess,
+            ),
+            patch(
+                "kiro_crew.apps.registry._clone_origin_url",
+                new=AsyncMock(return_value=git_url),
+            ),
+        ):
+            err = await reg._git_clone_or_pull(
+                git_url,
+                "main",
+                dest,
+                log_lines,
+                index_originated=False,
+                pending_cleanup=pending_cleanup,
+            )
+
+        # Success via pull.
+        assert err is None
+        # Existing file untouched (not moved aside).
+        assert (dest / "existing.py").exists()
+        # No moved-aside dirs.
+        stale_siblings = [p for p in dest.parent.iterdir() if ".stale-" in p.name]
+        assert len(stale_siblings) == 0
+        assert len(pending_cleanup) == 0
+        # Pull was used, not clone.
+        assert any("pull" in str(c) for c in captured_calls)
+        assert not any("clone" in str(c) for c in captured_calls)
+
+    @pytest.mark.asyncio
+    async def test_local_edits_survive_in_moved_aside_dir(self, tmp_path):
+        """Modified files in the old checkout are preserved in the .stale-*
+        directory after a branch-mismatch move-aside."""
+        import kiro_crew.apps.registry as reg
+
+        git_url = "https://example.com/team/myapp.git"
+        dest = tmp_path / "app-sources" / "myapp"
+        dest.mkdir(parents=True)
+        git_dir = dest / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text(
+            f'[remote "origin"]\n\turl = {git_url}\n',
+            encoding="utf-8",
+        )
+        (git_dir / "HEAD").write_text(
+            "ref: refs/heads/old-branch\n",
+            encoding="utf-8",
+        )
+        # Simulate local edits that a user may have made.
+        (dest / "config.yaml").write_text("# user-modified config\nkey: value", encoding="utf-8")
+        (dest / "scratch.txt").write_text("important notes", encoding="utf-8")
+
+        def _fake_wrap_argv(argv, mode="standard"):
+            return list(argv), None
+
+        class _SuccessProc:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"Cloning into 'myapp'...", None)
+
+        async def _fake_create_subprocess(*args, **kwargs):
+            dest.mkdir(parents=True, exist_ok=True)
+            new_git = dest / ".git"
+            new_git.mkdir(parents=True, exist_ok=True)
+            (new_git / "HEAD").write_text(
+                "ref: refs/heads/new-branch\n",
+                encoding="utf-8",
+            )
+            return _SuccessProc()
+
+        log_lines: list[str] = []
+        pending_cleanup: list[Path] = []
+        with (
+            patch("kiro_crew.apps.registry.is_clone_host_trusted", return_value=True),
+            patch("kiro_crew.apps.registry.wrap_argv", side_effect=_fake_wrap_argv),
+            patch(
+                "kiro_crew.apps.registry.cgroup_scope_argv",
+                side_effect=lambda a: a,
+            ),
+            patch(
+                "kiro_crew.apps.registry.create_subprocess_limited",
+                side_effect=_fake_create_subprocess,
+            ),
+            patch(
+                "kiro_crew.apps.registry._clone_origin_url",
+                new=AsyncMock(return_value=git_url),
+            ),
+        ):
+            err = await reg._git_clone_or_pull(
+                git_url,
+                "new-branch",
+                dest,
+                log_lines,
+                index_originated=False,
+                pending_cleanup=pending_cleanup,
+            )
+
+        assert err is None
+        # Local edits survive in the moved-aside directory.
+        assert len(pending_cleanup) == 1
+        stale_dir = pending_cleanup[0]
+        assert (stale_dir / "config.yaml").exists()
+        assert (stale_dir / "config.yaml").read_text() == "# user-modified config\nkey: value"
+        assert (stale_dir / "scratch.txt").exists()
+        assert (stale_dir / "scratch.txt").read_text() == "important notes"
+
+    @pytest.mark.asyncio
+    async def test_branch_mismatch_reconverges_fast_path(self, tmp_path):
+        """After one branch-change re-clone, a SECOND manifest fetch uses the
+        fast path (re-convergence proven end-to-end)."""
+        from kiro_crew.apps import registry as reg
+
+        git_url = "https://example.com/team/reconverge-app.git"
+
+        # Set up the persistent clone ALREADY on the correct branch
+        # (simulating the state after the first re-clone completed).
+        clone_dir = tmp_path / "app-sources" / "reconverge-app"
+        clone_dir.mkdir(parents=True)
+        git_dir = clone_dir / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text(
+            f'[remote "origin"]\n\turl = {git_url}\n',
+            encoding="utf-8",
+        )
+        (git_dir / "HEAD").write_text(
+            "ref: refs/heads/new-branch\n",
+            encoding="utf-8",
+        )
+        (clone_dir / "app.json").write_text(
+            '{"name": "reconverge-app", "version": "5.0.0"}',
+            encoding="utf-8",
+        )
+
+        with (
+            patch(
+                "kiro_crew.apps.registry.app_source_dir",
+                return_value=clone_dir,
+            ),
+            patch(
+                "kiro_crew.apps.registry._clone_origin_url",
+                new=AsyncMock(return_value=git_url),
+            ),
+        ):
+            result = await reg._fetch_app_manifest(
+                git_url,
+                "new-branch",
+                "",
+                app_name="reconverge-app",
+                git_url=git_url,
+                owner_designated=False,
+            )
+
+        # Fast path used — local manifest served directly (no clone/throwaway).
+        assert result is not None
+        assert result["version"] == "5.0.0"
