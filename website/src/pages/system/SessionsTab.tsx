@@ -155,7 +155,7 @@ export default function SessionsTab({ planeStateRef }: Props) {
   const sessions = data?.sessions ?? EMPTY_SESSIONS
   const tasks = data?.tasks ?? EMPTY_TASKS
   const totals = data?.totals
-  const unattributed = data?.unattributed ?? null
+  const unowned = data?.unowned ?? null
   const hostMb = totals?.host_mb ?? null
   const rows = useMemo(() => buildTree(sessions, tasks), [sessions, tasks])
   const maxima = useMemo(() => columnMaxima(rows), [rows])
@@ -316,8 +316,8 @@ export default function SessionsTab({ planeStateRef }: Props) {
   ]
   const hideable = table.getAllLeafColumns().filter(c => c.getCanHide())
 
-  /** Whether to show the unattributed row: only when procs > 0. */
-  const showUnattributed = unattributed != null && unattributed.procs > 0
+  /** Whether to show the unowned-runtimes row: only when procs > 0. */
+  const showUnowned = unowned != null && unowned.procs > 0
 
   const closePicker = useCallback(() => {
     setPickerOpen(false)
@@ -435,7 +435,7 @@ export default function SessionsTab({ planeStateRef }: Props) {
             </Btn>
           }
         />
-      ) : table.getRowModel().rows.length === 0 && !showUnattributed ? (
+      ) : table.getRowModel().rows.length === 0 && !showUnowned ? (
         <EmptyState
           icon={<MemoryStick className="lucide-inline" />}
           title={i18nT('pages.sessionsTab.no_active_sessions')}
@@ -485,18 +485,20 @@ export default function SessionsTab({ planeStateRef }: Props) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {/* Unattributed row — pinned above all sessions, outside sort.
-                Finding 6: use warn tint instead of danger for a documented-healthy state. */}
-            {showUnattributed && (
-              <TableRow data-testid="unattributed-row" className="text-warn">
+            {/* Our own runtimes with no live session — pinned above all
+                sessions, outside sort. Runtimes belonging to other instances,
+                pods or other products on the machine are not listed at all:
+                this page reports what THIS gateway occupies. */}
+            {showUnowned && (
+              <TableRow data-testid="unowned-row" className="text-warn">
                 {table.getHeaderGroups()[0]?.headers.map(h => {
                   const colId = h.column.id
                   const isName = colId === 'name'
                   let content: string
                   if (isName) content = ''
-                  else if (colId === 'rssMb') content = fmtMb(unattributed!.rss_mb)
-                  else if (colId === 'procs') content = fmtNumber(unattributed!.procs)
-                  else if (colId === 'uptimeS') content = fmtUptime(unattributed!.oldest_uptime_s)
+                  else if (colId === 'rssMb') content = fmtMb(unowned!.rss_mb)
+                  else if (colId === 'procs') content = fmtNumber(unowned!.procs)
+                  else if (colId === 'uptimeS') content = fmtUptime(unowned!.oldest_uptime_s)
                   else content = '—'
                   return (
                     <TableCell
@@ -505,8 +507,8 @@ export default function SessionsTab({ planeStateRef }: Props) {
                     >
                       {isName ? (
                         <span className="inline-flex items-center gap-1.5">
-                          <span>{i18nT('pages.sessionsTab.unattributed')}</span>
-                          <InfoTip text={i18nT('pages.sessionsTab.unattributed_hint')} />
+                          <span>{i18nT('pages.sessionsTab.unowned')}</span>
+                          <InfoTip text={i18nT('pages.sessionsTab.unowned_hint')} />
                         </span>
                       ) : content}
                     </TableCell>
@@ -636,10 +638,10 @@ export default function SessionsTab({ planeStateRef }: Props) {
         <FooterStat label={i18nT('pages.sessionsTab.footer_sessions')} value={fmtNumber(sessions.length)} />
         <FooterStat label={i18nT('pages.sessionsTab.footer_task_sessions')} value={fmtNumber(tasks.length)} />
         <FooterStat label={i18nT('pages.sessionsTab.footer_session_procs')} value={fmtNumber(procTotal)} />
-        {showUnattributed && (
+        {showUnowned && (
           <FooterStat
-            label={i18nT('pages.sessionsTab.unattributed')}
-            value={`${fmtNumber(unattributed!.procs)} · ${fmtGb(unattributed!.rss_mb)}`}
+            label={i18nT('pages.sessionsTab.unowned')}
+            value={`${fmtNumber(unowned!.procs)} · ${fmtGb(unowned!.rss_mb)}`}
             warn
           />
         )}

@@ -9743,8 +9743,8 @@
       "session_task": "Session / Tâche",
       "shared": "en commun",
       "turns": "Tours",
-      "unattributed": "Non attribué",
-      "unattributed_hint": "Runtimes d’agent actifs sur cette machine qui n’appartiennent pas à cette passerelle — un runtime résiduel d’une génération précédente de la passerelle, ou un pod en cours d’exécution (une passerelle distincte avec son propre répertoire de données).",
+      "unowned": "Runtimes sans propriétaire",
+      "unowned_hint": "Runtimes d'agent issus du dossier de données de cette passerelle, sans aucune session active derrière eux — souvent laissés par une génération précédente de la passerelle. Cette mémoire revient à Kiro Crew. Les runtimes appartenant à d'autres instances, à des pods ou à d'autres applications de cette machine ne sont pas comptés. Un runtime qui vient de démarrer peut apparaître ici le temps d'un rafraîchissement, avant que sa session ne le réclame.",
       "uptime": "Durée"
     },
     "settings": {

@@ -9743,8 +9743,8 @@
       "session_task": "Sessão / Tarefa",
       "shared": "em comum",
       "turns": "Turnos",
-      "unattributed": "Não atribuídos",
-      "unattributed_hint": "Runtimes de agente ativos nesta máquina que não pertencem a este gateway — um runtime residual de uma geração anterior do gateway, ou um pod em execução (um gateway separado com o seu próprio diretório de dados).",
+      "unowned": "Runtimes sem proprietário",
+      "unowned_hint": "Runtimes de agente do diretório de dados deste gateway sem nenhuma sessão ativa por trás, normalmente deixados por uma geração anterior do gateway. Esta memória é do Kiro Crew para recuperar. Runtimes de outras instâncias, de pods ou de outras aplicações desta máquina não são contados. Um runtime recém-iniciado pode aparecer aqui por uma atualização, antes de a sessão assumi-lo.",
       "uptime": "Tempo ativo"
     },
     "settings": {
