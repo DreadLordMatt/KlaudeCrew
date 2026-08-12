@@ -1100,6 +1100,85 @@ def parse_usage_update(update: dict[str, Any]) -> tuple[int | float | None, int 
     return _token_count(used), _token_count(size)
 
 
+def parse_prompt_result_usage(result: Any) -> dict[str, int] | None:
+    """Parse the OPTIONAL/EXPERIMENTAL ACP ``PromptResponse.usage`` field.
+
+    Fork (KlaudeCrew), source-verified against claude-agent-acp v0.66.0
+    (``dist/acp-agent.js``, the version this fork's docs already cite for the
+    model wire shape — see acp-client.md "Turn usage (claude backend)"): the
+    adapter's ``prompt()`` handler resolves to ``{stopReason, usage}`` for
+    every stop reason (end_turn, refusal, cancelled) via a shared
+    ``sessionUsage(session)`` helper, EXCEPT a queued-then-cancelled turn
+    that never ran, which settles with no ``usage`` key at all — the ACP spec
+    itself declares the field ``usage?: Usage | null``. ``session
+    .accumulatedUsage`` (the source of these numbers) is zeroed both at
+    session creation and whenever a queued turn is promoted to active, so
+    these counts are PER-TURN, not cumulative — no delta math needed here
+    (contrast the ``cost`` field on ``usage_update``, which IS cumulative;
+    see :func:`parse_usage_update_cost`).
+
+    kiro-cli never sends this field (it reports credits via
+    ``_kiro.dev/metadata`` instead), so a non-dict/absent ``usage`` on that
+    path is the normal case, not an error.
+
+    Returns None when ``usage`` is absent or every recognized sub-field is
+    unusable — never raises. A caller receiving None must treat it as "no
+    data for this turn" and leave the existing counts alone, not zero them.
+    """
+    if not isinstance(result, dict):
+        return None
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = _token_count(usage.get("inputTokens"))
+    output_tokens = _token_count(usage.get("outputTokens"))
+    cache_read = _token_count(usage.get("cachedReadTokens"))
+    cache_write = _token_count(usage.get("cachedWriteTokens"))
+    if (
+        input_tokens is None
+        and output_tokens is None
+        and cache_read is None
+        and cache_write is None
+    ):
+        return None
+    return {
+        "input_tokens": int(input_tokens or 0),
+        "output_tokens": int(output_tokens or 0),
+        "cache_read_tokens": int(cache_read or 0),
+        "cache_creation_tokens": int(cache_write or 0),
+    }
+
+
+def parse_usage_update_cost(update: dict[str, Any]) -> float | None:
+    """Parse the CUMULATIVE session cost off a ``usage_update``'s optional
+    ``cost`` sub-object.
+
+    Fork (KlaudeCrew), source-verified against claude-agent-acp v0.66.0 (see
+    :func:`parse_prompt_result_usage`): sent alongside the existing
+    used/size fields whenever the adapter has a fresh assistant-message
+    usage snapshot, sourced from the Claude Code SDK's own running
+    ``total_cost_usd``. The ACP spec's ``Cost.amount`` docstring is explicit
+    that this is "Total cumulative cost for session" — NOT a per-turn delta
+    — so callers must track a baseline and diff successive reads to
+    attribute spend to individual turns (see ``AcpClient._track_usage_update``
+    / ``AcpClient._cost_usd_baseline``).
+
+    Returns None when ``cost`` is absent, malformed, or in a non-USD
+    currency (``TurnUsage.cost_usd`` is USD-only) — never raises.
+    """
+    if not isinstance(update, dict):
+        return None
+    cost = update.get("cost")
+    if not isinstance(cost, dict):
+        return None
+    if cost.get("currency", "USD") != "USD":
+        return None
+    amount = _token_count(cost.get("amount"))
+    if amount is None:
+        return None
+    return float(amount)
+
+
 # Re-export the method names so callers can use a single import site for the
 # kiro handshake (mode/model) requests alongside the param builders.
 __all__ = [
@@ -1111,6 +1190,8 @@ __all__ = [
     "build_permission_event",
     "parse_session_update",
     "parse_usage_update",
+    "parse_prompt_result_usage",
+    "parse_usage_update_cost",
     "parse_text_chunk",
     "make_unified_diff",
     "select_tool_title",
