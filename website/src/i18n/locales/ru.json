@@ -20,6 +20,7 @@
     "changelog": "Журнал изменений",
     "check_logs_for_details": "Подробности смотри в логах.",
     "checking_usage_running": "Проверка расхода — выполняется",
+    "claude_usage_title": "Использование Claude за {{month}}: {{costUsd}} (сегодня {{costUsdToday}}) — {{tokensIn}} входных / {{tokensOut}} выходных токенов, {{turns}} ходов",
     "click_to_collapse_readouts": "нажми, чтобы свернуть метрики",
     "click_to_expand_readouts": "нажми, чтобы развернуть метрики",
     "click_to_hide": "Нажмите, чтобы скрыть",

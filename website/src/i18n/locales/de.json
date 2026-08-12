@@ -20,6 +20,7 @@
     "changelog": "Änderungsprotokoll",
     "check_logs_for_details": "Prüfe die Logs für Details.",
     "checking_usage_running": "Nutzung wird geprüft — läuft",
+    "claude_usage_title": "Claude-Nutzung im {{month}}: {{costUsd}} (heute {{costUsdToday}}) — {{tokensIn}} Eingabe- / {{tokensOut}} Ausgabe-Tokens, {{turns}} Runden",
     "click_to_collapse_readouts": "klicken zum Einklappen der Messwerte",
     "click_to_expand_readouts": "klicken zum Aufklappen der Messwerte",
     "click_to_hide": "Klicken zum Ausblenden",

@@ -20,6 +20,7 @@
     "changelog": "चेंजलॉग",
     "check_logs_for_details": "विवरण के लिए लॉग देखें।",
     "checking_usage_running": "उपयोग जाँचा जा रहा है — चालू",
+    "claude_usage_title": "{{month}} में Claude उपयोग: {{costUsd}} (आज {{costUsdToday}}) — {{tokensIn}} इनपुट / {{tokensOut}} आउटपुट टोकन, {{turns}} टर्न",
     "click_to_collapse_readouts": "आँकड़े समेटने के लिए क्लिक करें",
     "click_to_expand_readouts": "आँकड़े विस्तृत करने के लिए क्लिक करें",
     "click_to_hide": "छिपाने के लिए क्लिक करें",

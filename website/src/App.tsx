@@ -104,7 +104,7 @@ import FeedbackPill from './components/FeedbackPill'
 
 import { i18nT } from './i18n/t'
 import { appNavTarget } from './appNav'
-import { fmtCompact, fmtNumber, fmtPercent } from './i18n/format'
+import { fmtCompact, fmtCurrency, fmtDateFields, fmtNumber, fmtPercent } from './i18n/format'
 type LogSubscribeFn = (cb: ((data: { level: string; msg: string }) => void) | null) => void
 
 /** Minimal shape of an entry from `GET /api/apps`, limited to the fields the
@@ -1390,6 +1390,29 @@ export default function App() {
     queryKey: ['kiro-usage'],
     queryFn: () => api.sessionsUsage().then(d => {
       const u = d?.usage || {}
+      // Fork (KlaudeCrew), claude backend: a month-to-date token/cost summary
+      // instead of a plan/limit meter (claude has no local plan-limit number
+      // to render as "used/limit"). Checked BEFORE the credits_plan gate so
+      // it can never be misread as the kiro shape — the two payloads share
+      // no numeric fields, but this keeps the branch explicit rather than
+      // relying on that absence. credits_plan stays intentionally unset on
+      // this payload, so a stale cached bundle that doesn't recognize
+      // `backend` falls through to the `available === false` -> hide branch
+      // below instead of misrendering — strictly better than the pre-fix
+      // eternal spinner a 503 used to leave behind.
+      if (u.backend === 'claude') {
+        return {
+          kind: 'claude' as const,
+          costUsd: Number.isFinite(u.cost_usd) ? u.cost_usd : 0,
+          costUsdToday: Number.isFinite(u.cost_usd_today) ? u.cost_usd_today : 0,
+          tokensIn: Number.isFinite(u.input_tokens) ? u.input_tokens : 0,
+          tokensOut: Number.isFinite(u.output_tokens) ? u.output_tokens : 0,
+          cacheRead: Number.isFinite(u.cache_read_tokens) ? u.cache_read_tokens : 0,
+          cacheCreation: Number.isFinite(u.cache_creation_tokens) ? u.cache_creation_tokens : 0,
+          turns: Number.isFinite(u.turns) ? u.turns : 0,
+          month: typeof u.month === 'string' ? u.month : '',
+        }
+      }
       // Kiro credit plan (internal) — the only usage this pill surfaces.
       // Number.isFinite guards against a stray NaN ever rendering as "NaN / NaN".
       if (Number.isFinite(u.credits_plan)) {
@@ -1866,6 +1889,24 @@ export default function App() {
             if (kiroUsage !== 'none') {
               if (!kiroUsage) {
                 segments.push(<button key="usage" className={`${seg} text-muted`} onClick={() => setKiroUsageOpen(true)} title={i18nT('app.kiro_credit_usage_checking')} aria-label={i18nT('app.kiro_credit_usage_checking_2')}><Coins size={12} /> {!isMobile && <Loader2 size={11} className="animate-spin" />}</button>)
+              } else if ('kind' in kiroUsage && kiroUsage.kind === 'claude') {
+                // Fork (KlaudeCrew), claude backend: month-to-date cost only,
+                // tooltip-only (no click-through modal — the kiro details
+                // modal stays kiro-only; a claude equivalent is a follow-on).
+                const monthLabel = kiroUsage.month
+                  ? fmtDateFields(`${kiroUsage.month}-01`, { year: 'numeric', month: 'long' })
+                  : ''
+                const title = i18nT('app.claude_usage_title', {
+                  month: monthLabel,
+                  costUsd: fmtCurrency(kiroUsage.costUsd),
+                  costUsdToday: fmtCurrency(kiroUsage.costUsdToday),
+                  tokensIn: fmtCompact(kiroUsage.tokensIn),
+                  tokensOut: fmtCompact(kiroUsage.tokensOut),
+                  turns: fmtNumber(kiroUsage.turns),
+                })
+                segments.push(<span key="usage" className={`${seg} font-mono text-[11px] whitespace-nowrap tabular-nums`} title={title} aria-label={title}>
+                  <Coins size={12} /> {!isMobile && fmtCurrency(kiroUsage.costUsd)}
+                </span>)
               } else {
                 // Pool the plan and any bonus/welcome credits into one total so
                 // the pill reflects what the user is actually spending (bonus is
@@ -2561,7 +2602,12 @@ export default function App() {
     </WsContext.Provider>
     {shortcutsOpen && <ShortcutsModal onClose={() => setShortcutsOpen(false)} />}
     <Modal open={kiroUsageOpen} onClose={() => setKiroUsageOpen(false)} title={<span className="flex items-center gap-2"><Coins size={16} /> {i18nT('app.kiro_credits')}</span>} maxWidth={460}>
-      {!kiroUsage || kiroUsage === 'none' ? (
+      {/* The claude usage pill has no onClick, so kiroUsageOpen never becomes
+          true while kiroUsage holds the claude variant — this modal is
+          kiro-only (a claude equivalent is a follow-on). The `'kind' in`
+          check here exists so TypeScript can narrow the rest of this branch
+          to the kiro shape; it is not a reachable runtime path. */}
+      {!kiroUsage || kiroUsage === 'none' || ('kind' in kiroUsage && kiroUsage.kind === 'claude') ? (
         <div className="flex items-center gap-2 text-sm text-muted py-4">
           <Loader2 size={14} className="animate-spin shrink-0" />
           <span>{i18nT('app.checking_usage_running')} <code className="font-mono">{i18nT('app.kiro_cli_usage')}</code>…</span>
