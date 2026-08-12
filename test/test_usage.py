@@ -20,6 +20,7 @@ from kiro_crew.dashboard.handlers.usage import (
     _parse_sessions,
     _parse_token_history,
     api_kiro_usage,
+    claude_usage_payload,
     get_usage_cache,
     persist_token_record,
     persist_token_record_async,
@@ -362,11 +363,14 @@ class TestApiKiroUsage:
 
 
 def _reset_token_cache():
-    """Tests share a process-global cache; clear it before each test that
+    """Tests share process-global caches; clear them before each test that
     swaps out the shard directory."""
     usage_mod._TOKEN_CACHE = {}
     usage_mod._TOKEN_CACHE_KEY = None
     usage_mod._TOKEN_CACHE_TS = 0.0
+    usage_mod._CLAUDE_USAGE_CACHE = {}
+    usage_mod._CLAUDE_USAGE_CACHE_SIG = ()
+    usage_mod._CLAUDE_USAGE_CACHE_AT = 0.0
 
 
 def _patch_shard_layout(monkeypatch, tmp_path):
@@ -700,6 +704,227 @@ class TestPersistTokenRecordAsync:
             usage_mod, "_TOKEN_USAGE_DIR", Path("/proc/nonexistent/usage/tokens")
         )
         await persist_token_record_async("s", "m", event)  # must not raise
+
+
+class TestClaudeUsagePayload:
+    """Fork (KlaudeCrew): claude_usage_payload() -- the month-to-date
+    token/cost summary GET /api/sessions/usage serves on the claude backend.
+    """
+
+    def test_empty_shards_yields_zeros(self, tmp_path, monkeypatch):
+        _patch_shard_layout(monkeypatch, tmp_path)
+        payload = claude_usage_payload()
+        assert payload["backend"] == "claude"
+        assert payload["available"] is False
+        assert payload["cost_usd"] == 0.0
+        assert payload["input_tokens"] == 0
+        assert payload["turns"] == 0
+
+    def test_sums_claude_shaped_rows_only(self, tmp_path, monkeypatch):
+        """A row with any nonzero token/cost field is claude's; a row with
+        only nonzero credits is kiro's -- TurnUsage's own contract keeps
+        these mutually exclusive, so content (not the provider field, which
+        is always "acp" regardless of backend) is what distinguishes them."""
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        _write_shard(
+            shard_dir,
+            today,
+            [
+                {
+                    "_type": "tokens",
+                    "ts": datetime.now().astimezone().isoformat(),
+                    "slot": "dashboard:chat-1-1",
+                    "provider": "acp",
+                    "input": 10,
+                    "output": 5,
+                    "cache_read": 2,
+                    "cache_create": 1,
+                    "cost": 0.10,
+                    "credits": 0.0,
+                },
+                {
+                    "_type": "tokens",
+                    "ts": datetime.now().astimezone().isoformat(),
+                    "slot": "dashboard:chat-2-1",
+                    "provider": "acp",
+                    "input": 0,
+                    "output": 0,
+                    "cache_read": 0,
+                    "cache_create": 0,
+                    "cost": 0.0,
+                    "credits": 5.0,
+                },
+                {  # a second claude row, same shard
+                    "_type": "tokens",
+                    "ts": datetime.now().astimezone().isoformat(),
+                    "slot": "dashboard:chat-3-1",
+                    "provider": "acp",
+                    "input": 20,
+                    "output": 0,
+                    "cache_read": 0,
+                    "cache_create": 0,
+                    "cost": 0.05,
+                    "credits": 0.0,
+                },
+            ],
+        )
+        payload = claude_usage_payload()
+        assert payload["input_tokens"] == 30
+        assert payload["output_tokens"] == 5
+        assert payload["cache_read_tokens"] == 2
+        assert payload["cache_creation_tokens"] == 1
+        assert payload["cost_usd"] == pytest.approx(0.15)
+        assert payload["turns"] == 2  # only the two claude-shaped rows
+
+    def test_all_zero_row_excluded_entirely(self, tmp_path, monkeypatch):
+        """A row with every field at 0/absent is neither backend's real
+        turn (or the {input_tokens or output_tokens or credits} persistence
+        gate would have skipped it) but must not crash or count as a turn
+        if one somehow lands in a shard."""
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        _write_shard(
+            shard_dir,
+            today,
+            [{"_type": "tokens", "ts": datetime.now().astimezone().isoformat(), "slot": "s"}],
+        )
+        payload = claude_usage_payload()
+        assert payload["turns"] == 0
+
+    def test_non_tokens_rows_ignored(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        _write_shard(shard_dir, today, [{"_type": "something_else", "input": 999}])
+        payload = claude_usage_payload()
+        assert payload["input_tokens"] == 0
+
+    def test_malformed_lines_do_not_raise(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        (shard_dir / f"{today}.jsonl").write_text("not json at all\n{also bad\n")
+        payload = claude_usage_payload()  # must not raise
+        assert payload["turns"] == 0
+
+    def test_row_before_month_start_excluded(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        today = datetime.now().astimezone()
+        last_month = (today.replace(day=1) - timedelta(days=1)).replace(hour=12)
+        _write_shard(
+            shard_dir,
+            last_month.strftime("%Y-%m-%d"),
+            [
+                {
+                    "_type": "tokens",
+                    "ts": last_month.isoformat(),
+                    "slot": "s",
+                    "input": 100,
+                    "cost": 1.0,
+                }
+            ],
+        )
+        payload = claude_usage_payload()
+        assert payload["input_tokens"] == 0
+        assert payload["cost_usd"] == 0.0
+
+    def test_cost_today_excludes_earlier_this_month(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        today = datetime.now().astimezone()
+        yesterday = today - timedelta(days=1)
+        if yesterday.month != today.month:
+            pytest.skip("flaky only on the 1st of the month; not worth dating around")
+        _write_shard(
+            shard_dir,
+            today.strftime("%Y-%m-%d"),
+            [
+                {
+                    "_type": "tokens",
+                    "ts": today.isoformat(),
+                    "slot": "s1",
+                    "input": 1,
+                    "cost": 0.10,
+                }
+            ],
+        )
+        _write_shard(
+            shard_dir,
+            yesterday.strftime("%Y-%m-%d"),
+            [
+                {
+                    "_type": "tokens",
+                    "ts": yesterday.isoformat(),
+                    "slot": "s2",
+                    "input": 1,
+                    "cost": 0.20,
+                }
+            ],
+        )
+        payload = claude_usage_payload()
+        assert payload["cost_usd"] == pytest.approx(0.30)  # both days, same month
+        assert payload["cost_usd_today"] == pytest.approx(0.10)  # today only
+
+    def test_cache_serves_cached_result_within_ttl(self, tmp_path, monkeypatch):
+        """A call within the TTL against an unchanged shard set returns the
+        cached object rather than rescanning -- proven by injecting a
+        sentinel into the cache and observing it come back unchanged."""
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        _write_shard(
+            shard_dir,
+            today,
+            [
+                {
+                    "_type": "tokens",
+                    "ts": datetime.now().astimezone().isoformat(),
+                    "slot": "s",
+                    "input": 1,
+                    "cost": 0.01,
+                }
+            ],
+        )
+        first = claude_usage_payload()
+        assert first["input_tokens"] == 1
+
+        sentinel = {**first, "input_tokens": 999999}
+        usage_mod._CLAUDE_USAGE_CACHE = sentinel
+        usage_mod._CLAUDE_USAGE_CACHE_AT = time.time()  # freshly "populated"
+
+        second = claude_usage_payload()
+        assert second is sentinel  # served from cache, never recomputed
+
+    def test_cache_expires_and_rescans(self, tmp_path, monkeypatch):
+        shard_dir = _patch_shard_layout(monkeypatch, tmp_path)
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        _write_shard(
+            shard_dir,
+            today,
+            [
+                {
+                    "_type": "tokens",
+                    "ts": datetime.now().astimezone().isoformat(),
+                    "slot": "s",
+                    "input": 1,
+                    "cost": 0.01,
+                }
+            ],
+        )
+        claude_usage_payload()
+        usage_mod._CLAUDE_USAGE_CACHE_AT = time.time() - usage_mod._CLAUDE_USAGE_TTL_S - 1
+        _write_shard(
+            shard_dir,
+            today,
+            [
+                {
+                    "_type": "tokens",
+                    "ts": datetime.now().astimezone().isoformat(),
+                    "slot": "s",
+                    "input": 5,
+                    "cost": 0.05,
+                }
+            ],
+        )
+        refreshed = claude_usage_payload()
+        assert refreshed["input_tokens"] == 5
 
 
 class TestCachedParseSessions:

@@ -124,6 +124,15 @@ def reject_if_not_kiro_backend() -> web.Response | None:
     (``/api/models``, ``/api/sessions/usage``) when kiro-cli isn't even the
     configured backend.
 
+    Non-``None`` is not just a block signal -- both call sites use it to
+    branch into an in-memory claude-backend response instead of a 503, the
+    same pattern: ``/api/models`` serves the live advertised model list
+    (``handlers/agents.py::api_models``), ``/api/sessions/usage`` serves a
+    month-to-date token/cost summary (``handlers/sessions.py::api_sessions_usage``
+    -> :func:`kiro_crew.dashboard.handlers.usage.claude_usage_payload`).
+    Neither branch touches a subprocess, so this guard's own reasoning
+    (below) does not apply to them -- only the kiro branch at each site does.
+
     Deliberately a SEPARATE guard from :func:`reject_if_kiro_unverified`, not
     folded into it: that function's other three callers (the destructive
     reruns, the OpenAI-compat endpoint) drive the NORMAL ACP session/turn
