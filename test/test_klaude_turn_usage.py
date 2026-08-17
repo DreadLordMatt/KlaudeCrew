@@ -3,9 +3,9 @@
 Wire shapes below are SOURCE-VERIFIED against the pinned claude-agent-acp
 v0.66.0 package (``dist/acp-agent.js`` + the ACP SDK's ``types.gen.d.ts``),
 the same version this fork's docs already cite for the model wire shape --
-not a live gateway capture. See docs/system-specs/modules/acp-client.md
-"Turn usage (claude backend)" for the full derivation and the residual
-live-verification risk (cumulative-cost delta math around session resume).
+and then live-confirmed on a real gateway, including that the adapter's
+cumulative cost is per PROCESS (restarts on session/load resume). See
+docs/system-specs/modules/acp-client.md "Turn usage (claude backend)".
 """
 
 from __future__ import annotations
@@ -188,15 +188,20 @@ class TestTrackUsageUpdateCostBaseline:
     reads into a per-turn delta, since TurnUsage.cost_usd is per-turn but the
     wire value is cumulative session cost."""
 
-    def test_first_observation_seeds_baseline_without_adding(self, tmp_path):
+    def test_first_observation_is_the_first_turns_spend(self, tmp_path):
+        """The adapter's accumulator is per process (live-verified: a
+        session/load resume restarts near zero), so the very first cumulative
+        value IS this turn's own cost — it must be credited, not swallowed
+        as a baseline seed."""
         client = AcpClient(work_dir=tmp_path, acp_backend=ACP_BACKEND_CLAUDE)
         client._track_usage_update(_usage_update_msg(cost_amount=1.50))
         assert client._cost_usd_baseline == 1.50
-        assert client.last_prompt_stats.cost_usd == 0.0
+        assert client.last_prompt_stats.cost_usd == pytest.approx(1.50)
 
-    def test_second_higher_observation_adds_delta(self, tmp_path):
+    def test_second_higher_observation_adds_only_the_delta(self, tmp_path):
         client = AcpClient(work_dir=tmp_path, acp_backend=ACP_BACKEND_CLAUDE)
         client._track_usage_update(_usage_update_msg(cost_amount=1.50))
+        client.last_prompt_stats = client.last_prompt_stats.carry_over()  # turn boundary
         client._track_usage_update(_usage_update_msg(cost_amount=1.75))
         assert client.last_prompt_stats.cost_usd == pytest.approx(0.25)
         assert client._cost_usd_baseline == 1.75
@@ -206,13 +211,14 @@ class TestTrackUsageUpdateCostBaseline:
         client._track_usage_update(_usage_update_msg(cost_amount=1.00))
         client._track_usage_update(_usage_update_msg(cost_amount=1.10))
         client._track_usage_update(_usage_update_msg(cost_amount=1.35))
-        assert client.last_prompt_stats.cost_usd == pytest.approx(0.35)
+        assert client.last_prompt_stats.cost_usd == pytest.approx(1.35)
 
     def test_negative_delta_resyncs_baseline_without_subtracting(self, tmp_path):
         """A backend-side resync (e.g. a fresh SDK query object) must not
         make cost_usd go negative -- it just re-anchors the baseline."""
         client = AcpClient(work_dir=tmp_path, acp_backend=ACP_BACKEND_CLAUDE)
         client._track_usage_update(_usage_update_msg(cost_amount=2.00))
+        client.last_prompt_stats = client.last_prompt_stats.carry_over()  # turn boundary
         client._track_usage_update(_usage_update_msg(cost_amount=1.75))  # backend reset
         client._track_usage_update(_usage_update_msg(cost_amount=1.90))  # normal delta after
         assert client.last_prompt_stats.cost_usd == pytest.approx(0.15)  # 1.90 - 1.75
@@ -220,8 +226,8 @@ class TestTrackUsageUpdateCostBaseline:
 
     def test_carry_over_preserves_baseline_across_turns(self, tmp_path):
         """The baseline lives on the client (not AcpPromptStats), so a new
-        turn's carry_over() must not reset it -- otherwise every turn after
-        the first would re-seed instead of diffing."""
+        turn's carry_over() must not reset it -- otherwise every turn would
+        re-credit the whole cumulative total instead of just its delta."""
         client = AcpClient(work_dir=tmp_path, acp_backend=ACP_BACKEND_CLAUDE)
         client._track_usage_update(_usage_update_msg(cost_amount=1.00))
         client.last_prompt_stats = client.last_prompt_stats.carry_over()  # turn boundary
@@ -231,7 +237,7 @@ class TestTrackUsageUpdateCostBaseline:
     def test_no_cost_field_is_a_noop(self, tmp_path):
         client = AcpClient(work_dir=tmp_path, acp_backend=ACP_BACKEND_CLAUDE)
         client._track_usage_update(_usage_update_msg())  # no cost key
-        assert client._cost_usd_baseline is None
+        assert client._cost_usd_baseline == 0.0
         assert client.last_prompt_stats.cost_usd == 0.0
 
     def test_kiro_backend_never_tracks_cost(self, tmp_path):
@@ -239,7 +245,7 @@ class TestTrackUsageUpdateCostBaseline:
         a cost field even if one somehow arrived on its usage_update."""
         client = AcpClient(work_dir=tmp_path)  # default backend: kiro
         client._track_usage_update(_usage_update_msg(cost_amount=5.0))
-        assert client._cost_usd_baseline is None
+        assert client._cost_usd_baseline == 0.0
         assert client.last_prompt_stats.cost_usd == 0.0
 
 

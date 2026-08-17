@@ -1873,8 +1873,12 @@ class AcpClient:
         # `cost.amount` (claude backend only). Lives on the client, not
         # AcpPromptStats, because it must survive carry_over()'s per-turn
         # reset -- it is the baseline the next delta is computed against, not
-        # a per-turn value itself. None = never observed yet this process.
-        self._cost_usd_baseline: float | None = None
+        # a per-turn value itself. Starts at 0.0 because the adapter's
+        # accumulator is PER PROCESS (live-verified: a session/load resume
+        # reports cost restarting near zero, not continuing the prior
+        # process's total), so the first observation IS this process's first
+        # turn's spend, and seeding from it would silently drop that turn.
+        self._cost_usd_baseline: float = 0.0
         self._tool_call_inputs: dict[str, str] = {}
         # Map toolCallId → is_shell, cached from the tool_call notification so
         # the later permission_request event (which carries no kind) can inherit
@@ -4638,17 +4642,14 @@ class AcpClient:
         this diffs against `_cost_usd_baseline` (the last cumulative value
         observed, surviving across carry_over()'s per-turn reset) and adds
         only the positive delta to the current turn's running total. The
-        first observation this process has nothing to diff against — rather
-        than attribute an unknown amount of PRIOR spend to this turn, it just
-        seeds the baseline. A negative delta (e.g. the SDK's own tracker
-        resets under us) resyncs the baseline without subtracting from an
-        already-accumulated per-turn total.
+        baseline starts at 0.0, not "first observation": the adapter's
+        accumulator is per process, so the first cumulative value seen IS
+        the first turn's own spend (see the __init__ note). A negative delta
+        (the SDK's own tracker resetting under us) resyncs the baseline
+        without subtracting from an already-accumulated per-turn total.
         """
         cumulative = parse_usage_update_cost(update)
         if cumulative is None:
-            return
-        if self._cost_usd_baseline is None:
-            self._cost_usd_baseline = cumulative
             return
         delta = cumulative - self._cost_usd_baseline
         if delta > 0:
