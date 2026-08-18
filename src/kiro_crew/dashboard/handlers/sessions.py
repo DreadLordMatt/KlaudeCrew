@@ -25,6 +25,7 @@ import kiro_crew.dashboard.handlers as _h
 from kiro_crew.acp.client import _resolve_kiro_bin_for_spawn
 from kiro_crew.config.paths import kiro_agents_dir
 from kiro_crew.dashboard.handlers import kiro_usage_api
+from kiro_crew.dashboard.handlers.usage import claude_usage_payload
 from kiro_crew.dashboard.kiro_readiness import (
     reject_if_kiro_unverified,
     reject_if_not_kiro_backend,
@@ -873,14 +874,23 @@ async def _fetch_usage_bg() -> None:
 
 
 async def api_sessions_usage(request: web.Request) -> web.Response:
-    """GET /api/sessions/usage — cached kiro credit usage (background refresh)."""
-    # Fork (KlaudeCrew): same reasoning as api_models's guard -- kiro-cli not
-    # being the configured backend must block this BEFORE the assume_ready
-    # pass-through below, or every 30s poll spawns a real unauthenticated
-    # kiro-cli and pops its own browser sign-in tab.
+    """GET /api/sessions/usage — cached kiro credit usage (background refresh).
+
+    Fork (KlaudeCrew), claude backend: serves a month-to-date token/cost
+    summary instead (see :func:`claude_usage_payload`) — a pure in-memory
+    JSONL shard read, no subprocess, so neither kiro guard below applies on
+    that branch. ``credits_plan`` is deliberately absent from this shape
+    (unlike the kiro payload) so the frontend's numeric credit-meter path,
+    gated on that field, can never misfire on it.
+    """
+    # Fork (KlaudeCrew): kiro-cli isn't the configured backend -> serve the
+    # claude usage summary instead. This branch must come BEFORE the two kiro
+    # guards below, same reasoning as api_models's guard: every 30s poll would
+    # otherwise spawn a real, unauthenticated kiro-cli and pop its own browser
+    # sign-in tab. See reject_if_not_kiro_backend()'s docstring.
     blocked = reject_if_not_kiro_backend()
     if blocked is not None:
-        return blocked
+        return web.json_response({"usage": claude_usage_payload()})
     # Same browser-storm guard as api_models: the /usage scrape shells out to
     # `kiro-cli chat --no-interactive ... /usage`, which auto-opens a browser
     # login while signed out. This endpoint is polled every 30s by the top-bar

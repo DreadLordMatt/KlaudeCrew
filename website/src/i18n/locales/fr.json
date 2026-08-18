@@ -20,6 +20,7 @@
     "changelog": "Journal des modifications",
     "check_logs_for_details": "Consultez les journaux pour plus de détails.",
     "checking_usage_running": "Vérification de l'utilisation — en cours",
+    "claude_usage_title": "Utilisation de Claude en {{month}} : {{costUsd}} ({{costUsdToday}} aujourd'hui) — {{tokensIn}} jetons entrants / {{tokensOut}} sortants, {{turns}} tours",
     "click_to_collapse_readouts": "cliquer pour réduire les indicateurs",
     "click_to_expand_readouts": "cliquer pour développer les indicateurs",
     "click_to_hide": "Cliquer pour masquer",

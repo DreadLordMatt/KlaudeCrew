@@ -232,6 +232,121 @@ def slot_spend(days: int = SPEND_WINDOW_DAYS) -> dict[str, dict[str, float]]:
     return out
 
 
+# ── claude-backend usage pill (Fork, KlaudeCrew) ────────────────────────────
+
+_CLAUDE_USAGE_CACHE: dict[str, Any] = {}
+_CLAUDE_USAGE_CACHE_SIG: tuple[object, ...] = ()
+_CLAUDE_USAGE_CACHE_AT: float = 0.0
+# Matches the top-bar pill's own poll interval (App.tsx) so a burst of
+# concurrent polls within one interval shares a single shard scan.
+_CLAUDE_USAGE_TTL_S = 30.0
+
+
+def claude_usage_payload() -> dict[str, Any]:
+    """Month-to-date claude-backend token/cost totals for GET /api/sessions/usage.
+
+    Fork (KlaudeCrew): mirrors :func:`slot_spend`'s signature+TTL cache, but
+    sums by CONTENT rather than by the record's ``provider`` field. Every
+    token record's ``provider`` is stamped from ``cfg.agent.provider``
+    (chat_runner.py), which is a single-valued enum always ``"acp"`` in this
+    fork regardless of ``agent.acp_backend`` — it cannot distinguish a
+    kiro-backend turn from a claude-backend one despite the field's own
+    docstring intent. ``TurnUsage`` itself can: "each provider fills the
+    dimensions it bills in and leaves the rest at 0" (acp/types.py), so a
+    record with any nonzero token/cost field is a claude (or Bedrock) turn,
+    and one with only nonzero ``credits`` is kiro — mutually exclusive by
+    construction, never both.
+
+    A floor, not the account bill: only counts turns that reached
+    persist_token_record[_async] (dashboard chat_runner + surfaces using
+    provider_last_turn_usage) — direct AcpClient consumers outside that path
+    (app worker pools, knowledge llm_pool) are not represented.
+    """
+    global _CLAUDE_USAGE_CACHE, _CLAUDE_USAGE_CACHE_SIG, _CLAUDE_USAGE_CACHE_AT
+
+    now = time.time()
+    # A 31-day window is a superset of "this calendar month" from any day —
+    # rows are then filtered against the real month boundary below.
+    paths = _shards_in_window(31)
+    sig: tuple[object, ...] = tuple(
+        (str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in paths if p.exists()
+    )
+    if (
+        sig == _CLAUDE_USAGE_CACHE_SIG
+        and _CLAUDE_USAGE_CACHE_SIG
+        and now - _CLAUDE_USAGE_CACHE_AT < _CLAUDE_USAGE_TTL_S
+    ):
+        return _CLAUDE_USAGE_CACHE
+
+    today = datetime.now().astimezone()
+    month_start = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    today_start = today.replace(hour=0, minute=0, second=0, microsecond=0)
+    input_tokens = output_tokens = cache_read_tokens = cache_creation_tokens = 0
+    turns = 0
+    cost_usd = 0.0
+    cost_usd_today = 0.0
+
+    for path in paths:
+        try:
+            with path.open() as fh:
+                for line in fh:
+                    try:
+                        obj = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if not isinstance(obj, dict) or obj.get("_type") != "tokens":
+                        continue
+                    inp = obj.get("input") or 0
+                    outp = obj.get("output") or 0
+                    cread = obj.get("cache_read") or 0
+                    ccreate = obj.get("cache_create") or 0
+                    cost = obj.get("cost") or 0.0
+                    if not (
+                        isinstance(inp, (int, float))
+                        and isinstance(outp, (int, float))
+                        and isinstance(cread, (int, float))
+                        and isinstance(ccreate, (int, float))
+                        and isinstance(cost, (int, float))
+                    ):
+                        continue
+                    if not (inp or outp or cread or ccreate or cost):
+                        continue  # a kiro (credits-only) row -- not ours
+                    ts_raw = str(obj.get("ts") or "")
+                    try:
+                        ts_str = ts_raw[:-1] + "+00:00" if ts_raw.endswith("Z") else ts_raw
+                        dt = datetime.fromisoformat(ts_str)
+                    except (ValueError, TypeError):
+                        continue
+                    if dt < month_start:
+                        continue
+                    input_tokens += int(inp)
+                    output_tokens += int(outp)
+                    cache_read_tokens += int(cread)
+                    cache_creation_tokens += int(ccreate)
+                    cost_usd += float(cost)
+                    if dt >= today_start:
+                        cost_usd_today += float(cost)
+                    turns += 1
+        except (OSError, UnicodeDecodeError):
+            continue
+
+    payload = {
+        "available": False,
+        "backend": "claude",
+        "month": today.strftime("%Y-%m"),
+        "cost_usd": round(cost_usd, 4),
+        "cost_usd_today": round(cost_usd_today, 4),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "turns": turns,
+    }
+    _CLAUDE_USAGE_CACHE, _CLAUDE_USAGE_CACHE_SIG = payload, sig
+    _CLAUDE_USAGE_CACHE_AT = now
+    return payload
+
+
 # A payload backstop, not a top-N: the panel lists sessions for the user to
 # browse, sort and group, so cutting it to the "hottest" few hid most of them
 # behind a number they could not reach. Measured over a 7d window this is 260

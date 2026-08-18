@@ -20,6 +20,7 @@
     "changelog": "更新日志",
     "check_logs_for_details": "查看日志了解详情。",
     "checking_usage_running": "正在检查用量 — 运行中",
+    "claude_usage_title": "{{month}} Claude 用量：{{costUsd}}（今天 {{costUsdToday}}）— 输入 {{tokensIn}} / 输出 {{tokensOut}} 个 token，共 {{turns}} 轮",
     "click_to_collapse_readouts": "点击折叠状态读数",
     "click_to_expand_readouts": "点击展开状态读数",
     "click_to_hide": "点击隐藏",

@@ -20,6 +20,7 @@
     "changelog": "চেঞ্জলগ",
     "check_logs_for_details": "বিস্তারিত জানতে লগ দেখো।",
     "checking_usage_running": "ব্যবহার যাচাই করা হচ্ছে — চলছে",
+    "claude_usage_title": "{{month}}-এ Claude ব্যবহার: {{costUsd}} (আজ {{costUsdToday}}) — {{tokensIn}} ইনপুট / {{tokensOut}} আউটপুট টোকেন, {{turns}} টার্ন",
     "click_to_collapse_readouts": "রিডআউট সংকুচিত করতে ক্লিক করো",
     "click_to_expand_readouts": "রিডআউট প্রসারিত করতে ক্লিক করো",
     "click_to_hide": "লুকাতে ক্লিক করুন",

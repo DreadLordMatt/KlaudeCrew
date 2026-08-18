@@ -1343,3 +1343,63 @@ describe('Kiro credits pill — edge cases', () => {
     expect(screen.queryByText(/NaN/)).not.toBeInTheDocument()
   })
 })
+
+describe('Claude usage pill (KlaudeCrew fork)', () => {
+  it('renders the month-to-date cost when the claude backend payload arrives', async () => {
+    const { api } = await import('../api/client')
+    vi.mocked(api.sessionsUsage).mockResolvedValue({
+      usage: {
+        available: false,
+        backend: 'claude',
+        month: '2026-08',
+        cost_usd: 1.23,
+        cost_usd_today: 0.45,
+        input_tokens: 1000,
+        output_tokens: 500,
+        cache_read_tokens: 10,
+        cache_creation_tokens: 5,
+        turns: 7,
+      },
+    } as never)
+    renderWithProviders(<App />, { route: '/chat' })
+    const pill = await screen.findByTitle(/Claude usage in August 2026/)
+    expect(pill).toHaveTextContent('$1.23')
+    expect(pill.title).toMatch(/\$1\.23/)
+    expect(pill.title).toMatch(/\$0\.45 today/)
+    expect(pill.title).toMatch(/7 turns/)
+  })
+
+  it('never renders the kiro credits pill or its checking-state for a claude payload', async () => {
+    const { api } = await import('../api/client')
+    vi.mocked(api.sessionsUsage).mockResolvedValue({
+      usage: { available: false, backend: 'claude', month: '2026-08', cost_usd: 0, turns: 0 },
+    } as never)
+    renderWithProviders(<App />, { route: '/chat' })
+    await screen.findByTitle(/Claude usage in August 2026/)
+    expect(screen.queryByTitle(/Kiro credits:/)).not.toBeInTheDocument()
+    expect(screen.queryByTitle(/Kiro credit usage/)).not.toBeInTheDocument()
+  })
+
+  it('is tooltip-only: clicking it opens no modal', async () => {
+    const { api } = await import('../api/client')
+    vi.mocked(api.sessionsUsage).mockResolvedValue({
+      usage: { available: false, backend: 'claude', month: '2026-08', cost_usd: 2, turns: 3 },
+    } as never)
+    renderWithProviders(<App />, { route: '/chat' })
+    const pill = await screen.findByTitle(/Claude usage in August 2026/)
+    fireEvent.click(pill)
+    await new Promise(r => setTimeout(r, 0))
+    expect(screen.queryByText('Overage used')).not.toBeInTheDocument()
+    expect(screen.queryByText('KIRO POWER')).not.toBeInTheDocument()
+  })
+
+  it('renders $0.00 rather than hiding when a fresh account has spent nothing', async () => {
+    const { api } = await import('../api/client')
+    vi.mocked(api.sessionsUsage).mockResolvedValue({
+      usage: { available: false, backend: 'claude', month: '2026-08', cost_usd: 0, cost_usd_today: 0, turns: 0 },
+    } as never)
+    renderWithProviders(<App />, { route: '/chat' })
+    const pill = await screen.findByTitle(/Claude usage in August 2026/)
+    expect(pill).toHaveTextContent('$0.00')
+  })
+})

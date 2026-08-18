@@ -8,6 +8,7 @@
     "cancel_update": "Cancel Update",
     "changelog": "Changelog",
     "checking_usage_running": "Checking usage — running",
+    "claude_usage_title": "Claude usage in {{month}}: {{costUsd}} ({{costUsdToday}} today) — {{tokensIn}} in / {{tokensOut}} out tokens, {{turns}} turns",
     "click_to_hide": "Click to hide",
     "close": "Close",
     "cpu": "CPU",

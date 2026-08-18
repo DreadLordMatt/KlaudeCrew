@@ -20,6 +20,7 @@
     "changelog": "チェンジログ",
     "check_logs_for_details": "詳細はログを確認してください。",
     "checking_usage_running": "使用状況を確認中 — 実行中",
+    "claude_usage_title": "{{month}}のClaude使用量: {{costUsd}}（本日 {{costUsdToday}}）— 入力 {{tokensIn}} / 出力 {{tokensOut}} トークン、{{turns}} ターン",
     "click_to_collapse_readouts": "クリックして読み取り値を折りたたむ",
     "click_to_expand_readouts": "クリックして読み取り値を展開",
     "click_to_hide": "クリックして非表示",

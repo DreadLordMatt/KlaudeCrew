@@ -38,8 +38,10 @@ from kiro_crew.acp._dispatch import (
     _kiro_mcp_server_name,
     _kiro_tool_name,
     extract_tool_purpose,
+    parse_prompt_result_usage,
     parse_session_modes,
     parse_usage_update,
+    parse_usage_update_cost,
 )
 from kiro_crew.acp.liveness import VERDICT_UNKNOWN, VERDICT_WORKING, LivenessOracle
 from kiro_crew.acp.prompt_blocks import build_prompt_blocks
@@ -95,7 +97,7 @@ from kiro_crew.acp.types import (
     AcpPromptStats,
     JsonRpcMessage,
     JsonRpcRequest,
-    TurnUsage,
+    turn_usage_from_stats,
 )
 from kiro_crew.agent import ensure_agent_materialized
 from kiro_crew.config.paths import kiro_sessions_dir
@@ -1867,6 +1869,16 @@ class AcpClient:
         self._last_substitution_model: str | None = None
         self._child_pids: dict[int, ChildRecord] = {}  # pid → (start_time, basename)
         self.last_prompt_stats = AcpPromptStats()
+        # Last-seen CUMULATIVE session cost from a claude usage_update's
+        # `cost.amount` (claude backend only). Lives on the client, not
+        # AcpPromptStats, because it must survive carry_over()'s per-turn
+        # reset -- it is the baseline the next delta is computed against, not
+        # a per-turn value itself. Starts at 0.0 because the adapter's
+        # accumulator is PER PROCESS (live-verified: a session/load resume
+        # reports cost restarting near zero, not continuing the prior
+        # process's total), so the first observation IS this process's first
+        # turn's spend, and seeding from it would silently drop that turn.
+        self._cost_usd_baseline: float = 0.0
         self._tool_call_inputs: dict[str, str] = {}
         # Map toolCallId → is_shell, cached from the tool_call notification so
         # the later permission_request event (which carries no kind) can inherit
@@ -3965,6 +3977,21 @@ class AcpClient:
                 # Flush any remaining tool results before completing
                 for tr_event in await asyncio.to_thread(self._read_new_tool_results_sync):
                     yield tr_event
+                if self._is_claude:
+                    # claude-agent-acp's PromptResponse.usage: per-turn token
+                    # counts, populated here (never on the two synthesized
+                    # completions below, which have no real RPC result to
+                    # read). See parse_prompt_result_usage's docstring.
+                    _prompt_usage = parse_prompt_result_usage(result)
+                    if _prompt_usage is not None:
+                        self.last_prompt_stats.input_tokens = _prompt_usage["input_tokens"]
+                        self.last_prompt_stats.output_tokens = _prompt_usage["output_tokens"]
+                        self.last_prompt_stats.cache_read_tokens = _prompt_usage[
+                            "cache_read_tokens"
+                        ]
+                        self.last_prompt_stats.cache_creation_tokens = _prompt_usage[
+                            "cache_creation_tokens"
+                        ]
                 # Turn is over — disarm the stall watchdog.
                 self._tool_dispatched = False
                 self._last_stop_reason = reason
@@ -3972,7 +3999,7 @@ class AcpClient:
                 yield AcpEvent(
                     kind=EVENT_COMPLETE,
                     stop_reason=reason,
-                    usage=TurnUsage(credits=self.last_prompt_stats.credits),
+                    usage=turn_usage_from_stats(self.last_prompt_stats),
                 )
                 return
             if action == "error":
@@ -4004,7 +4031,7 @@ class AcpClient:
                             yield tr_event
                         yield AcpEvent(
                             kind=EVENT_COMPLETE,
-                            usage=TurnUsage(credits=self.last_prompt_stats.credits),
+                            usage=turn_usage_from_stats(self.last_prompt_stats),
                         )
                         return
                 tool_event = self._extract_tool_event(msg)
@@ -4209,7 +4236,7 @@ class AcpClient:
                 yield AcpEvent(
                     kind=EVENT_COMPLETE,
                     stop_reason=STOP_REASON_END_TURN,
-                    usage=TurnUsage(credits=self.last_prompt_stats.credits),
+                    usage=turn_usage_from_stats(self.last_prompt_stats),
                 )
                 return
             raise AcpTimeoutError()
@@ -4600,10 +4627,36 @@ class AcpClient:
                 self.last_prompt_stats.note_pct_reported()
             else:
                 logger.debug("usage_update missing used/size: %s", update)
+            if self._is_claude:
+                self._track_usage_update_cost(update)
         elif kind == UPDATE_CONFIG_OPTION:
             self._handle_config_option_update(msg)
         elif self._is_claude and kind and kind not in KNOWN_SESSION_UPDATES:
             logger.debug("Unhandled session update type: %s", kind)
+
+    def _track_usage_update_cost(self, update: dict) -> None:
+        """Accumulate this turn's cost_usd from a usage_update's cumulative
+        `cost.amount` (claude backend only — see parse_usage_update_cost).
+
+        The wire value is CUMULATIVE session cost, not a per-turn delta, so
+        this diffs against `_cost_usd_baseline` (the last cumulative value
+        observed, surviving across carry_over()'s per-turn reset) and adds
+        only the positive delta to the current turn's running total. The
+        baseline starts at 0.0, not "first observation": the adapter's
+        accumulator is per process, so the first cumulative value seen IS
+        the first turn's own spend (see the __init__ note). A negative delta
+        (the SDK's own tracker resetting under us) resyncs the baseline
+        without subtracting from an already-accumulated per-turn total.
+        """
+        cumulative = parse_usage_update_cost(update)
+        if cumulative is None:
+            return
+        delta = cumulative - self._cost_usd_baseline
+        if delta > 0:
+            self.last_prompt_stats.cost_usd += delta
+            self._cost_usd_baseline = cumulative
+        elif delta < 0:
+            self._cost_usd_baseline = cumulative
 
     async def _maybe_audit_tool_call(self, tool_event: "AcpEvent") -> None:
         """Emit a per-tool-call SEL audit for clients with no external audit loop.

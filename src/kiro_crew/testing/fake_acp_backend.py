@@ -71,6 +71,11 @@ the ``_is_claude`` branches in ``acp/client.py``:
 * ``[[THOUGHT]]`` in the prompt emits an ``agent_thought_chunk`` update (a
   claude-only ``session/update`` kind kiro-cli never sends) ahead of the
   normal reply chunk.
+* ``[[USAGE]]`` in the prompt emits a ``usage_update`` carrying a ``cost``
+  sub-object, and attaches ``usage`` (per-turn token counts) to the final
+  ``session/prompt`` result -- both source-verified against claude-agent-acp
+  v0.66.0 (see acp-client.md "Turn usage (claude backend)"); kiro-cli sends
+  neither.
 
 Independent of dialect: ``session/new`` and ``session/load`` always record
 the received ``mcpServers`` param to ``FAKE_ACP_MCP_PROBE_PATH`` (as JSON)
@@ -124,6 +129,18 @@ REFUSAL_TRIGGER = "[[REFUSAL]]"
 # Fork (KlaudeCrew): claude-only session/update kind -- see "claude dialect"
 # in the module docstring. No-op (ignored) outside FAKE_ACP_DIALECT=claude.
 THOUGHT_TRIGGER = "[[THOUGHT]]"
+# Fork (KlaudeCrew): claude-only usage_update.cost + PromptResponse.usage --
+# see "claude dialect" in the module docstring. No-op outside
+# FAKE_ACP_DIALECT=claude. Values are deterministic fixtures for tests to
+# assert on exactly, not meant to resemble a real turn's magnitude.
+USAGE_TRIGGER = "[[USAGE]]"
+FAKE_USAGE_INPUT_TOKENS = 100
+FAKE_USAGE_OUTPUT_TOKENS = 50
+FAKE_USAGE_CACHE_READ_TOKENS = 10
+FAKE_USAGE_CACHE_WRITE_TOKENS = 5
+FAKE_USAGE_CONTEXT_USED = 500
+FAKE_USAGE_CONTEXT_SIZE = 200000
+FAKE_USAGE_COST_USD = 0.05
 
 # Slow-stream shape. Module-level so unit tests can shrink them to run fast:
 # 30 x 0.5s = ~15s, comfortably longer than the 0.5s-60s soft_stop_budget_secs
@@ -531,6 +548,21 @@ def _handle(msg: dict[str, Any]) -> None:
                 },
             )
 
+        emit_usage = USAGE_TRIGGER in text and _dialect() == "claude"
+        if emit_usage:
+            # Claude-only usage_update.cost (see module docstring) -- ahead of
+            # the reply chunk, mirroring the real adapter's "refresh displayed
+            # usage immediately" ordering.
+            _update(
+                session_id,
+                {
+                    "sessionUpdate": "usage_update",
+                    "used": FAKE_USAGE_CONTEXT_USED,
+                    "size": FAKE_USAGE_CONTEXT_SIZE,
+                    "cost": {"amount": FAKE_USAGE_COST_USD, "currency": "USD"},
+                },
+            )
+
         if SLOW_NOACK_TRIGGER in text:
             _stream_slowly(session_id, cancel_aware=False)
             stop_reason = "end_turn"
@@ -556,7 +588,23 @@ def _handle(msg: dict[str, Any]) -> None:
                 stop_reason = "refusal"
             else:
                 stop_reason = "end_turn"
-        _result(req_id, {"stopReason": stop_reason})
+        result: dict[str, Any] = {"stopReason": stop_reason}
+        if emit_usage:
+            # ACP PromptResponse.usage (EXPERIMENTAL/optional field) -- see
+            # module docstring and parse_prompt_result_usage's docstring.
+            result["usage"] = {
+                "inputTokens": FAKE_USAGE_INPUT_TOKENS,
+                "outputTokens": FAKE_USAGE_OUTPUT_TOKENS,
+                "cachedReadTokens": FAKE_USAGE_CACHE_READ_TOKENS,
+                "cachedWriteTokens": FAKE_USAGE_CACHE_WRITE_TOKENS,
+                "totalTokens": (
+                    FAKE_USAGE_INPUT_TOKENS
+                    + FAKE_USAGE_OUTPUT_TOKENS
+                    + FAKE_USAGE_CACHE_READ_TOKENS
+                    + FAKE_USAGE_CACHE_WRITE_TOKENS
+                ),
+            }
+        _result(req_id, result)
     else:
         # session/set_mode, session/set_model, or any other awaited request:
         # reply empty so the turn never blocks.

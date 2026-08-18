@@ -418,16 +418,28 @@ def provider_last_turn_usage(provider: Any) -> TurnUsage:
     read ``chat_runner`` performs — and wraps it in a ``TurnUsage`` so it can be
     passed straight through as the ``event`` argument.
 
-    On the ACP backend the only non-zero per-turn billing signal is ``credits``;
-    the token fields stay 0, matching the real usage record. Providers that expose
-    no stats (non-ACP backends, test doubles) yield an empty ``TurnUsage``
-    (credits=0). Never raises.
+    Reads the same fields ``turn_usage_from_stats`` copies for the three
+    ``EVENT_COMPLETE`` sites in ``AcpClient._dispatch_events`` (kiro fills
+    only ``credits``, claude fills token counts + ``cost_usd``), but via
+    ``getattr`` with defaults rather than that stricter constructor: unlike
+    those sites, ``provider`` here is ``Any``, so ``stats`` is not guaranteed
+    to be a real ``AcpPromptStats`` — a partial/duck-typed stats object must
+    still yield whatever fields it has instead of an all-empty ``TurnUsage``.
+    Providers that expose no stats (non-ACP backends, test doubles) yield an
+    empty ``TurnUsage``. Never raises.
     """
     try:
         inner = getattr(provider, "_client", None) or getattr(provider, "_handle", None)
         stats = getattr(inner, "last_prompt_stats", None) if inner is not None else None
         if stats is not None:
-            return TurnUsage(credits=float(getattr(stats, "credits", 0.0) or 0.0))
+            return TurnUsage(
+                input_tokens=int(getattr(stats, "input_tokens", 0) or 0),
+                output_tokens=int(getattr(stats, "output_tokens", 0) or 0),
+                cache_creation_tokens=int(getattr(stats, "cache_creation_tokens", 0) or 0),
+                cache_read_tokens=int(getattr(stats, "cache_read_tokens", 0) or 0),
+                cost_usd=float(getattr(stats, "cost_usd", 0.0) or 0.0),
+                credits=float(getattr(stats, "credits", 0.0) or 0.0),
+            )
     except Exception:
         logger.debug("provider_last_turn_usage read failed", exc_info=True)
     return TurnUsage()

@@ -20,6 +20,7 @@
     "changelog": "Registro de alterações",
     "check_logs_for_details": "Verifique os logs para mais detalhes.",
     "checking_usage_running": "Verificando uso — executando",
+    "claude_usage_title": "Uso do Claude em {{month}}: {{costUsd}} ({{costUsdToday}} hoje) — {{tokensIn}} tokens de entrada / {{tokensOut}} de saída, {{turns}} turnos",
     "click_to_collapse_readouts": "clique para recolher os indicadores",
     "click_to_expand_readouts": "clique para expandir os indicadores",
     "click_to_hide": "Clique para ocultar",

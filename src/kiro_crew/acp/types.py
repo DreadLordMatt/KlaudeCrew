@@ -482,6 +482,19 @@ class AcpPromptStats:
     # Per-turn billing credits summed from kiro's _kiro.dev/metadata
     # meteringUsage (unit="credit"). 0 for providers that bill in tokens.
     credits: float = 0.0
+    # Per-turn token counts + cost, claude backend only (0 on kiro, which
+    # bills via `credits` above instead). input/output_tokens come from the
+    # claude-agent-acp PromptResponse's optional `usage` field at turn
+    # completion; cache_read/creation_tokens from that same field's
+    # cachedReadTokens/cachedWriteTokens. cost_usd is accumulated from
+    # successive usage_update `cost.amount` deltas (that field is cumulative
+    # session cost, not per-turn — see AcpClient._track_usage_update). See
+    # acp-client.md "Turn usage (claude backend)".
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cost_usd: float = 0.0
     # True while ``context_pct`` reads 0.0 only because a compaction dropped the
     # counts and no fresh telemetry has re-derived them. Distinguishes "the
     # transcript is empty" from "the transcript's size is unknown" — the two are
@@ -559,3 +572,23 @@ class AcpPromptStats:
         else:
             self.context_window_tokens = 0
             self.context_pct = 0.0
+
+
+def turn_usage_from_stats(stats: AcpPromptStats) -> TurnUsage:
+    """Build the ``EVENT_COMPLETE`` ``TurnUsage`` snapshot from a prompt's
+    per-turn billing fields on ``AcpPromptStats``.
+
+    Single constructor for all three ``EVENT_COMPLETE`` construction sites in
+    ``AcpClient._dispatch_events`` so they cannot drift: kiro fills only
+    ``credits`` (``num_turns``/``duration_ms`` stay 0 on both backends — the
+    ACP wire carries neither), claude fills the token counts + ``cost_usd``,
+    and this just copies whichever the backend actually populated.
+    """
+    return TurnUsage(
+        input_tokens=stats.input_tokens,
+        output_tokens=stats.output_tokens,
+        cache_creation_tokens=stats.cache_creation_tokens,
+        cache_read_tokens=stats.cache_read_tokens,
+        cost_usd=stats.cost_usd,
+        credits=stats.credits,
+    )
