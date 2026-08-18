@@ -4269,15 +4269,45 @@ class HistoryConsolidator:
             max(0.0, retry_at - _time.time()),
         )
 
-    def maybe_consolidate(self, key: str) -> None:
-        """Fire preferences/projects consolidation if message threshold exceeded."""
+    def maybe_consolidate(
+        self, key: str, *, force: bool = False, include_history: bool = False
+    ) -> asyncio.Task[_ConsolidationRefusedSentinel | None] | None:
+        """Fire preferences/projects consolidation if message threshold exceeded.
+
+        ``force`` skips the threshold check below but still runs through the
+        retry-eligibility pre-check, the ``_running`` guard, and the
+        ``_prefs_offset`` done-callback bookkeeping — the same path every
+        unforced call gets. That bookkeeping is what a caller loses by firing
+        ``_consolidate()`` directly instead: a forced pass would never advance
+        ``_prefs_offset``, so a later unforced call on the same key would
+        still measure its threshold from the stale (pre-force) offset. This
+        is the sanctioned bypass for a caller whose messages will never reach
+        the threshold on their own — currently the eval runner, whose
+        scenario sessions run 1-7 turns.
+
+        ``include_history`` threads through to ``_consolidate`` and defaults
+        to ``False``, preserving the prefs/projects-only pass this method has
+        always fired; the eval runner passes ``True`` so its forced pass also
+        writes a durable history entry and advances
+        :meth:`ConversationLog.mark_consolidated`, the way the idle/session-end
+        paths do.
+
+        Fire-and-forget for every caller that ignores the return value (every
+        caller today except the eval runner). Returns the scheduled task, or
+        ``None`` when nothing was scheduled (already running, under
+        threshold, or backed off), so a caller that needs the pass to
+        actually land before it proceeds can await it instead of racing a
+        background task — the eval runner awaits it so the next session's
+        memory context reads freshly-consolidated memory rather than
+        whatever happened to be written by the time it looked.
+        """
         self._last_activity[key] = _time.time()
         if key in self._running:
-            return
+            return None
         total = len(self._log._read_messages(key))
         prefs_off = self._prefs_offset.get(key, 0)
-        if total - prefs_off < _CONSOLIDATION_THRESHOLD:
-            return
+        if not force and total - prefs_off < _CONSOLIDATION_THRESHOLD:
+            return None
         # Cheap pre-check mirroring the other automatic entry points. This
         # runs on every user turn, so during a backoff window every message
         # past the threshold would otherwise schedule a task whose snapshot
@@ -4286,9 +4316,9 @@ class HistoryConsolidator:
         # retry_eligible costs one metadata-line read and no transcript read;
         # the inner gate remains the enforcement backstop.
         if not self.retry_eligible(key, message_count=total):
-            return
+            return None
         self._running.add(key)
-        t = asyncio.create_task(self._consolidate(key, include_history=False))
+        t = asyncio.create_task(self._consolidate(key, include_history=include_history))
         self._tasks.add(t)
 
         def _on_done(fut: asyncio.Task, k: str = key, off: int = total) -> None:  # type: ignore[type-arg]
@@ -4306,6 +4336,7 @@ class HistoryConsolidator:
                 self._prefs_offset[k] = off
 
         t.add_done_callback(_on_done)
+        return t
 
     def check_idle_sessions(self) -> None:
         """Check all tracked sessions for idle-based history consolidation."""

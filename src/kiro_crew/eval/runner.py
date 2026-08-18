@@ -309,14 +309,18 @@ class EvalRunner:
                     conv_log.append(log_key, "user", turn.user_message)
                     conv_log.append(log_key, "assistant", turn.agent_response)
                 try:
-                    # Use _consolidate directly instead of maybe_consolidate because
-                    # eval sessions are short (1-7 turns) and won't exceed the
-                    # message threshold that maybe_consolidate checks. We need to
-                    # force consolidation so cross-session memory is available.
-                    # TODO: This bypasses offset tracking — use
-                    # maybe_consolidate(log_key, force=True) when that API is
-                    # available.
-                    await consolidator._consolidate(log_key, include_history=True)
+                    # force=True: eval sessions are short (1-7 turns) and won't
+                    # exceed maybe_consolidate's normal message threshold.
+                    # include_history=True: writes a durable history entry and
+                    # advances the consolidated marker, matching what the other
+                    # forced (idle/session-end) entry points do — cross-session
+                    # memory needs that write landed before the next session's
+                    # ctx_builder reads it, so await the returned task rather
+                    # than firing-and-forgetting like maybe_consolidate's other
+                    # callers do.
+                    task = consolidator.maybe_consolidate(log_key, force=True, include_history=True)
+                    if task is not None:
+                        await task
                 except Exception:
                     logger.warning("Consolidation failed for %s", log_key, exc_info=True)
                     result.consolidation_failures += 1
