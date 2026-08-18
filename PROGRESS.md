@@ -26,6 +26,23 @@ Append-only log of what the overnight orchestrator did, decided, and abandoned. 
 - Commands run: none that mutate state (grep + read only).
 - Follow-ups: none beyond the filed tasks above.
 
+## 2026-08-18 — BL-2 [chore] frontend baseline — DONE, zero real defects
+
+- Surface: frontend. Read-only — no code changes.
+- What: ran `npm run check` and `npm run build` in `website/`.
+- Result:
+  - `npm run build`: **pass** (exit 0). `tsc -b` clean, `vite build` succeeded in ~49s. Two non-fatal build warnings, both expected/pre-existing: an `eval()` warning from vendored `node_modules/lottie-web`, and a large-chunk-size notice (Monaco editor + main bundle — expected for this app shape).
+  - `npm run check`: exit 1, but breaks down clean except one setup gap:
+    - jscpd: 0 clones (1709 files, 266k lines) — clean.
+    - typecheck (`tsc --noEmit`): 0 errors — clean.
+    - eslint: 600 warnings, 0 errors — **under** the CI ratchet (`--max-warnings 1116` in `ci.yml:871`) by 516.
+    - vitest (`test:website`): 961/961 files, 15445 passed, 2 expected-fail, 3 skipped — all green. Coverage 77-80% across metrics, above the 60% frontend floor (informational; no threshold configured to gate on it).
+    - `test:electron` (node:test, a separate nested npm package under `website/electron/`): 831 pass, **13 fail** — all 13 are `MODULE_NOT_FOUND` for `electron`/`electron-updater`, one root cause: `website/electron/` has its own `package.json` and its `node_modules/` was never installed (the top-level `website/` `npm install` doesn't reach into it). This is a gap in this session's setup, not a code defect — fixing by running `npm install` inside `website/electron/` now and re-verifying, rather than filing it as a BUG-* task.
+  - Environmental noise inside `test:website` that caused **zero** failures, logged for the record: `ECONNREFUSED 127.0.0.1:6776` (a component fetches a local artifact server that isn't running in this headless container) and happy-dom `DOMException`s from tests that intentionally exercise script/iframe/stylesheet load failures (happy-dom isn't a full browser). Both pre-existing container characteristics, not regressions.
+- Commands run: `npm run check`, `npm run build` (both read-only w.r.t. source, though `check`/`build` do write `dist/`, `coverage/`, and cache dirs, all gitignored).
+- Verified the setup gap: ran `npm install` inside `website/electron/` (its `node_modules/` didn't exist before), then `npm run test:electron` directly — **858/858 pass, 0 failures**. Confirms all 13 were purely the missing install, not code defects. Frontend baseline is fully green.
+- Follow-ups: none — no BUG-* tasks needed.
+
 ## Needs a decision (running list; copied into MORNING-BRIEF.md at hand-off)
 
 - **Vendored `anime.es.js:1296` TODO** ("naming, documentation") — upstream anime.js v3.2.2's own author-note, bundled directly under `website/src/lib/` rather than via `node_modules` or a conventionally-exempt vendor directory. Options: (a) track it as a real tech-debt item anyway since it's literally under `src/`, (b) reframe it as "upgrade vendored anime.js" rather than "fix naming/docs" (upstream's problem, not ours, to fix in place), or (c) drop it and let a future vendor-manifest bump pick up whatever upstream does with it. No action taken; not tracked as a task.
