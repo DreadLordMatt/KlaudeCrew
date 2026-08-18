@@ -1,6 +1,6 @@
 # Morning Brief — overnight run 2026-08-18
 
-Branch: `claude/klaudecrew-overnight-orchestrator-rgj9yp`. Draft PR: [#19](https://github.com/DreadLordMatt/KlaudeCrew/pull/19). 13 commits, 8 tasks completed (hit the run's task cap), 0 failed tasks, all work independently reviewed and approved before landing. Full detail and command output for everything below is in `PROGRESS.md`; the live backlog with every filed follow-up is in `TASKS.md`.
+Branch: `claude/klaudecrew-overnight-orchestrator-rgj9yp`. Draft PR: [#19](https://github.com/DreadLordMatt/KlaudeCrew/pull/19). Originally stopped at the 8-task cap (see below); the operator's usage limit reset and they asked to continue, so 2 more tasks (`UI-1`, `UI-2`) were picked up afterward. 15 commits, 10 tasks completed total, 0 failed tasks, all work independently reviewed and approved before landing — including a near-miss on `UI-1`/`UI-2` worth reading (see their entry below). Full detail and command output for everything below is in `PROGRESS.md`; the live backlog with every filed follow-up is in `TASKS.md`.
 
 One process note up front: the four `BUG-*` fixes ran as three agents concurrently in one shared working tree rather than isolated git worktrees (`CLAUDE.md` §5's recommendation for parallel implementation) — a deviation caught mid-run, not planned. No collision happened (the tasks touched fully disjoint files, and every implementer/reviewer was re-briefed to scope git commands to named paths rather than trust a bare `git status`/`git diff`), but it's worth using `isolation: "worktree"` for the next parallel batch to remove the risk entirely rather than rely on careful scoping again.
 
@@ -16,12 +16,21 @@ One process note up front: the four `BUG-*` fixes ran as three agents concurrent
 | BUG-1 | bug | `6b69ca9` | `eval/runner.py` no longer bypasses `HistoryConsolidator`'s offset-tracking by reaching into a private method; added a `force` bypass to the public `maybe_consolidate()` API instead. |
 | BUG-4 | chore | `d506d65` | Removed 6 flake8 unused-import/local violations across 4 test files. |
 | BUG-2 | bug | `ed4a1f7` | **Highest priority.** Fixed a real, deterministic defect where two tests' process-wide `Path.stat` monkeypatch crashed pytest's own reporting machinery on Python 3.12 (`INTERNALERROR`, exit 3) — `pytest -q` could not complete at all before this fix. |
+| UI-1 + UI-2 | feature | `f4ab615` | *(picked up after usage reset — see note above)* Fixed 2 phantom Tailwind theme-token classes (`ChatPage.tsx`, `ProjectsPage.tsx` — nonexistent `warning`/`fg` classes silently compiled to nothing) and 2 genuinely hardcoded strings in `ChatPage.tsx` (now routed through the i18n catalog, translated into all 11 shipped languages). **Read the near-miss below** — these landed as one commit for a reason. |
 
 Every fix above got an independent adversarial-reviewer pass (separate from the implementer) that re-ran the gate itself rather than trusting the implementer's report, and in three cases (BUG-1, BUG-2, BUG-4) reproduced the red-before/green-after or root-cause claims from scratch rather than taking them on faith. Final consolidated check just now, on the combined result of all four fixes: `flake8` clean, `mypy` clean (888 files), `isort` clean except the one deliberately-deferred core-file violation below.
 
+## A near-miss worth reading: parallel agents nearly destroyed real work
+
+`UI-1` and `UI-2` were dispatched as parallel implementer subagents, same pattern as the earlier `BUG-*` batch — but this time both landed in `ChatPage.tsx`, and they weren't isolated in separate git worktrees. `UI-2`'s implementer made its edits first. When `UI-1`'s implementer later ran `npm run build`/`vitest` to verify its own unrelated fix, it saw `i18nT(...)` calls in the file it hadn't written, guessed they were some kind of automatic build-time codemod artifact, and ran `git checkout -- <file>` to strip them before reapplying its own change — silently discarding `UI-2`'s real, uncommitted work. This happened three times over the run.
+
+Nothing was ultimately lost: `UI-2`'s implementer caught it by re-verifying its actual files against disk state rather than trusting its own context, redid the work each time, and correctly figured out there was no real "automatic pipeline" (it checked `package.json`, `vite.config.ts`, and `.git/hooks/` directly rather than accepting the theory) — it was just uncoordinated concurrent edits, misdiagnosed. I independently confirmed the final state was intact before sending both changes to review. But this was the closest call of the night, and it happened precisely because two tasks that looked independent from their descriptions turned out to share a file neither task description mentioned.
+
+**Takeaway for future runs**: default to `isolation: "worktree"` for parallel implementer dispatch generally, not just when file overlap is already known — "looks independent" isn't the same as "is disjoint."
+
 ## Blocked or failed
 
-Nothing failed outright. Zero of the 4 attempted bug fixes were reverted or abandoned.
+Nothing failed outright. Zero of the 6 attempted fixes were reverted or abandoned.
 
 ## Needs a decision
 
@@ -33,12 +42,14 @@ Nothing failed outright. Zero of the 4 attempted bug fixes were reverted or aban
 6. **17 uncertain pytest failures (from BL-1)** — not confidently root-environment artifacts the way ~97 others were; a few might be real bugs (e.g. `test_app_manager.py:126`, `test_folder_watcher.py:61`, possibly tied to `jsonschema` not being installed in `.venv`). Catalogued in `PROGRESS.md`'s BL-1 entry, not fixed. Worth a dedicated future triage task.
 7. **`black --check` is currently not a trustworthy gate signal in this environment at all.** Discovered independently by three different subagents tonight: the installed `black` (26.3.1) wants to reformat large, pre-existing swaths of the codebase untouched by any of tonight's diffs (confirmed against files with zero changes, e.g. `config/loader.py`), and throws its own warning that it can't parse code formatted for a newer Python than the one running it. This is a repo-wide tooling/version-pin issue, not something introduced tonight — but until it's fixed, `black --check` can't distinguish a real formatting regression from noise.
 8. **`mcp_gateway/stub.py:86`** and the **vendored `anime.es.js:1296`** TODO — both minor scope questions, detailed in `PROGRESS.md`'s Needs-a-decision list.
-9. Real open GitHub issues on this repo (`#7`, `#8`, `#9`, `#13`-`#17`) weren't part of tonight's `TASKS.md`-driven work, but `#7` in particular (a large multi-phase "Claude Code backend feature-completeness" architecture mandate) is worth the operator's attention if it's meant to be prioritized against this backlog going forward — it wasn't touched tonight.
+9. **`bg-black/50` modal/dialog scrim idiom** (from `UI-1`) — a hardcoded Tailwind color keyword used in 14+ files repo-wide, with no dedicated theme token for "translucent black regardless of theme." Worth deciding: add a scrim-specific token, or formally accept it as an exception the way `sessionColors.ts` already is. Not fixed anywhere tonight (fixing one occurrence would be inconsistent with the other 13+).
+10. Real open GitHub issues on this repo (`#7`, `#8`, `#9`, `#13`-`#17`) weren't part of tonight's `TASKS.md`-driven work, but `#7` in particular (a large multi-phase "Claude Code backend feature-completeness" architecture mandate) is worth the operator's attention if it's meant to be prioritized against this backlog going forward — it wasn't touched tonight.
 
 ## Suggested next
 
 1. **Approve `DEFER-1` and `DEFER-2`** — both quick, low-risk, and get the backend gate to a fully clean state (right now everything is clean except these two deliberately-deferred items).
-2. **`UI-1` (theme-token pass) or `UI-2` (i18n sweep)** — next queued, ready-to-go work in `TASKS.md`; not started tonight because the 8-task budget was spent on baseline + triage + bug fixes first, per the "few solid, verified changes" bias. These are `[feature]`-tagged and need the full pipeline including a user-advocate pass.
+2. **`UI-3`/`UI-4`/`UI-5`** — next queued, ready-to-go work in `TASKS.md` (loading/empty/error-state audit, accessibility pass, layout tidy). `[feature]`-tagged, need the full pipeline including a user-advocate pass.
 3. **Triage the 17 uncertain pytest failures** from BL-1 to separate genuine root-container artifacts from real bugs — several are plausible but unconfirmed.
 4. **Write design notes for `ARCH-1`/`ARCH-2`/`ARCH-3`** if any are worth pursuing, so they can go through a real architecture review instead of sitting as proposals.
 5. **Fix the `black`/Python-version tooling skew** so `black --check` becomes a trustworthy signal again — probably a `target-version` pin in `pyproject.toml`/`setup.cfg` or a `black` version bump/pin.
+6. **Decide the `bg-black/50` scrim token question** (item 9 above) — quick decision, unblocks a clean sweep of that pattern if wanted.
