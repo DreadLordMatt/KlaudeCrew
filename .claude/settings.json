@@ -1,0 +1,35 @@
+{
+  "$comment": "Project-shared Claude Code settings for KlaudeCrew; companion to CLAUDE.md section 8. TRACKED FILE = RESTRICTIONS ONLY. claude-agent-acp (this product's own backend) reads <cwd>/.claude/settings.json whenever a Kiro Crew session is bound to this checkout, and a project-scope permissions.allow rule would let that backend approve tools locally without ever reaching Kiro Crew's approval UI / PreToolUse gate. So this file carries only deny rules and the PreToolUse guard hook (both narrow, never widen). The developer-agent convenience allowlist lives in .claude/settings.local.json (gitignored, machine-local; see CLAUDE.md section 8 for the seed-clobber caveat).",
+  "permissions": {
+    "deny": [
+      "Bash(git reset --hard:*)",
+      "Bash(git clean -f:*)",
+      "Bash(git clean -fd:*)",
+      "Bash(git clean -fdx:*)",
+      "Bash(git branch -D:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(gh repo delete:*)",
+      "Read(./leaked-HOME/**)",
+      "Read(~/.kiro/crew/.env)",
+      "Read(~/.kiro/crew/security_policy.json)",
+      "Read(~/.kiro/crew/computer_use.json)",
+      "Read(~/.kiro/crew/admission_policy.json)",
+      "Read(~/.kiro/crew/profiles/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.ssh/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/git-guard.py"
+          }
+        ]
+      }
+    ]
+  }
+}
