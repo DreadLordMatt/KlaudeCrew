@@ -1,0 +1,44 @@
+# Morning Brief — overnight run 2026-08-18
+
+Branch: `claude/klaudecrew-overnight-orchestrator-rgj9yp`. Draft PR: [#19](https://github.com/DreadLordMatt/KlaudeCrew/pull/19). 13 commits, 8 tasks completed (hit the run's task cap), 0 failed tasks, all work independently reviewed and approved before landing. Full detail and command output for everything below is in `PROGRESS.md`; the live backlog with every filed follow-up is in `TASKS.md`.
+
+One process note up front: the four `BUG-*` fixes ran as three agents concurrently in one shared working tree rather than isolated git worktrees (`CLAUDE.md` §5's recommendation for parallel implementation) — a deviation caught mid-run, not planned. No collision happened (the tasks touched fully disjoint files, and every implementer/reviewer was re-briefed to scope git commands to named paths rather than trust a bare `git status`/`git diff`), but it's worth using `isolation: "worktree"` for the next parallel batch to remove the risk entirely rather than rely on careful scoping again.
+
+## Done
+
+| Task | Type | Commit | Summary |
+|---|---|---|---|
+| BL-1 | chore | `3d94011` | Backend baseline: 1 isort violation, 6 flake8 violations, 4 mypy errors, and a real pytest-crashing defect found and triaged into BUG-2/3/4 + DEFER-1. 118 further test failures clustered and mostly explained as this container running as root with no IPv6/user-namespaces. |
+| BL-2 | chore | `f1dd4d4` | Frontend baseline: **zero real defects** (build clean, typecheck clean, jscpd clean, eslint 600/1116 under ratchet, vitest 15445/15445 green). Found and closed a setup gap — the nested `website/electron/` package never had `npm install` run — verified 858/858 electron tests pass once installed. |
+| DEBT-2 | chore | `0343d6f` | Frontend TODO/FIXME/HACK/XXX triage: 10 raw hits, 2 genuine (filed `FEAT-1`, `ARCH-1`), 1 vendored, 7 false positives (the product's own "TODO list" feature). |
+| DEBT-1 | chore | `3e170cc` | Backend triage: 85 raw hits, 7 genuine first-party (filed `BUG-1`, `ARCH-2`, `ARCH-3`, `WEIXIN-1`, `DEBT-1b`, `DEBT-1c`), 37 vendored (excluded, never touch `_vendor/`), 41 false positives. |
+| BUG-3 | bug | `cd1f51a` | Fixed 4 mypy errors from `klaude/registry.py`'s runtime hook registration — narrowly-scoped `# type: ignore` comments, zero behavior change. |
+| BUG-1 | bug | `6b69ca9` | `eval/runner.py` no longer bypasses `HistoryConsolidator`'s offset-tracking by reaching into a private method; added a `force` bypass to the public `maybe_consolidate()` API instead. |
+| BUG-4 | chore | `d506d65` | Removed 6 flake8 unused-import/local violations across 4 test files. |
+| BUG-2 | bug | `ed4a1f7` | **Highest priority.** Fixed a real, deterministic defect where two tests' process-wide `Path.stat` monkeypatch crashed pytest's own reporting machinery on Python 3.12 (`INTERNALERROR`, exit 3) — `pytest -q` could not complete at all before this fix. |
+
+Every fix above got an independent adversarial-reviewer pass (separate from the implementer) that re-ran the gate itself rather than trusting the implementer's report, and in three cases (BUG-1, BUG-2, BUG-4) reproduced the red-before/green-after or root-cause claims from scratch rather than taking them on faith. Final consolidated check just now, on the combined result of all four fixes: `flake8` clean, `mypy` clean (888 files), `isort` clean except the one deliberately-deferred core-file violation below.
+
+## Blocked or failed
+
+Nothing failed outright. Zero of the 4 attempted bug fixes were reverted or abandoned.
+
+## Needs a decision
+
+1. **`DEFER-1`** — `src/kiro_crew/platform/bootstrap.py` fails `isort --check-only` (one import needs to move up a few lines, zero behavior change). Not applied because the file is on `CLAUDE.md` §3's core-file/rebase-surface list, which this run treats as a hard stop-and-ask rather than something to decide unilaterally. About as low-risk as a core-file hunk gets — recommend approving and running `isort src/kiro_crew test`.
+2. **`DEFER-2`** — `test_error_code_contract.py::test_no_new_error_response_without_a_code` flags 2 "opaque" bodies in `dashboard/kiro_readiness.py` that **both already carry a `code` field** on inspection. Looks like the contract test's static scanner can't see through a `web.json_response(_MODULE_CONSTANT, ...)` indirection — a scanner blind spot, not an actual gap. Regenerating `error-code-baseline.json` is itself a stop point and the test's own assertion text says not to use it to silence this. Needs a human call: fix the scanner, or confirm the baseline should move.
+3. **`ARCH-1`/`ARCH-2`/`ARCH-3`** (in `TASKS.md`) — three proposal-only architecture items surfaced by the debt triage (App SDK WebSocket event forwarding; `AcpProvider.set_workspace()`, which would touch the core file `providers/acp.py`; routing `agent.py`'s hardcoded `~/.aim` scan through the CPP seam, governance-adjacent). None implemented. Each needs a real design note and a human/architecture-reviewer pass before any code, per this run's rules.
+4. **`WEIXIN-1`** — outbound Weixin media send is well-scoped and implementable (`src/kiro_crew/weixin/transport.py:13`), but verifying it needs live Weixin credentials this environment doesn't have, and the run's guardrails say not to wire up new external-service calls unattended.
+5. **Sandbox-probe nuance (from BL-1 Cluster A)** — `kiro_crew.sandbox`'s own `unshare(CLONE_NEWUSER)` probe returns `EINVAL` in this container, but a standalone `unshare(CLONE_NEWUSER)` call succeeds directly. Worth a security-aware look at why the probe's specific invocation differs, rather than assuming "no namespaces here" — 65 test failures tonight were attributed to this without further digging, since `sandbox.py` is security-sensitive and out of scope for an unattended fix.
+6. **17 uncertain pytest failures (from BL-1)** — not confidently root-environment artifacts the way ~97 others were; a few might be real bugs (e.g. `test_app_manager.py:126`, `test_folder_watcher.py:61`, possibly tied to `jsonschema` not being installed in `.venv`). Catalogued in `PROGRESS.md`'s BL-1 entry, not fixed. Worth a dedicated future triage task.
+7. **`black --check` is currently not a trustworthy gate signal in this environment at all.** Discovered independently by three different subagents tonight: the installed `black` (26.3.1) wants to reformat large, pre-existing swaths of the codebase untouched by any of tonight's diffs (confirmed against files with zero changes, e.g. `config/loader.py`), and throws its own warning that it can't parse code formatted for a newer Python than the one running it. This is a repo-wide tooling/version-pin issue, not something introduced tonight — but until it's fixed, `black --check` can't distinguish a real formatting regression from noise.
+8. **`mcp_gateway/stub.py:86`** and the **vendored `anime.es.js:1296`** TODO — both minor scope questions, detailed in `PROGRESS.md`'s Needs-a-decision list.
+9. Real open GitHub issues on this repo (`#7`, `#8`, `#9`, `#13`-`#17`) weren't part of tonight's `TASKS.md`-driven work, but `#7` in particular (a large multi-phase "Claude Code backend feature-completeness" architecture mandate) is worth the operator's attention if it's meant to be prioritized against this backlog going forward — it wasn't touched tonight.
+
+## Suggested next
+
+1. **Approve `DEFER-1` and `DEFER-2`** — both quick, low-risk, and get the backend gate to a fully clean state (right now everything is clean except these two deliberately-deferred items).
+2. **`UI-1` (theme-token pass) or `UI-2` (i18n sweep)** — next queued, ready-to-go work in `TASKS.md`; not started tonight because the 8-task budget was spent on baseline + triage + bug fixes first, per the "few solid, verified changes" bias. These are `[feature]`-tagged and need the full pipeline including a user-advocate pass.
+3. **Triage the 17 uncertain pytest failures** from BL-1 to separate genuine root-container artifacts from real bugs — several are plausible but unconfirmed.
+4. **Write design notes for `ARCH-1`/`ARCH-2`/`ARCH-3`** if any are worth pursuing, so they can go through a real architecture review instead of sitting as proposals.
+5. **Fix the `black`/Python-version tooling skew** so `black --check` becomes a trustworthy signal again — probably a `target-version` pin in `pyproject.toml`/`setup.cfg` or a `black` version bump/pin.
