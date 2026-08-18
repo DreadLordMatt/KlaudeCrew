@@ -3871,10 +3871,17 @@ class TestCleanupLoopResilience:
 
 class TestGetBgSessionRecycle:
     """get_bg_session() recycles a healthy-but-stale _bg runtime only when it
-    has zero active sessions."""
+    has zero active sessions.
+
+    This suite exercises the kiro-only multiplexed AcpRuntime path, so it
+    pins acp_backend="kiro" explicitly — the fork's default ("claude") takes
+    get_bg_session() through the unrelated _ProviderBgSession branch instead
+    (see test_klaude_bg_session.py for that path's coverage).
+    """
 
     @pytest.mark.asyncio
     async def test_recycles_stale_idle_runtime(self, cfg):
+        cfg.agent.acp_backend = "kiro"
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
 
         stale = AsyncMock()
@@ -3902,6 +3909,7 @@ class TestGetBgSessionRecycle:
 
     @pytest.mark.asyncio
     async def test_does_not_recycle_stale_runtime_with_active_sessions(self, cfg):
+        cfg.agent.acp_backend = "kiro"
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
 
         stale = AsyncMock()

@@ -663,6 +663,16 @@ class _ProviderBgSession:
     both paths parse frames through the shared ``_dispatch.parse_session_update``
     — so the two ``_bg`` code paths cannot drift: this adapter is pure plumbing
     over ``provider.stream`` / ``provider.reject_tool``, adding no second parser.
+
+    ``set_model``/``served_model`` delegate to the underlying provider so
+    ``run_bg_oneliner``'s ``strict_model=True`` callers (the poisoned-
+    conversation canary) work on this path too — without them, the canary's
+    ``set_model is None`` guard would refuse to run at all on a claude
+    backend. Acquisition of the shared ``Semaphore(1)`` is first-touch:
+    ``set_model`` grabs it (and holds it) if not already held, so a caller's
+    model pin and its following ``prompt()`` cannot be interleaved by another
+    ``_bg`` caller on this now-shared session — kiro's per-caller ephemeral
+    sessions never had this race.
     """
 
     def __init__(self, sess: "_Session") -> None:
@@ -676,16 +686,43 @@ class _ProviderBgSession:
         except Exception:
             return ""
 
+    @property
+    def served_model(self) -> str:
+        try:
+            return self._sess.provider.served_model
+        except Exception:
+            return ""
+
+    async def _acquire_if_needed(self) -> None:
+        if not self._sem_held:
+            await self._sess.semaphore.acquire()
+            self._sem_held = True
+
     def _release(self) -> None:
         if self._sem_held:
             self._sem_held = False
             self._sess.semaphore.release()
 
+    async def set_model(self, model_id: str) -> None:
+        # Acquire (and keep) the semaphore here so the model pin and the
+        # prompt that follows form one atomic turn on the shared session —
+        # see the first-touch note in the class docstring. Left unheld on
+        # raise: run_bg_oneliner's lenient callers never call prompt() after
+        # a failed set_model, and its finally block always calls destroy(),
+        # which releases if held.
+        await self._acquire_if_needed()
+        # circular import: session -> providers.acp -> session
+        from kiro_crew.providers.acp import AcpProvider
+
+        provider = self._sess.provider
+        if not isinstance(provider, AcpProvider):
+            raise RuntimeError(f"background provider {type(provider).__name__} has no set_model")
+        await provider.client.set_model(model_id)
+
     async def prompt(self, message: str, timeout: float | None = None) -> "AsyncIterator[AcpEvent]":
         # timeout is accepted for AcpSessionHandle signature parity; the
         # underlying provider/client manages its own stale-turn watchdog.
-        await self._sess.semaphore.acquire()
-        self._sem_held = True
+        await self._acquire_if_needed()
         try:
             async for event in self._sess.provider.stream(message):
                 yield event
@@ -1075,12 +1112,21 @@ class SessionManager:
         (``acp``) backend — the only backend the multiplexed ``AcpRuntime``
         supports. For non-kiro backends ``_bg`` falls back to the provider-backed
         ``_Session`` path serialized by ``Semaphore(1)``.
+
+        Fork (KlaudeCrew): ``agent.provider`` is a single-valued enum (always
+        ``"acp"`` in this fork — there is no other provider), so it alone
+        cannot distinguish the two ACP backends. The real switch is
+        ``agent.acp_backend`` (``"claude"`` default / ``"kiro"``), read with
+        the same ``!= "kiro"`` convention used elsewhere (e.g.
+        ``dashboard/chat_handlers.py``, ``kiro_readiness.py``) so any
+        non-kiro backend takes the provider path.
         """
         try:
             prov = getattr(self._cfg.agent, "provider", "acp") or "acp"
+            backend = getattr(self._cfg.agent, "acp_backend", "") or ""
         except Exception:
-            prov = "acp"
-        return prov == "acp"
+            prov, backend = "acp", ""
+        return prov == "acp" and backend == "kiro"
 
     async def get_bg_session(self) -> "AcpSessionHandle | _ProviderBgSession":
         """Acquire a ``_bg`` session handle, dispatching by provider backend.
