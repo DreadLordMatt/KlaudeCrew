@@ -60,6 +60,15 @@ Append-only log of what the overnight orchestrator did, decided, and abandoned. 
 - Commands run: `isort --check-only`, `flake8`, `mypy`, `pytest -q` (+ deselect re-run), all read-only.
 - Follow-ups: `BUG-2`, `BUG-3`, `BUG-4` filed and being worked next. isort fix and the error-code-baseline scanner question deferred to the human (see Deferred in `TASKS.md` / Needs a decision below). Clusters A-D and the 17 uncertain failures catalogued for a future run.
 
+## 2026-08-18 — BUG-3 [bug] mypy dynamic-registration false positives — DONE (commit `cd1f51a`)
+
+- Surface: backend. File: `src/kiro_crew/klaude/registry.py` only.
+- What: 4 narrowly-scoped `# type: ignore[method-assign]`/`# type: ignore[attr-defined]` comments at the 4 runtime hook-assignment sites, each tied to the exact mypy error at that line, with a block comment pointing at `AGENTS.md`'s registration-glue explanation. Zero behavior change.
+- Adversarial review: **APPROVE**. Independently reproduced each ignore code against live (reverted-then-fixed) mypy output, confirmed the real-method-vs-getattr-only-hook claims against `acp/client.py`/`providers/acp.py`, re-ran the full gate scoped to the file, confirmed zero scope creep against the shared dirty tree.
+- Commands run (both implementer and reviewer, converging): `mypy src/kiro_crew/klaude/registry.py`, `mypy src/kiro_crew/` (whole package, clean), targeted `pytest test/test_klaude_registration_glue.py test/test_klaude_backend.py -n0 -q` (25 passed), `isort`/`flake8`/`black --check` on the file — all clean.
+- Follow-up flagged (not done): the more thorough long-term fix would pre-declare these 4 hook names as typed `Optional[Callable]`/`Protocol` attributes on `AcpClient` in `acp/client.py` so mypy needs no ignores at all — that's a core-file change, out of this task's scope.
+- Process note: this task ran in the **same shared working tree** as BUG-1/BUG-2 concurrently (no `isolation: "worktree"` was used for the parallel implementer dispatch — a deviation from `CLAUDE.md` §5's guidance, caught mid-run when the implementer itself flagged seeing unrelated dirty files). No collision occurred (fully disjoint file sets), and both implementer and reviewer were instructed to scope every verification command to named paths rather than trusting a bare repo-wide `git status`/`git diff`. Using worktree isolation for future parallel batches would remove this risk entirely.
+
 ## Needs a decision (running list; copied into MORNING-BRIEF.md at hand-off)
 
 - **Vendored `anime.es.js:1296` TODO** ("naming, documentation") — upstream anime.js v3.2.2's own author-note, bundled directly under `website/src/lib/` rather than via `node_modules` or a conventionally-exempt vendor directory. Options: (a) track it as a real tech-debt item anyway since it's literally under `src/`, (b) reframe it as "upgrade vendored anime.js" rather than "fix naming/docs" (upstream's problem, not ours, to fix in place), or (c) drop it and let a future vendor-manifest bump pick up whatever upstream does with it. No action taken; not tracked as a task.
