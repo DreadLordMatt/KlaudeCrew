@@ -1,12 +1,12 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { Star, Brain, Plug, Pin, Package, Lock, Hourglass, Bot, ChevronDown, LayoutTemplate, X } from 'lucide-react'
+import { Star, Brain, Plug, Pin, Package, Lock, Hourglass, Bot, ChevronDown, LayoutTemplate, X, AlertTriangle } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { useAppSelector } from '../store'
 import { api } from '../api/client'
 import type { SubagentInfo } from '../types'
 import Clickable from '../components/Clickable'
-import { SourceBadge, PageHeader, EmptyState, Btn, Input, SearchInput, Card, CardTitle, Badge } from '../components/ui'
+import { SourceBadge, PageHeader, EmptyState, Btn, Input, SearchInput, Card, CardTitle, Badge, ContentSkeleton } from '../components/ui'
 import ModelDropdownList from '../components/ModelDropdownList'
 import AgentSkillsEditor from '../components/AgentSkillsEditor'
 import SimpleSelect from '../components/SimpleSelect'
@@ -282,7 +282,7 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
     queryFn: () => api.sessionsUsage().then(d => (d.usage && Number.isFinite(d.usage.credits_plan)) ? d.usage : null).catch(() => null),
   })
 
-  const { data: installed = [], isPending: installedLoading, refetch: refetchInstalled } = useQuery({
+  const { data: installed = [], isPending: installedLoading, isError: installedFailed, refetch: refetchInstalled } = useQuery({
     queryKey: ['agents-installed', refreshTrigger],
     queryFn: async () => {
       const a = await api.agentsInstalled()
@@ -566,8 +566,26 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
         )}
 
         {installedLoading ? (
-          <div className="card-glow border border-border bg-card rounded-lg mb-4 shadow-sm flex items-center justify-center py-10 gap-2 text-muted text-sm">
-            <Hourglass className="lucide-inline animate-pulse" /> {i18nT('pages.agentsPage.loading_agents')}
+          // Sized to match the loaded inspector below so data landing does not
+          // jump the page — a skeleton is only a placeholder if it holds the
+          // space the real content is about to occupy.
+          <div className="card-glow border border-border bg-card rounded-lg mb-4 shadow-sm overflow-hidden h-[62vh] min-h-[420px] max-h-[760px] p-5">
+            <ContentSkeleton rows={7} />
+          </div>
+        ) : installedFailed ? (
+          // Distinct from the zero-templates EmptyState below: `installed`
+          // defaults to `[]` on a fetch failure too, so without this branch a
+          // broken backend reads as "you have no templates" instead of "we
+          // couldn't reach the server" — the exact conflation this page's own
+          // `isError` comment (below, on crewsData/defaultAgentData) warns about.
+          <div className="card-glow border border-border bg-card rounded-lg mb-4 shadow-sm py-6">
+            <EmptyState
+              icon={<AlertTriangle className="lucide-inline" aria-hidden="true" />}
+              title={i18nT('pages.agentsPage.could_not_load_agent_templates')}
+              subtitle={i18nT('pages.agentsPage.check_your_connection_and_try_again')}
+              action={<Btn onClick={() => refetchInstalled()}>{i18nT('pages.agentsPage.retry')}</Btn>}
+              testId="agents-load-error"
+            />
           </div>
         ) : installed.length === 0 ? (
           <div className="card-glow border border-border bg-card rounded-lg mb-4 shadow-sm py-6">
@@ -657,6 +675,14 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
                       <span className="text-[11.5px] text-muted">
                         {i18nT('pages.agentsPage.used_by_crews_repoint_them_on_the_crews_tab_firs', { crews: usedBy.map(c => c.name).join(', ') })}
                       </span>
+                    )}
+                    {/* Covers both a still-in-flight fetch and a failed one — the
+                        two are indistinguishable from `blockedBy` alone (see the
+                        isError comment above `crewsLoaded`/`defaultLoaded`), and
+                        a silently-absent delete button here would otherwise teach
+                        nothing, same as the 'default'/'crews' cases above. */}
+                    {blockedBy === 'unloaded' && (
+                      <span className="text-[11.5px] text-muted">{i18nT('pages.agentsPage.still_confirming_whether_this_template_is_unused')}</span>
                     )}
                     {deletable && !confirmDelete && (
                       <Btn danger onClick={() => setConfirmDelete(true)} disabled={deleteAgentMut.isPending} data-testid="delete-template">
@@ -748,7 +774,15 @@ export default function AgentsPage({ embedded }: { embedded?: boolean } = {}) {
                     </Section>
 
                     <Section title={i18nT('pages.agentsPage.used_by')}>
-                      {usedBy.length === 0 ? (
+                      {/* `crewsFailed` first: `usedBy` derives from `crews`, which
+                          defaults to `[]` on a fetch failure exactly like on a
+                          genuinely empty roster, so without this check a broken
+                          fetch reads as a confirmed "nothing uses this" — the same
+                          false-negative the delete guard above treats as unknown,
+                          not clear. */}
+                      {crewsFailed ? (
+                        <p className="m-0 text-[12.5px] text-muted">{i18nT('pages.agentsPage.could_not_check_which_crews_use_this_template')}</p>
+                      ) : usedBy.length === 0 ? (
                         <p className="m-0 text-[12.5px] text-muted">{i18nT('pages.agentsPage.no_crews_use_this_template_yet')}</p>
                       ) : (<>
                         <div className="flex flex-wrap gap-1.5">

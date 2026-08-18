@@ -209,6 +209,19 @@ describe('agent templates inspector — overview', () => {
 
     expect(await screen.findByText('No crews use this template yet')).toBeInTheDocument()
   })
+
+  /* `usedBy` derives from `crews`, which defaults to `[]` on a fetch failure
+   * exactly like on a genuinely empty roster — without a dedicated branch a
+   * broken fetch would render the same "No crews use this template yet" text
+   * as a confirmed answer. */
+  it('says it could not check, rather than claiming no crew is bound, when that fetch fails', async () => {
+    mockApi.kirocrewAgents.mockRejectedValue(new Error('network'))
+    renderPage()
+    await open('kirocrew')
+
+    expect(await screen.findByText('Could not check which crews use this template.')).toBeInTheDocument()
+    expect(screen.queryByText('No crews use this template yet')).not.toBeInTheDocument()
+  })
 })
 
 describe('agent templates inspector — roster filter', () => {
@@ -225,6 +238,37 @@ describe('agent templates inspector — roster filter', () => {
 
     fireEvent.change(filter, { target: { value: 'zzz' } })
     expect(await screen.findByText('No templates match your filter')).toBeInTheDocument()
+  })
+})
+
+describe('agent templates inspector — roster load state', () => {
+  it('shows a skeleton while the roster is still loading, not a blank panel', async () => {
+    let landInstalled: (v: unknown) => void = () => {}
+    mockApi.agentsInstalled.mockImplementation(() => new Promise(resolve => { landInstalled = resolve }))
+    renderPage()
+
+    expect(document.querySelectorAll('[data-slot="skeleton"]').length).toBeGreaterThan(0)
+    expect(screen.queryByRole('listbox', { name: 'Installed Agents' })).not.toBeInTheDocument()
+
+    landInstalled([BUILTIN])
+    await waitFor(() => expect(screen.getByRole('listbox', { name: 'Installed Agents' })).toBeInTheDocument())
+  })
+
+  /* `installed` defaults to `[]` on a fetch failure exactly like on a
+   * genuinely empty roster, so without a dedicated `isError` branch a broken
+   * backend would show the SAME "No agent templates yet" copy as a user who
+   * simply has none installed. */
+  it('tells a load failure apart from a genuinely empty roster, and can retry', async () => {
+    mockApi.agentsInstalled.mockRejectedValue(new Error('network'))
+    renderPage()
+
+    expect(await screen.findByText('Could not load agent templates')).toBeInTheDocument()
+    expect(screen.queryByText('No agent templates yet')).not.toBeInTheDocument()
+
+    mockApi.agentsInstalled.mockResolvedValue([BUILTIN])
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+
+    await waitFor(() => expect(screen.getByRole('listbox', { name: 'Installed Agents' })).toBeInTheDocument())
   })
 })
 
@@ -393,6 +437,23 @@ describe('agent templates inspector — delete', () => {
 
     landCrews({ agents: [], default_agent: '' })
     expect(await screen.findByTestId('delete-template')).toBeInTheDocument()
+  })
+
+  /* A withheld delete button that just silently isn't there teaches nothing —
+   * the 'default'/'crews' blocks above this one in the component both say why,
+   * so 'unloaded' (still fetching, or the fetch failed) must too. */
+  it('says why delete is withheld while the reference data has not resolved', async () => {
+    let landCrews: (v: unknown) => void = () => {}
+    mockApi.kirocrewAgents.mockImplementation(() => new Promise(resolve => { landCrews = resolve }))
+    renderPage()
+    await open('reviewer')
+
+    expect(await screen.findByText('Still confirming whether this template is unused.')).toBeInTheDocument()
+    expect(screen.queryByTestId('delete-template')).not.toBeInTheDocument()
+
+    landCrews({ agents: [], default_agent: '' })
+    await waitFor(() => expect(screen.getByTestId('delete-template')).toBeInTheDocument())
+    expect(screen.queryByText('Still confirming whether this template is unused.')).not.toBeInTheDocument()
   })
 
   it('withholds delete until the fallback setting has actually loaded', async () => {

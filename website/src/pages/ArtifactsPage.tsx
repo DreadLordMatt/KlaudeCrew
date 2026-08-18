@@ -9,7 +9,7 @@ import type { ItemContent } from '@virtuoso.dev/masonry'
 import { DndContext, PointerSensor, useSensor, useSensors, DragOverlay, MeasuringStrategy, pointerWithin, type DragEndEvent, type DragStartEvent, type CollisionDetection, type Modifier } from '@dnd-kit/core'
 import SegmentedControl from '../components/SegmentedControl'
 import { api } from '../api/client'
-import { Card, CardTitle, PageHeader, Btn, Badge, SearchInput, EmptyState, Input, IconButton } from '../components/ui'
+import { Card, CardTitle, PageHeader, Btn, Badge, SearchInput, EmptyState, Input, IconButton, ContentSkeleton } from '../components/ui'
 import SimpleSelect from '../components/SimpleSelect'
 import RemoteArtifactCard from '../components/RemoteArtifactCard'
 import { useImeGuard } from '../hooks/useImeGuard'
@@ -1700,7 +1700,7 @@ export default function ArtifactsPage() {  const navigate = useNavigate()
   }, [folders, moveArtifact, updateFolderMut])
   const handleDragCancel = useCallback(() => { setActiveDrag(null); setOverFolderId(null) }, [])
 
-  const { data, isLoading, error } = useQuery<{ artifacts: Artifact[] }>({
+  const { data, isLoading, isError, isFetching, error, refetch } = useQuery<{ artifacts: Artifact[] }>({
     queryKey: ['artifacts', { tag: tagFilter, kind: kindFilter }],
     queryFn: () =>
       api.artifacts({
@@ -1879,7 +1879,46 @@ export default function ArtifactsPage() {  const navigate = useNavigate()
           ? asMessage(materializeMut.error)
           : null
 
-  if (isLoading) return <div className="p-6 text-muted">{i18nT('pages.artifactsPage.loading')}</div>
+  // A hard failure with no cached data at all cannot be told apart from a
+  // genuinely empty library by `artifacts.length` alone — both degrade to
+  // `[]` — so without this check the fetch failure below would ALSO render
+  // "No artifacts yet. Click the bookmark icon…", which tells the user to
+  // start bookmarking things when the real problem is that we could not ask.
+  // Gated on `!data`: react-query keeps the last good payload on a failed
+  // BACKGROUND refetch (e.g. the invalidation after a delete), and stale
+  // rows the user was already looking at beat an error panel replacing them.
+  const loadFailed = isError && !data
+  const libraryEmpty = artifacts.length === 0 && folders.length === 0
+  // The unfiltered TREE view folds session docs in as rows (LibraryTree's
+  // own `sessionDocs` prop below), unlike the grid, which renders them in a
+  // separate section above the gallery regardless of `libraryEmpty`. So the
+  // tree is not actually empty on screen while there is a document to show —
+  // mirrors the same `pinnedOnly` gate LibraryTree's `sessionDocs` prop uses.
+  const treeEmpty = libraryEmpty && (pinnedOnly || sessionDocs.length === 0)
+  const genuinelyEmptyState = (
+    <EmptyState
+      icon={<Bookmark className="lucide-inline" />}
+      title={i18nT('pages.artifactsPage.no_artifacts_yet')}
+      subtitle={sessionDocs.length > 0 && !pinnedOnly
+        ? i18nT('pages.artifactsPage.star_a_document_in_from_your_chats_to_save_it_he')
+        : i18nT('pages.artifactsPage.click_the_bookmark_icon_on_any_rendered_widget_i')}
+    />
+  )
+
+  if (isLoading) {
+    // Keep the header on screen instead of returning a bare fragment: the
+    // pre-skeleton version dropped straight to a text node with no chrome at
+    // all, so the whole page (including the title) flashed away and back on
+    // every keystroke-driven kind/tag refetch, not just the first load.
+    return (
+      <>
+        <PageHeader title={i18nT('pages.artifactsPage.artifacts')} subtitle={i18nT('pages.artifactsPage.widgets_files_and_snippets_live_tracked_with_ver')} />
+        <div className="px-6 pb-8 overflow-y-auto flex-1 min-h-0">
+          <ContentSkeleton rows={6} />
+        </div>
+      </>
+    )
+  }
 
   return (
     <>
@@ -2083,15 +2122,27 @@ export default function ArtifactsPage() {  const navigate = useNavigate()
               />
             )}
 
-            {gridEntries.length === 0 && (view === 'grid' || filtersActive) ? (
-              (artifacts.length === 0 && folders.length === 0) ? (
-                <EmptyState
-                  icon={<Bookmark className="lucide-inline" />}
-                  title={i18nT('pages.artifactsPage.no_artifacts_yet')}
-                  subtitle={sessionDocs.length > 0 && !pinnedOnly
-                    ? i18nT('pages.artifactsPage.star_a_document_in_from_your_chats_to_save_it_he')
-                    : i18nT('pages.artifactsPage.click_the_bookmark_icon_on_any_rendered_widget_i')}
-                />
+            {loadFailed ? (
+              // Distinct from the "genuinely empty" state below: this is a
+              // failed request, not zero artifacts, so it gets its own copy
+              // plus a retry action instead of "click the bookmark icon…".
+              // The mutation-error banner above (errMessage/mutErr/addError)
+              // still surfaces the raw message; this is the content-area
+              // placeholder that replaces the list itself.
+              <EmptyState
+                testId="artifacts-error"
+                icon={<AlertTriangle className="lucide-inline" />}
+                title={i18nT('pages.artifactsPage.could_not_load_artifacts')}
+                subtitle={i18nT('pages.artifactsPage.could_not_load_artifacts_hint')}
+                action={
+                  <Btn type="button" onClick={() => refetch()} disabled={isFetching} className="text-[11.5px]">
+                    {isFetching ? i18nT('pages.artifactsPage.retrying') : i18nT('pages.artifactsPage.retry')}
+                  </Btn>
+                }
+              />
+            ) : gridEntries.length === 0 && (view === 'grid' || filtersActive) ? (
+              libraryEmpty ? (
+                genuinelyEmptyState
               ) : (
                 <div className="text-muted italic px-2.5 py-3.5 text-sm">
                   {filtersActive
@@ -2122,6 +2173,16 @@ export default function ArtifactsPage() {  const navigate = useNavigate()
                 onMaterialize={pinnedOnly ? undefined : handleMaterialize}
                 materializingPath={materializingPath}
               />
+            ) : treeEmpty ? (
+              // The tree below is NOT folder-scoped the way the grid's
+              // `gridEntries` is (it shows every folder at once), so the grid
+              // branch's emptiness check above cannot answer "is there
+              // anything to show" here. LibraryTree itself has no empty
+              // fallback — zero folders and zero rows renders a bare table
+              // head with nothing under it — so this catches it before that.
+              // `treeEmpty`, not `libraryEmpty`: the tree still has session-doc
+              // rows to show even when there are no real artifacts or folders.
+              genuinelyEmptyState
             ) : (
               <LibraryTree
                 items={visible}

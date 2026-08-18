@@ -587,6 +587,16 @@ describe('ArtifactsPage — folder tree table', () => {
     localStorage.setItem('mc-artifacts-view', 'table')
   })
 
+  // The tree (unfiltered table view) is not folder-scoped, so it has no
+  // EmptyState fallback of its own — an empty library used to render a bare
+  // table head with nothing under it instead of a message.
+  it('shows the empty state instead of a bare table when the library is completely empty', async () => {
+    seed()
+    renderWithProviders(<ArtifactsPage />)
+    await waitFor(() => expect(screen.getByText(/No artifacts yet/i)).toBeInTheDocument())
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
   it('renders folders collapsed with an Unfiled lane, and expands on click', async () => {
     const user = userEvent.setup()
     seed({
