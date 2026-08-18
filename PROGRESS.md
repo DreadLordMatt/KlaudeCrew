@@ -148,6 +148,8 @@ Integration note: this worktree branched before UI-1's one-line `ProjectsPage.ts
 
 **UI-3 is now fully complete** — all 4 named pages handled (3 fixed, 1 correctly excluded as not applicable). Final combined verification: `tsc -b` clean, 128+51 targeted vitest passing, `i18n-check.mjs` 15/16 (the one disclosed, expected `[pseudolocale]` gap covering 14 new English-only-so-far keys across the whole UI-3 batch).
 
+- **3 spent git worktrees need manual cleanup**: `.claude/worktrees/agent-{ad9dfdf745e98871a,a2792414457e71668,ac628f9d6ef0e87ff}` (the UI-3 AgentsPage/ArtifactsPage/ProjectsPage worktrees). All three are fully spent — every change in them was patched/copied into this branch and committed (`7a1257f`, `e26e580`). `git worktree remove <path>` refuses without `--force` (they still hold their original uncommitted diffs, now redundant), and `--force` is blocked by `.claude/hooks/git-guard.py` as a stop point requiring the operator's explicit go-ahead — correctly not routed around. One command per worktree (or `git worktree remove --force <path>` ×3, then `git worktree prune`) clears them.
+
 ## Needs a decision (running list; copied into MORNING-BRIEF.md at hand-off)
 
 - **Vendored `anime.es.js:1296` TODO** ("naming, documentation") — upstream anime.js v3.2.2's own author-note, bundled directly under `website/src/lib/` rather than via `node_modules` or a conventionally-exempt vendor directory. Options: (a) track it as a real tech-debt item anyway since it's literally under `src/`, (b) reframe it as "upgrade vendored anime.js" rather than "fix naming/docs" (upstream's problem, not ours, to fix in place), or (c) drop it and let a future vendor-manifest bump pick up whatever upstream does with it. No action taken; not tracked as a task.
