@@ -30,7 +30,14 @@ otherwise the value is passed through **unresolved** and
 advertised set via `model_registry.resolve_claude_wire_id` (see §Model
 Advertisement), sending the verbatim advertised wire id — or withholding
 (staying on the account's default) on a no-match, since startup-apply is the
-non-explicit path. Explicit picker switches go through
+non-explicit path. `SessionManager`'s warm-pool post-claim re-apply
+(`session.py`, the pool-claim branch of `get_or_create`) is the third
+withhold-side site: a claimed pooled process may inherit a persisted slot
+model that differs from the pool agent's own, and — like startup-apply — this
+is not a pick made for this turn, so a no-match in the advertised set is
+logged and withheld rather than raised (raising would kill the claimed
+process over a stale setting, making the outcome depend on whether a pooled
+process happened to exist). Explicit picker switches go through
 `chat_handlers._wire_model_id`, which uses the same resolver but raises
 `AcpModelUnavailable` on a no-match instead. This mirrors `to_acp_id(m)` on
 the kiro path, which is unaffected and always applies.

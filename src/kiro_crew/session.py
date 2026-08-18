@@ -2659,54 +2659,110 @@ class SessionManager:
                         )
                         # The requested `model` is a canonical/wire value while
                         # `_pool_model` is the pool agent's raw model slot — two
-                        # namespaces. Normalize BOTH to the backend's provider ids
-                        # before the equality check so an already-equivalent pooled
-                        # process is not needlessly re-switched, and the value sent
-                        # to set_model is a provider id the backend accepts. kiro
-                        # (the "acp" provider) needs its bare dotted id (e.g.
-                        # "claude-opus-4.8") via to_acp_id, which translates ONLY
-                        # canonical keys and passes kiro's native ids/aliases
-                        # (claude-haiku-4.5, …) through unchanged — DISTINCT real
-                        # kiro models that must not be folded to Sonnet the way the
-                        # claude backend's to_provider_id downgrades them. The
-                        # claude backend needs the global.anthropic.* id.
-                        if _is_claude_backend(provider):
-                            _switch_model = model_registry.to_provider_id(model, "claude_code")
-                            _cmp_pool = (
-                                model_registry.to_provider_id(_pool_model, "claude_code")
-                                if _pool_model
-                                else _pool_model
-                            )
-                        else:
-                            _switch_model = model_registry.to_acp_id(model)
-                            _cmp_pool = (
-                                model_registry.to_acp_id(_pool_model)
-                                if _pool_model
-                                else _pool_model
-                            )
-                        if _pool_model and _switch_model != _cmp_pool:
-                            # This is an INHERITED value (the slot's persisted
-                            # model), not a pick made for this turn, so it gets
-                            # the same withhold treatment as a cold start. Left
-                            # to raise, AcpModelUnavailable would land in the
-                            # except below and kill the claimed provider — the
-                            # identical stale setting would then fail or not
-                            # purely on whether a pooled process happened to
-                            # exist, which is the worst kind of intermittent.
-                            try:
-                                _advertised = advertised_model_ids(provider.available_models())
-                            except Exception:  # pragma: no cover - defensive
-                                _advertised = []
-                            if _advertised and model_is_unusable(_switch_model, _advertised):
-                                logger.warning(
-                                    "Pool post-claim: model %s is not available to this "
-                                    "account; leaving the claimed process on %s",
-                                    _switch_model,
-                                    _pool_model,
+                        # namespaces. Normalize BOTH before the equality check so
+                        # an already-equivalent pooled process is not needlessly
+                        # re-switched, and the value sent to set_model is one the
+                        # backend accepts. kiro (the "acp" provider) needs its
+                        # bare dotted id (e.g. "claude-opus-4.8") via to_acp_id,
+                        # which translates ONLY canonical keys and passes kiro's
+                        # native ids/aliases (claude-haiku-4.5, …) through
+                        # unchanged — DISTINCT real kiro models that must not be
+                        # folded to Sonnet the way the claude backend's
+                        # to_provider_id downgrades them.
+                        #
+                        # The claude backend has TWO id namespaces of its own:
+                        # the Bedrock inference-profile column
+                        # (model_registry.to_provider_id(..., "claude_code")),
+                        # used only when CLAUDE_CODE_USE_BEDROCK=1; and, on a
+                        # plain `claude login` session (the common case), the
+                        # live claude-agent-acp session's own advertised wire
+                        # spellings ("opus[1m]", "sonnet", …), resolved via
+                        # model_registry.resolve_claude_wire_id against
+                        # provider.available_models() — see "Model translation
+                        # is Bedrock-gated" in acp-client.md. Fabricating a
+                        # Bedrock id on a non-Bedrock account either gets
+                        # withheld against the wrong namespace (spurious "not
+                        # available") or sent verbatim and rejected by the
+                        # wire, killing the claimed process.
+                        # No pool_agent configured → _pool_model is None → we
+                        # don't know what model the claimed process is on, so
+                        # no comparison is possible and the switch is skipped
+                        # entirely (pooled process keeps whatever it defaulted
+                        # to), matching the kiro/Bedrock behavior below.
+                        if _pool_model:
+                            _use_bedrock = os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1"
+                            if _is_claude_backend(provider) and not _use_bedrock:
+                                try:
+                                    _advertised = advertised_model_ids(provider.available_models())
+                                except Exception:  # pragma: no cover - defensive
+                                    _advertised = []
+                                _switch_model = model_registry.resolve_claude_wire_id(
+                                    model, _advertised
                                 )
+                                _cmp_pool = model_registry.resolve_claude_wire_id(
+                                    _pool_model, _advertised
+                                )
+                                if _switch_model is None:
+                                    # Inherited value (the slot's persisted
+                                    # model), not a pick made for this turn, so
+                                    # a no-match is withheld rather than raised
+                                    # — same rationale as the kiro/Bedrock
+                                    # branch below.
+                                    logger.warning(
+                                        "Pool post-claim: model %s is not available to this "
+                                        "account; leaving the claimed process on %s",
+                                        model,
+                                        _pool_model,
+                                    )
+                                elif _switch_model == _cmp_pool:
+                                    pass  # already equivalent within the advertised namespace
+                                else:
+                                    await provider.client.set_model(_switch_model)
+                                    logger.info(
+                                        "Pool post-claim: switched model to %s", _switch_model
+                                    )
                             else:
-                                await provider.client.set_model(_switch_model)
-                                logger.info("Pool post-claim: switched model to %s", _switch_model)
+                                if _is_claude_backend(provider):
+                                    _switch_model = model_registry.to_provider_id(
+                                        model, "claude_code"
+                                    )
+                                    _cmp_pool = model_registry.to_provider_id(
+                                        _pool_model, "claude_code"
+                                    )
+                                else:
+                                    _switch_model = model_registry.to_acp_id(model)
+                                    _cmp_pool = model_registry.to_acp_id(_pool_model)
+                                if _switch_model != _cmp_pool:
+                                    # This is an INHERITED value (the slot's
+                                    # persisted model), not a pick made for this
+                                    # turn, so it gets the same withhold
+                                    # treatment as a cold start. Left to raise,
+                                    # AcpModelUnavailable would land in the
+                                    # except below and kill the claimed
+                                    # provider — the identical stale setting
+                                    # would then fail or not purely on whether
+                                    # a pooled process happened to exist, which
+                                    # is the worst kind of intermittent.
+                                    try:
+                                        _advertised = advertised_model_ids(
+                                            provider.available_models()
+                                        )
+                                    except Exception:  # pragma: no cover - defensive
+                                        _advertised = []
+                                    if _advertised and model_is_unusable(
+                                        _switch_model, _advertised
+                                    ):
+                                        logger.warning(
+                                            "Pool post-claim: model %s is not available to this "
+                                            "account; leaving the claimed process on %s",
+                                            _switch_model,
+                                            _pool_model,
+                                        )
+                                    else:
+                                        await provider.client.set_model(_switch_model)
+                                        logger.info(
+                                            "Pool post-claim: switched model to %s", _switch_model
+                                        )
                 logger.info(
                     "Claimed warm-pool process for %s (agent=%s)", key, agent or self._pool_agent
                 )

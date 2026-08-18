@@ -525,14 +525,14 @@ class TestModelMatchesPoolDefault:
         factory.assert_not_called()
         pooled.client.set_model.assert_awaited_once_with("claude-sonnet-4.6")
 
-    @pytest.mark.asyncio
-    async def test_pool_claude_backend_translates_canonical_key_on_switch(self):
-        """On the claude backend, a canonical wire key (e.g. opus-4.8-1m) is
-        translated to a provider id before set_model — else the adapter
-        mis-resolves it. kiro/acp backends still pass the value through."""
+    # The real advertised set observed live (real gateway + real claude +
+    # claude-agent-acp v0.66.0) — same fixture as test_klaude_model_wire.py.
+    _CLAUDE_ADVERTISED = ["default", "opus[1m]", "claude-fable-5[1m]", "sonnet", "haiku"]
+
+    @staticmethod
+    def _make_claude_pooled(advertised=None):
         from kiro_crew.providers.acp import AcpProvider
 
-        mgr, factory = _make_manager(pool_agent="kirocrew")
         pooled = _make_provider()
         pooled.__class__ = AcpProvider
         pooled.client = MagicMock()
@@ -540,39 +540,104 @@ class TestModelMatchesPoolDefault:
         pooled.client.set_model = AsyncMock()
         pooled.client.resumed = False
         pooled.client._session_id = "fake-sid"
+        pooled.available_models = MagicMock(
+            return_value=[{"modelId": m} for m in (advertised or [])]
+        )
+        return pooled
+
+    @pytest.mark.asyncio
+    async def test_pool_claude_backend_resolves_against_advertised_set_on_switch(self):
+        """On the claude backend (no CLAUDE_CODE_USE_BEDROCK), a canonical wire
+        key is resolved against the LIVE session's advertised set and sent
+        VERBATIM — never a fabricated Bedrock id (model_registry.json's
+        claude_code column), which a non-Bedrock `claude login` session rejects
+        outright. Requested "sonnet-4.6-1m" is a registered alias of the
+        advertised "sonnet" entry; the pool default has no such match."""
+        mgr, factory = _make_manager(pool_agent="kirocrew")
+        pooled = self._make_claude_pooled(self._CLAUDE_ADVERTISED)
         mgr._drain_and_claim = AsyncMock(return_value=pooled)
         mgr._schedule_replenish = MagicMock()
 
-        with patch.object(type(mgr), "_resolve_agent_model", return_value="default-model"):
-            await mgr.get_or_create("test-key", agent="kirocrew", model="opus-4.8-1m")
+        with patch.object(type(mgr), "_resolve_agent_model", return_value="claude-opus-4.6"):
+            await mgr.get_or_create("test-key", agent="kirocrew", model="sonnet-4.6-1m")
 
-        pooled.client.set_model.assert_awaited_once_with("global.anthropic.claude-opus-4-8[1m]")
+        pooled.client.set_model.assert_awaited_once_with("sonnet")
+        for call in pooled.client.set_model.await_args_list:
+            assert not call.args[0].startswith("global.anthropic.")
 
     @pytest.mark.asyncio
     async def test_pool_claude_backend_skips_redundant_switch_cross_namespace(self):
-        """The short-circuit must work ACROSS namespaces: a canonical wire key
-        and the pool agent's kiro model slot that resolve to the SAME provider id
-        must NOT trigger a redundant set_model. Requested 'opus-4.8-1m' vs pool
-        agent kiro 'claude-opus-4.6' both → the flagship provider id."""
-        from kiro_crew.providers.acp import AcpProvider
-
+        """The short-circuit must work ACROSS spellings: a canonical wire key
+        and an already-bare wire value that resolve to the SAME advertised
+        entry must NOT trigger a redundant set_model. Requested
+        'sonnet-4.6-1m' (canonical alias) vs pool slot 'sonnet' (bare wire
+        value) both resolve to the advertised "sonnet" entry."""
         mgr, factory = _make_manager(pool_agent="kirocrew")
-        pooled = _make_provider()
-        pooled.__class__ = AcpProvider
-        pooled.client = MagicMock()
-        pooled.client.backend = "claude"
-        pooled.client.set_model = AsyncMock()
-        pooled.client.resumed = False
-        pooled.client._session_id = "fake-sid"
+        pooled = self._make_claude_pooled(self._CLAUDE_ADVERTISED)
         mgr._drain_and_claim = AsyncMock(return_value=pooled)
         mgr._schedule_replenish = MagicMock()
 
-        # pool agent's kiro model 'claude-opus-4.6' translates to the SAME
-        # flagship provider id as the requested canonical 'opus-4.8-1m'.
-        with patch.object(type(mgr), "_resolve_agent_model", return_value="claude-opus-4.6"):
-            await mgr.get_or_create("test-key", agent="kirocrew", model="opus-4.8-1m")
+        with patch.object(type(mgr), "_resolve_agent_model", return_value="sonnet"):
+            await mgr.get_or_create("test-key", agent="kirocrew", model="sonnet-4.6-1m")
 
         pooled.client.set_model.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pool_claude_backend_no_match_withheld_not_raised(self):
+        """An inherited model with no match in this account's advertised set
+        is withheld (logged), never raised — raising would kill the claimed
+        process over a stale setting. The claim must survive."""
+        mgr, factory = _make_manager(pool_agent="kirocrew")
+        pooled = self._make_claude_pooled(self._CLAUDE_ADVERTISED)
+        mgr._drain_and_claim = AsyncMock(return_value=pooled)
+        mgr._schedule_replenish = MagicMock()
+
+        with patch.object(type(mgr), "_resolve_agent_model", return_value="sonnet"):
+            provider, _is_new, _resumed = await mgr.get_or_create(
+                "test-key", agent="kirocrew", model="unknown-model-xyz"
+            )
+
+        pooled.client.set_model.assert_not_awaited()
+        assert provider is pooled
+
+    @pytest.mark.asyncio
+    async def test_pool_claude_backend_empty_advertised_set_withheld(self):
+        """An empty/unknown advertised set (e.g. read before session/new
+        finished capturing it) must withhold rather than fabricate a Bedrock
+        id — the bug this issue fixes: the old code sent a Bedrock id here
+        because the empty-advertised-set guard was checked against the WRONG
+        namespace and always allowed the send through."""
+        mgr, factory = _make_manager(pool_agent="kirocrew")
+        pooled = self._make_claude_pooled(advertised=[])
+        mgr._drain_and_claim = AsyncMock(return_value=pooled)
+        mgr._schedule_replenish = MagicMock()
+
+        with patch.object(type(mgr), "_resolve_agent_model", return_value="sonnet"):
+            provider, _is_new, _resumed = await mgr.get_or_create(
+                "test-key", agent="kirocrew", model="opus-4.8-1m"
+            )
+
+        pooled.client.set_model.assert_not_awaited()
+        assert provider is pooled
+
+    @pytest.mark.asyncio
+    async def test_pool_claude_backend_bedrock_env_translates_to_provider_id(self):
+        """CLAUDE_CODE_USE_BEDROCK=1 preserves the pre-fix Bedrock-column
+        translation — that opt-in genuinely runs on the Bedrock namespace, so
+        the advertised set here is empty (a real Bedrock session's advertised
+        ids are Bedrock-shaped, not the claude wire spellings fixture)."""
+        mgr, factory = _make_manager(pool_agent="kirocrew")
+        pooled = self._make_claude_pooled(advertised=[])
+        mgr._drain_and_claim = AsyncMock(return_value=pooled)
+        mgr._schedule_replenish = MagicMock()
+
+        with (
+            patch.object(type(mgr), "_resolve_agent_model", return_value="default-model"),
+            patch.dict(os.environ, {"CLAUDE_CODE_USE_BEDROCK": "1"}),
+        ):
+            await mgr.get_or_create("test-key", agent="kirocrew", model="opus-4.8-1m")
+
+        pooled.client.set_model.assert_awaited_once_with("global.anthropic.claude-opus-4-8[1m]")
 
     @pytest.mark.asyncio
     async def test_pool_skipped_when_model_set_but_pool_disabled(self):
