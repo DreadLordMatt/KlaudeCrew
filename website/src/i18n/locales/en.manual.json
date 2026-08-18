@@ -3178,13 +3178,16 @@
       "task_is_waiting_for_your_decision": "Task {{index}} \"{{title}}\" is waiting for your decision"
     },
     "projectsPage": {
+      "check_your_connection_and_try_again": "Check your connection and try again.",
+      "couldnt_load_runs": "Couldn't load runs",
       "default_workspace_folder": "Default workspace folder",
       "delete": "Delete",
       "failed_to_generate_plan": "Failed to generate plan",
       "open_project": "Open project {{name}}",
       "planning_request_failed": "Planning request failed",
       "planning_timed_out_try_again": "Planning timed out. Try again.",
-      "project": "Project"
+      "project": "Project",
+      "showing_the_last_successful_load": "Showing the last successful load — refresh failed: {{error}}"
     },
     "remoteArtifactDetailPage": {
       "fork_failed": "Fork failed",

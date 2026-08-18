@@ -9137,13 +9137,16 @@
       "workspace_folder": "[Ẁøŕķşþàçè ƒøĺðèŕ ··············]",
       "yaml_files_should_be_uploaded_via_the_from_yaml": "[ÝÀṀĹ ƒìĺèş şĥøùĺð ƀè ùþĺøàðèð ṽìà ţĥè \"Ƒŕøɱ ÝÀṀĹ\" ţàƀ. ···················]",
       "yaml_workflows_bypass_the_llm_decomposer": "[ÝÀṀĹ ẁøŕķƒĺøẁş ƀýþàşş ţĥè ĹĹṀ ðèçøɱþøşèŕ — ·····················]",
+      "check_your_connection_and_try_again": "Check your connection and try again.",
+      "couldnt_load_runs": "Couldn't load runs",
       "default_workspace_folder": "[Ðèƒàùĺţ ẁøŕķşþàçè ƒøĺðèŕ ·················]",
       "delete": "[Ðèĺèţè ·········]",
       "failed_to_generate_plan": "[Ƒàìĺèð ţø ğèñèŕàţè þĺàñ ················]",
       "open_project": "[Øþèñ þŕøĵèçţ {{name}} ············]",
       "planning_request_failed": "[Þĺàññìñğ ŕèǫùèşţ ƒàìĺèð ················]",
       "planning_timed_out_try_again": "[Þĺàññìñğ ţìɱèð øùţ. Ţŕý àğàìñ. ·····················]",
-      "project": "[Þŕøĵèçţ ···········]"
+      "project": "[Þŕøĵèçţ ···········]",
+      "showing_the_last_successful_load": "Showing the last successful load — refresh failed: {{error}}"
     },
     "remoteArtifactDetailPage": {
       "back": "[Ɓàçķ ······]",

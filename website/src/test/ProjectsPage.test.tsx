@@ -115,9 +115,14 @@ describe('ProjectsPage', () => {
     expect(screen.getByTestId('agent-select')).toBeInTheDocument()
   })
 
-  it('shows empty state when no runs', () => {
+  it('shows empty state when no runs', async () => {
     renderWithProviders(<ProjectsPage />)
-    // With no runs, the project list renders but is empty
+    // With no runs, the rail renders the shared EmptyState (icon + title)
+    // rather than bare unstyled text, once the load that confirms "no runs"
+    // resolves — and the rest of the page (agent selector, compose panel)
+    // still renders normally alongside it.
+    expect(await screen.findByTestId('projects-rail-empty')).toBeInTheDocument()
+    expect(screen.getByTestId('projects-rail-empty-title')).toHaveTextContent('No runs yet')
     expect(screen.queryByTestId('agent-select')).toBeInTheDocument()
   })
 
