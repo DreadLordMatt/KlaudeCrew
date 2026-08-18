@@ -23,7 +23,12 @@ No `[arch]` tasks are seeded here on purpose.
 ## Tech debt triage (no fixes, just cataloguing)
 
 - [ ] DEBT-1 [chore] Triage backend `TODO`, `FIXME`, `HACK`, and `XXX` markers (about 81 across roughly 26 files under `src/`). Convert each actionable one into a discrete `- [ ]` task with `file:line`, a one-line intent, and a work-type tag. Group trivial ones. Acceptance: markers catalogued into tagged tasks; ambiguous ones flagged under "Needs a decision".
-- [ ] DEBT-2 [chore] Same triage for the frontend markers (about 10 across 8 files under `website/src/`). Acceptance: markers catalogued into tagged tasks.
+- [x] DEBT-2 [chore] Same triage for the frontend markers (about 10 across 8 files under `website/src/`). Acceptance: markers catalogued into tagged tasks. DONE — 10 raw hits, 2 genuine first-party markers + 1 vendored (see Needs a decision) + 7 false positives (prose about the shipped "TODO list" feature, not markers). Filed as FEAT-1 and ARCH-1 below. See `PROGRESS.md`.
+
+## Tech-debt-derived tasks (filed from DEBT-1/DEBT-2)
+
+- [ ] FEAT-1 [feature] `website/src/app-sdk/ChatMessageList.tsx:393` — chat messages with `role === 'file'` currently render as nothing (`return null`). Implement a real renderer with an attachment/download-link UI. Acceptance: a `file`-role message renders a visible, localized, theme-token-styled download affordance; `npm run check` green; vitest coverage added for the new render path.
+- [ ] ARCH-1 [arch] PROPOSAL ONLY, do not implement unattended. `website/src/components/AppHost.tsx:250` — the App SDK's `subscribeFn` only bridges `window` CustomEvents; real per-event WebSocket forwarding to apps doesn't exist yet. Needs a design note (problem, options, blast radius, migration/rollback) before any code — cross-cutting between the WS transport layer and the App Kit event API. Left for human triage.
 
 ## Interface polish (each is one page-scoped unit; read the website/AGENTS.md router doc first)
 
