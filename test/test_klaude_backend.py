@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pytest
 
-from kiro_crew.acp.types import ACP_BACKEND_CLAUDE
 from kiro_crew.config.loader import KiroCrewConfig
 
 

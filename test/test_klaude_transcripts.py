@@ -8,7 +8,6 @@ providers/acp.py's cleanup_session().
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest

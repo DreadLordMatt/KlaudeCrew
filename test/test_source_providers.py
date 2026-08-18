@@ -480,10 +480,26 @@ def test_provider_executable_rejects_binary_owned_by_another_user(
     executable.chmod(0o755)
     real_stat = executable.stat()
     foreign_stat = github_runner.os.stat_result([*list(real_stat)[:4], 4242, *list(real_stat)[5:]])
+    # `Path.stat` is `pathlib.Path.stat` itself (github_runner does `from pathlib
+    # import Path`), so a blanket `monkeypatch.setattr(github_runner.Path, "stat",
+    # ...)` replaces it PROCESS-WIDE for the life of the test, not just for
+    # `executable`. Python 3.12's `Path.exists()` calls `self.stat(follow_symlinks=
+    # ...)`, and pytest's own traceback-filtering code calls `.exists()` on
+    # unrelated source paths while building a report — a fake that only accepts
+    # one positional arg then raises TypeError there and crashes pytest itself
+    # (INTERNALERROR). Delegate to the real, pre-patch `Path.stat` for every path
+    # other than the one under test, passing through `*args/**kwargs` unchanged.
+    real_stat_method = github_runner.Path.stat
+
+    def fake_stat(path, *args, **kwargs):
+        if path == executable:
+            return foreign_stat
+        return real_stat_method(path, *args, **kwargs)
+
     monkeypatch.delenv("KIROCREW_PROVIDER_BIN_STRICT", raising=False)
     monkeypatch.setattr(github_runner, "agent_writable_roots", lambda: ())
     monkeypatch.setattr(github_runner, "path_parents", lambda _path: [])
-    monkeypatch.setattr(github_runner.Path, "stat", lambda _path: foreign_stat)
+    monkeypatch.setattr(github_runner.Path, "stat", fake_stat)
 
     with pytest.raises(ValueError, match="owned by another user"):
         source._validate_provider_executable(str(executable))
@@ -550,10 +566,16 @@ def test_provider_executable_strict_mode_rejects_untrusted_ancestor(
     )
     real_stat = github_runner.Path.stat
 
-    def fake_stat(path):
+    def fake_stat(path, *args, **kwargs):
+        # *args/**kwargs matter here: Python 3.12's Path.exists() calls
+        # self.stat(follow_symlinks=...), and pytest's own traceback-filtering
+        # code calls .exists() on unrelated source paths while building a
+        # report. A positional-only fake breaks that call process-wide (not
+        # just for `executable`) with a TypeError that crashes pytest itself
+        # (INTERNALERROR) instead of just this test failing normally.
         if path == executable:
             return root_executable_stat
-        return real_stat(path)
+        return real_stat(path, *args, **kwargs)
 
     monkeypatch.setenv("KIROCREW_PROVIDER_BIN_STRICT", "1")
     monkeypatch.setattr(github_runner, "path_parents", lambda _path: [parent])

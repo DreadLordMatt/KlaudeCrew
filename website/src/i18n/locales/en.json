@@ -4528,7 +4528,6 @@
       "high": "High",
       "idle": "Idle",
       "installed_agents": "Installed Agents",
-      "loading_agents": "Loading agents…",
       "mcp_servers": "MCP Servers",
       "model_list": "Model list",
       "no_active_sessions": "No active sessions",
@@ -4582,7 +4581,12 @@
       "what_a_crew_starts_from_its_model_skills_tools_mc": "What a crew starts from — its model, skills, tools, MCP servers and guardrails",
       "when_nothing_names_a_template_use": "When nothing names a template, use",
       "where_it_comes_from": "Where it comes from",
-      "yes_delete_it": "Yes, delete it"
+      "yes_delete_it": "Yes, delete it",
+      "check_your_connection_and_try_again": "Check your connection and try again.",
+      "could_not_check_which_crews_use_this_template": "Could not check which crews use this template.",
+      "could_not_load_agent_templates": "Could not load agent templates",
+      "retry": "Retry",
+      "still_confirming_whether_this_template_is_unused": "Still confirming whether this template is unused."
     },
     "aidlc": {
       "dagView": {
@@ -4941,7 +4945,6 @@
       "folder_color": "Folder color",
       "from_your_chats": "From your chats",
       "kind": "Kind",
-      "loading": "Loading…",
       "name": "Name",
       "new_folder": "New folder",
       "new_folder_name": "New folder name",

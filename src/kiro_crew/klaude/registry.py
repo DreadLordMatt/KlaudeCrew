@@ -56,8 +56,13 @@ class KlaudeProviderRegistry:
         # gateway restart-in-place) and re-attaching the same function is
         # harmless, but guard anyway so a future caller that checks "is this
         # already registered" has something to check.
-        AcpClient._claude_session_mcp_servers = _claude_session_mcp_servers
-        AcpClient._write_claude_local_settings = write_claude_local_settings
-        AcpClient._claude_session_transcript_exists = _claude_session_transcript_exists
-        AcpClient._claude_cleanup_transcript = _claude_cleanup_transcript
+        #
+        # mypy cannot verify a runtime getattr-based hook registration --
+        # see AGENTS.md § This fork: Claude Code is the default ACP backend,
+        # and this module's docstring above. Each ignore below is scoped to
+        # the exact error mypy reports on that line, never a bare ignore.
+        AcpClient._claude_session_mcp_servers = _claude_session_mcp_servers  # type: ignore[method-assign]  # intentional override of the real method
+        AcpClient._write_claude_local_settings = write_claude_local_settings  # type: ignore[attr-defined]  # getattr-only hook, not declared on the class
+        AcpClient._claude_session_transcript_exists = _claude_session_transcript_exists  # type: ignore[attr-defined]  # getattr-only hook, not declared on the class
+        AcpClient._claude_cleanup_transcript = _claude_cleanup_transcript  # type: ignore[attr-defined]  # getattr-only hook, not declared on the class
         logger.info("klaude: claude ACP backend registration glue attached")

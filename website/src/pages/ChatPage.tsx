@@ -217,7 +217,7 @@ const uniqueNotificationTs = (): string => `${Date.now()}.${notificationTsSeq++}
 
 const createFailReason = (e: unknown): string => {
   const msg = typeof e === 'object' && e !== null ? (e as { message?: unknown }).message : undefined
-  return typeof msg === 'string' && msg.trim() ? msg : 'the server did not respond'
+  return typeof msg === 'string' && msg.trim() ? msg : i18nT('pages.chatPage.the_server_did_not_respond')
 }
 
 export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, mode }: {
@@ -3833,7 +3833,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
           // action (unlike typed text, which is unrecoverable), so this reports the gap
           // instead of routing knowledge per-slot — but it must not be silent.
           const lostContext = knowledgeBlock
-            ? ' Its knowledge context was not kept — re-pick it before you resend.'
+            ? ` ${i18nT('pages.chatPage.knowledge_context_not_kept_re_pick_before_resend')}`
             : ''
           dispatch(addNotification({
             ts: uniqueNotificationTs(),
@@ -5603,7 +5603,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 : m.content
               return <>
                 {cronLabel && <span className="text-muted text-[11px] font-medium px-1 mb-0.5"><Clock className="lucide-inline" /> {cronLabel}</span>}
-                <div className="msg-content px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap rounded-lg bg-warning-subtle text-fg border border-warning/30 rounded-bl-[4px] overflow-hidden min-w-0" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}><MessageErrorBoundary rawContent={cleanContent}><MarkdownRenderer content={cleanContent} /></MessageErrorBoundary></div>
+                <div className="msg-content px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap rounded-lg bg-warn-subtle text-text border border-warn/30 rounded-bl-[4px] overflow-hidden min-w-0" style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}><MessageErrorBoundary rawContent={cleanContent}><MarkdownRenderer content={cleanContent} /></MessageErrorBoundary></div>
                 {/* No `font-mono`: a formatted date is prose, and Tailwind's
                     `font-mono` pins `var(--mono)` — a token the Font Family
                     setting never writes, so it overrode the user's choice and

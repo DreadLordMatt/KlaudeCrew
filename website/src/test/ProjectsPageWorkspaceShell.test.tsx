@@ -11,6 +11,7 @@ import { screen, fireEvent } from '@testing-library/react'
 import { renderWithProviders } from './helpers'
 import ProjectsPage from '../pages/ProjectsPage'
 import { BUILTIN_COMPONENT_REGISTRY, hasBuiltinComponent } from '../apps/builtinRegistry'
+import { triggerRefresh } from '../store/dashboardSlice'
 import {
   COLLAPSED_RAIL_WIDTH, DEFAULT_RAIL_WIDTH, MAX_RAIL_WIDTH, MIN_RAIL_WIDTH,
   RAIL_COLLAPSED_KEY, RAIL_WIDTH_KEY, loadRailCollapsed, loadRailWidth,
@@ -223,6 +224,60 @@ describe('Task Runner — loading states do not spin', () => {  it('renders the 
     expect(container.querySelector('.animate-pulse')).toBeNull()
     // The motion moved into a shimmer placeholder instead.
     expect(container.querySelector('.skeleton')).not.toBeNull()
+  })
+})
+
+describe('Task Runner — rail loading, empty, and error states', () => {
+  it('shows a shaped skeleton in the rail while the initial fetch is in flight, not the empty copy', async () => {
+    // Never resolves — `data` stays null, so the loading branch stays up for
+    // the assertion (mirrors the parked-promise idiom used above for planTask).
+    const { api: mockApi } = await import('../api/client')
+    vi.mocked(mockApi.taskRunnerStatus).mockImplementation(() => new Promise(() => {}))
+    const { container } = renderWithProviders(<ProjectsPage />)
+    // A stalled fetch must never read as "confirmed no runs" — that was the bug:
+    // before data loaded once, the rail showed the same "No runs yet" text a
+    // genuinely empty list shows.
+    expect(screen.queryByText('No runs yet')).not.toBeInTheDocument()
+    expect(container.querySelectorAll('[data-slot="skeleton"]').length).toBeGreaterThan(0)
+  })
+
+  it('shows an error state in the rail when the initial fetch fails, distinct from empty', async () => {
+    const { api: mockApi } = await import('../api/client')
+    vi.mocked(mockApi.taskRunnerStatus).mockRejectedValue(new Error('network down'))
+    renderWithProviders(<ProjectsPage />)
+    expect(await screen.findByText("Couldn't load runs")).toBeInTheDocument()
+    expect(screen.getByText('Check your connection and try again.')).toBeInTheDocument()
+    expect(screen.queryByText('No runs yet')).not.toBeInTheDocument()
+  })
+
+  it('still shows the empty state, via EmptyState, once a load succeeds with no runs', async () => {
+    const { api: mockApi } = await import('../api/client')
+    vi.mocked(mockApi.taskRunnerStatus).mockResolvedValue({ running: false, available: true, runs: [] })
+    renderWithProviders(<ProjectsPage />)
+    expect(await screen.findByTestId('projects-rail-empty')).toBeInTheDocument()
+    expect(screen.getByTestId('projects-rail-empty-title')).toHaveTextContent('No runs yet')
+  })
+
+  it('shows a stale-data note beside the last-known-good list when a background poll fails after a successful load', async () => {
+    const { api: mockApi } = await import('../api/client')
+    vi.mocked(mockApi.taskRunnerStatus)
+      .mockResolvedValueOnce({ running: false, available: true, runs: [run] })
+      .mockRejectedValue(new Error('backend restarted'))
+    const { store } = renderWithProviders(<ProjectsPage />)
+    // First load succeeds — the run list renders normally, no stale note yet.
+    expect(await screen.findByText('Existing')).toBeInTheDocument()
+    expect(screen.queryByText(/Showing the last successful load/)).not.toBeInTheDocument()
+    // A later background poll fails. Dispatching triggerRefresh() re-runs the
+    // same effect `load()` is wired to (it depends on `refreshTrigger`),
+    // exercising the real failure path without waiting out the 3s interval.
+    store.dispatch(triggerRefresh())
+    expect(await screen.findByText(/Showing the last successful load/)).toBeInTheDocument()
+    // Additive, not a replacement: the last-known-good list is still there,
+    // and this is NOT the full-page "couldn't load" EmptyState (that one only
+    // applies when nothing has loaded yet).
+    expect(screen.getByText('Existing')).toBeInTheDocument()
+    expect(screen.queryByText("Couldn't load runs")).not.toBeInTheDocument()
+    expect(screen.queryByTestId('projects-rail-error')).not.toBeInTheDocument()
   })
 })
 

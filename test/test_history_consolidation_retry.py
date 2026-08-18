@@ -1636,8 +1636,10 @@ class TestConsolidateIsTheEligibilityChokePoint:
 
     @pytest.mark.asyncio
     async def test_a_direct_call_on_a_fresh_span_still_consolidates(self, tmp_path):
-        """The eval runner calls _consolidate directly to bypass the message
-        threshold; a fresh span carries no backoff, so the gate lets it pass."""
+        """_consolidate is the primitive maybe_consolidate(force=True) schedules
+        to bypass the message threshold (e.g. for the eval runner, whose short
+        scenario sessions never reach it); a fresh span carries no backoff, so
+        the gate lets it pass."""
         log = _seed_log(tmp_path)
         c = _make_consolidator(log)
 
@@ -1805,3 +1807,92 @@ class TestConsolidateIsTheEligibilityChokePoint:
 
         spy.assert_awaited_once()
         assert log.unconsolidated_count(KEY) == 0
+
+
+class TestMaybeConsolidateForce:
+    """maybe_consolidate(force=True) is the sanctioned bypass for a caller
+    whose messages will never reach the message-count threshold on their own
+    (BUG-1: the eval runner used to call _consolidate() directly instead,
+    which skipped the _running guard, the retry-eligibility pre-check, and
+    the _prefs_offset bookkeeping this method otherwise applies).
+    """
+
+    @pytest.mark.asyncio
+    async def test_force_consolidates_below_threshold_and_advances_the_offset(
+        self, tmp_path
+    ):
+        """force=True consolidates a short span AND advances _prefs_offset —
+        the same bookkeeping an unforced (over-threshold) call gets."""
+        count = 20
+        assert count < history_mod._CONSOLIDATION_THRESHOLD
+        log = _seed_log(tmp_path, count=count)
+        c = _make_consolidator(log)
+
+        with patch.object(
+            c, "_call_llm", AsyncMock(return_value={"history_entry": "x"})
+        ) as spy:
+            task = c.maybe_consolidate(KEY, force=True, include_history=True)
+            assert task is not None, "force=True must schedule below threshold"
+            await task
+
+        spy.assert_awaited_once()
+        assert KEY not in c._running, "the _running guard must still release"
+        assert c._prefs_offset.get(KEY) == count, (
+            "force=True must advance _prefs_offset the same way an unforced "
+            "pass does — this is the offset tracking a direct _consolidate() "
+            "call bypasses"
+        )
+        assert log.unconsolidated_count(KEY) == 0, (
+            "include_history=True must still advance the durable "
+            "last_consolidated marker"
+        )
+
+    @pytest.mark.asyncio
+    async def test_offset_advanced_by_force_prevents_an_immediate_reconsolidation(
+        self, tmp_path
+    ):
+        """Regression test for BUG-1.
+
+        Calling _consolidate() directly (the pre-fix eval runner) never
+        touched _prefs_offset, so it would stay at 0 no matter how many
+        messages a forced pass covered. Prove the offset really advanced by
+        showing that once more messages arrive and push the RAW total over
+        the threshold, a plain maybe_consolidate() still measures from the
+        force-consolidated offset and correctly stays under it — not from a
+        stale 0, which would re-trigger a pass that re-sends the messages the
+        forced call already consolidated.
+        """
+        first_batch = 20
+        second_batch = 12
+        assert first_batch < history_mod._CONSOLIDATION_THRESHOLD
+        total = first_batch + second_batch
+        # Offset correctly advanced: total - first_batch = 12, still under
+        # threshold. Offset stuck at 0 (the bug): total - 0 = 32, at/over
+        # threshold — the two cases diverge, so this actually distinguishes
+        # a fixed offset from a bypassed one (unlike checking a scheduling
+        # decision while still under threshold either way).
+        assert total - first_batch < history_mod._CONSOLIDATION_THRESHOLD <= total
+
+        log = _seed_log(tmp_path, count=first_batch)
+        c = _make_consolidator(log)
+
+        with patch.object(
+            c, "_call_llm", AsyncMock(return_value={"history_entry": "x"})
+        ):
+            task = c.maybe_consolidate(KEY, force=True, include_history=True)
+            assert task is not None
+            await task
+
+        with history_mod.allow_on_loop_persist():
+            for i in range(second_batch):
+                log.append(KEY, "user", f"more-{i}")
+
+        with patch.object(c, "_call_llm", new_callable=AsyncMock) as spy:
+            task = c.maybe_consolidate(KEY)
+
+        assert task is None, (
+            "a correctly-advanced _prefs_offset must keep this span under "
+            "threshold; seeing a scheduled task means the offset was not "
+            "advanced by the forced pass (BUG-1 regressed)"
+        )
+        spy.assert_not_awaited()

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { screen, waitFor, fireEvent } from '@testing-library/react'
+import { screen, waitFor, fireEvent, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import ArtifactsPage from '../pages/ArtifactsPage'
 import { renderWithProviders } from './helpers'
@@ -336,6 +336,55 @@ describe('ArtifactsPage', () => {
     vi.mocked(api).artifacts = vi.fn().mockRejectedValue(new Error('network down'))
     renderWithProviders(<ArtifactsPage />)
     await waitFor(() => expect(screen.getByText(/network down/i)).toBeInTheDocument())
+    // A failed fetch degrades `artifacts` to [] the same way a genuinely
+    // empty library does — the misleading "start bookmarking things" copy
+    // must not render over a request that simply failed.
+    expect(screen.queryByText(/No artifacts yet/i)).not.toBeInTheDocument()
+  })
+
+  it('shows a dedicated error state (not the empty state) when the list fails to load', async () => {
+    vi.mocked(api).artifacts = vi.fn().mockRejectedValue(new Error('network down'))
+    renderWithProviders(<ArtifactsPage />)
+    const errorState = await screen.findByTestId('artifacts-error')
+    expect(within(errorState).getByText(/Couldn.t load artifacts/i)).toBeInTheDocument()
+    expect(within(errorState).getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.queryByTestId('empty-state')).not.toBeInTheDocument()
+  })
+
+  it('retries the artifact list from the error state', async () => {
+    const user = userEvent.setup()
+    // The page fires a SECOND, unfiltered `api.artifacts` query in parallel
+    // (it drives the tag-filter dropdown), so both queries draw from this
+    // same mock on mount — reject the first two calls (one per query) rather
+    // than assuming call #1 belongs to the primary list.
+    const fetcher = vi.fn()
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockResolvedValue({ artifacts: [mkArtifact('cr-queue')] })
+    vi.mocked(api).artifacts = fetcher
+    renderWithProviders(<ArtifactsPage />)
+    await screen.findByTestId('artifacts-error')
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    await waitFor(() => expect(screen.getByText('cr queue')).toBeInTheDocument())
+    expect(screen.queryByTestId('artifacts-error')).not.toBeInTheDocument()
+  })
+
+  // `isLoading` used to return a bare, headerless text node, so the whole
+  // page (title included) flashed away on every load — not just the first.
+  it('shows a skeleton (with the header still on screen) while the list is loading', async () => {
+    let resolveArtifacts!: (v: unknown) => void
+    vi.mocked(api).artifacts = vi.fn().mockReturnValue(new Promise((r) => { resolveArtifacts = r }))
+    const { container } = renderWithProviders(<ArtifactsPage />)
+
+    expect(screen.getByTestId('page-title')).toHaveTextContent('Artifacts')
+    expect(container.querySelector('[data-slot="skeleton"]')).toBeInTheDocument()
+    expect(screen.queryByText(/No artifacts yet/i)).not.toBeInTheDocument()
+
+    resolveArtifacts({ artifacts: [] })
+    await waitFor(() => expect(screen.getByText(/No artifacts yet/i)).toBeInTheDocument())
+    expect(container.querySelector('[data-slot="skeleton"]')).not.toBeInTheDocument()
   })
 
   it('calls deleteArtifact when user confirms delete', async () => {

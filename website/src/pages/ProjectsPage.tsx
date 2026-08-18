@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
-import { Hourglass, ClipboardList, ClipboardCheck, RefreshCw, CheckCircle, XCircle, Square, Sparkles, FileText, Settings, X, MessageSquare, Pencil, Clock, Pause, Play, RotateCcw, Plus } from 'lucide-react'
+import { Hourglass, ClipboardList, ClipboardCheck, RefreshCw, CheckCircle, XCircle, Square, Sparkles, FileText, Settings, X, MessageSquare, Pencil, Clock, Pause, Play, RotateCcw, Plus, AlertTriangle } from 'lucide-react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAppSelector, useAppDispatch } from '../store'
 import { setPendingInput, switchSlot } from '../store/chatSlice'
 import { api } from '../api/client'
 import type { TaskRunnerStatus, ProjectRun } from '../types'
-import { SendBtn, Btn, Checkbox, Input } from '../components/ui'
+import { SendBtn, Btn, Checkbox, Input, EmptyState, Skeleton } from '../components/ui'
 import ResizeHandle from '../components/ResizeHandle'
 import { useColumnResize, type CollapseConfig } from '../hooks/useColumnResize'
 import AgentSelector from '../components/AgentSelector'
@@ -49,6 +49,17 @@ export default function ProjectsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const dispatch = useAppDispatch()
   const [data, setData] = useState<TaskRunnerStatus | null>(null)
+  // The most recent load failure's message, or '' when the last attempt
+  // succeeded. Two different renderings read this depending on whether `data`
+  // has ever been populated: with `data === null` it drives the full-page
+  // "couldn't load" EmptyState (nothing to show yet); with `data !== null` it
+  // keeps showing that last-known-good run list (never blown away by a
+  // transient poll failure) but surfaces a small stale-data note instead of
+  // failing silently — mirrors `activityStale` in
+  // apps/issue-radar/components/PrDetail.tsx, which keeps its previous
+  // payload on a failed poll for the same reason: gating solely on `!data`
+  // would leave stale rows on screen with nothing saying they are stale.
+  const [loadError, setLoadError] = useState('')
   const [selectedRun, setSelectedRun] = useState<ProjectRun | null>(null)
   const [mode, setMode] = useState<Mode>(() => (sessionStorage.getItem('tr-mode') as Mode) || 'compose')
   const [userInput, setUserInput] = useState(() => sessionStorage.getItem('tr-input') || '')
@@ -91,6 +102,7 @@ export default function ProjectsPage() {
     try {
       const d = await api.taskRunnerStatus()
       setData(d)
+      setLoadError('')
       // Surface the backend's default workspace folder as a PLACEHOLDER only —
       // never as the field's value — so an untouched field stays empty ("no
       // override") and doesn't collapse per-run workspace isolation.
@@ -103,6 +115,8 @@ export default function ProjectsPage() {
         if (found) { setSelectedRun(found); return }
       }
       setSelectedRun(prev => prev ? d.runs?.find((r: ProjectRun) => r.task_id === prev.task_id) || null : null)
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e))
     } finally { loadingRef.current = false }
   }, [])
 
@@ -357,9 +371,36 @@ export default function ProjectsPage() {
             <button onClick={() => setSelectedRun(null)} className="w-full px-3 py-2 rounded-lg text-[13px] font-semibold border cursor-pointer transition-all text-accent bg-accent/10 border-accent/30 hover:bg-accent/20"><Plus className="lucide-inline" /> {i18nT('pages.projectsPage.new_task')}</button>
           </div>
           <div className="flex-1 min-h-0 overflow-y-auto p-3">
-            {runs.length > 0
-              ? projectList
-              : <div className="text-[12px] text-muted px-1">{i18nT('pages.projectsPage.no_runs_yet')}</div>}
+            {/* A background poll failure AFTER at least one successful load —
+                distinct from the full "couldn't load" EmptyState below, which
+                only covers the case where nothing has loaded yet. Matches
+                PrDetail.tsx's `activityStale` treatment: keep showing the
+                last-known-good list, but say so rather than failing silently. */}
+            {loadError && data !== null && (
+              <div className="mb-2 px-1 text-[12px] text-warn">
+                {i18nT('pages.projectsPage.showing_the_last_successful_load', { error: loadError })}
+              </div>
+            )}
+            {data === null ? (
+              loadError ? (
+                <EmptyState
+                  icon={<AlertTriangle className="lucide-inline" aria-hidden="true" />}
+                  title={i18nT('pages.projectsPage.couldnt_load_runs')}
+                  subtitle={i18nT('pages.projectsPage.check_your_connection_and_try_again')}
+                  testId="projects-rail-error"
+                />
+              ) : (
+                <ProjectRailSkeleton />
+              )
+            ) : runs.length > 0 ? (
+              projectList
+            ) : (
+              <EmptyState
+                icon={<ClipboardList className="lucide-inline" aria-hidden="true" />}
+                title={i18nT('pages.projectsPage.no_runs_yet')}
+                testId="projects-rail-empty"
+              />
+            )}
           </div>
         </aside>
       )}
@@ -411,7 +452,7 @@ export default function ProjectsPage() {
                 <button className="px-3 h-8 rounded-md border border-border text-muted text-[13px] cursor-pointer hover:text-danger hover:border-danger transition-all" onClick={async () => { await api.deleteTaskRun(selectedRun.task_id); setSelectedRun(null); load() }}><X className="lucide-inline" /> {i18nT('pages.projectsPage.discard')}</button>
               </>}
               {selectedRun.status === 'planning' && <button className="px-3 h-8 rounded-md border border-border text-muted text-[13px] cursor-pointer hover:text-danger hover:border-danger transition-all" onClick={async () => { await api.cancelPlan(); setSelectedRun(null) }}><X className="lucide-inline" /> {i18nT('pages.projectsPage.cancel')}</button>}
-              {selectedRun.running && <button className="px-3 h-8 rounded-md border border-border text-muted text-[13px] cursor-pointer hover:text-warning hover:border-warning transition-all" onClick={async () => { await api.pauseTaskRun(selectedRun.task_id); load() }}><Pause className="lucide-inline" /> {i18nT('pages.projectsPage.pause')}</button>}
+              {selectedRun.running && <button className="px-3 h-8 rounded-md border border-border text-muted text-[13px] cursor-pointer hover:text-warn hover:border-warn transition-all" onClick={async () => { await api.pauseTaskRun(selectedRun.task_id); load() }}><Pause className="lucide-inline" /> {i18nT('pages.projectsPage.pause')}</button>}
               {selectedRun.running && <button className="px-3 h-8 rounded-md border border-border text-muted text-[13px] cursor-pointer hover:text-danger hover:border-danger transition-all" onClick={async () => { await api.cancelTaskRunner(selectedRun.task_id); load() }}><Square className="lucide-inline" /> {i18nT('pages.projectsPage.cancel')}</button>}
               {!selectedRun.running && selectedRun.status !== 'planned' && selectedRun.status !== 'planning' && <>
                 {selectedRun.status === 'paused' && (
@@ -449,6 +490,27 @@ export default function ProjectsPage() {
           </div>
         )}
       </main>
+    </div>
+  )
+}
+
+/** Loading placeholder for the run rail, shaped like `projectList`'s own rows
+ * (status glyph, two-line label, progress bar) so the rail doesn't jump size
+ * once the real list replaces it. Shown only for the INITIAL fetch — a
+ * background poll refresh never re-shows this once a run list has loaded. */
+function ProjectRailSkeleton() {
+  return (
+    <div className="flex flex-col gap-1.5" aria-hidden="true">
+      {[0, 1, 2].map(i => (
+        <div key={i} className="flex items-center gap-2 px-3 py-2">
+          <Skeleton className="h-3.5 w-3.5 rounded shrink-0" />
+          <div className="flex-1 min-w-0 space-y-1.5">
+            <Skeleton className="h-3 w-3/4" />
+            <Skeleton className="h-2.5 w-1/2" />
+          </div>
+          <Skeleton className="w-10 h-1 rounded-full shrink-0" />
+        </div>
+      ))}
     </div>
   )
 }

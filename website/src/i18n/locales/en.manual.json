@@ -2375,6 +2375,8 @@
       "all_kinds": "all kinds",
       "app_preview": "App preview: {{slug}}",
       "compact_table": "Compact table",
+      "could_not_load_artifacts": "Couldn't load artifacts",
+      "could_not_load_artifacts_hint": "Something went wrong fetching your library. Check your connection and try again.",
       "deploying": "Deploying…",
       "expired": "Expired",
       "filter_artifacts": "Filter {{provider}} artifacts…",
@@ -2397,6 +2399,8 @@
       "published_sync_issue": "Published (sync issue)",
       "remove_artifact_confirm": "Remove artifact \"{{slug}}\" from your library?\n\nThis deletes the artifact entry and its version history. If this artifact came from a file on disk or a chat widget, the original is NOT touched — you can re-add it later.",
       "remove_star_from_artifact": "Remove star from artifact",
+      "retry": "Retry",
+      "retrying": "Retrying…",
       "star_artifact": "Star artifact",
       "starred_click_to_unstar": "Starred — click to unstar",
       "start_a_new_blank_document_in_the_library": "Start a new blank document in the library",
@@ -2626,6 +2630,7 @@
       "fork_failed_error": "Fork failed: {{error}}",
       "hide_sessions": "Hide sessions",
       "hide_sessions_sidebar": "Hide sessions sidebar",
+      "knowledge_context_not_kept_re_pick_before_resend": "Its knowledge context was not kept — re-pick it before you resend.",
       "knowledge_item_one": "{{count}} knowledge item",
       "knowledge_item_other": "{{count}} knowledge items",
       "message_queued_until_session_ready": "{{error}}. Your message is queued and will be sent when a session is ready — but it is held in this tab only, so if you navigate away or reload you will need to retype it.",
@@ -2640,6 +2645,7 @@
       "session_not_found": "Session \"{{name}}\" not found",
       "show_sessions": "Show sessions",
       "show_sessions_sidebar": "Show sessions sidebar",
+      "the_server_did_not_respond": "The server did not respond",
       "this_session_has_no_project_directory_to_branch": "This session has no project directory to branch from.",
       "too_many_files_max_20": "Too many files (max 20)",
       "tool_search_deferred": "Tool Search · Deferred",
@@ -3172,13 +3178,16 @@
       "task_is_waiting_for_your_decision": "Task {{index}} \"{{title}}\" is waiting for your decision"
     },
     "projectsPage": {
+      "check_your_connection_and_try_again": "Check your connection and try again.",
+      "couldnt_load_runs": "Couldn't load runs",
       "default_workspace_folder": "Default workspace folder",
       "delete": "Delete",
       "failed_to_generate_plan": "Failed to generate plan",
       "open_project": "Open project {{name}}",
       "planning_request_failed": "Planning request failed",
       "planning_timed_out_try_again": "Planning timed out. Try again.",
-      "project": "Project"
+      "project": "Project",
+      "showing_the_last_successful_load": "Showing the last successful load — refresh failed: {{error}}"
     },
     "remoteArtifactDetailPage": {
       "fork_failed": "Fork failed",
