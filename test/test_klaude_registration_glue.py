@@ -14,7 +14,6 @@ import json
 
 import pytest
 
-from kiro_crew.acp.types import ACP_BACKEND_CLAUDE
 from kiro_crew.klaude.mcp_servers import claude_session_servers
 from kiro_crew.klaude.registry import KlaudeProviderRegistry
 from kiro_crew.klaude.settings_seed import write_claude_local_settings

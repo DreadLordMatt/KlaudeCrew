@@ -13,8 +13,6 @@ from __future__ import annotations
 import io
 import json
 
-import pytest
-
 from kiro_crew.testing import fake_acp_backend as fake
 
 
@@ -119,7 +117,10 @@ class TestMcpServersProbe:
     def test_probe_records_received_mcp_servers(self, tmp_path, monkeypatch) -> None:
         probe = tmp_path / "mcp_probe.json"
         monkeypatch.setenv("FAKE_ACP_MCP_PROBE_PATH", str(probe))
-        buf = _capture(monkeypatch)
+        # _capture is called for its monkeypatch side effect only (redirect
+        # fake.sys.stdout) -- this test asserts against the probe file, not
+        # captured stdout.
+        _ = _capture(monkeypatch)
         servers = [
             {"name": "kirocrew-core", "type": "stdio", "command": "kirocrew", "args": ["mcp-core"]},
             {"name": "remote", "type": "http", "url": "https://example.com/mcp"},
@@ -154,7 +155,10 @@ class TestMcpServersProbe:
     def test_missing_mcp_servers_key_records_null(self, tmp_path, monkeypatch) -> None:
         probe = tmp_path / "mcp_probe.json"
         monkeypatch.setenv("FAKE_ACP_MCP_PROBE_PATH", str(probe))
-        buf = _capture(monkeypatch)
+        # _capture is called for its monkeypatch side effect only (redirect
+        # fake.sys.stdout) -- this test asserts against the probe file, not
+        # captured stdout.
+        _ = _capture(monkeypatch)
         fake._handle({"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {}})
         assert json.loads(probe.read_text()) is None
 
