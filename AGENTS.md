@@ -55,6 +55,14 @@ same protocol.
   with an upstream merge. When resolving a conflict in a `fork:` commit's
   hunk, re-apply the fork's change on top of upstream's — do not silently
   drop it back to dormant.
+- **Branch model:** `klaude` is the integration branch (GitHub default,
+  production tracks it) and takes fork work via PR; `main` is a
+  fast-forward-only mirror of `upstream/main` and never carries fork commits —
+  sync `klaude` from an `upstream/release/*` tag by merge (`git merge --no-ff`),
+  not rebase, since production and the in-app updater depend on `klaude`
+  fast-forwarding. `scripts/klaude-upstream-check.sh` reports the current
+  conflict set without applying anything; `CLAUDE.md § 6` has the full
+  drift note.
 
 Full design + rationale: see the "Other providers" note under "Never
 re-introduce" below, `docs/system-specs/modules/acp-client.md` §Backend
@@ -116,7 +124,7 @@ This repo is the de-Amazoned public fork of an internal package. Never re-add:
   fixed to `acp`, kiro-cli required, the `ACP_BACKEND_CLAUDE`/`_is_claude` seam
   in `acp/client.py` deliberately dormant). **This fork inverts that policy —
   see "This fork: Claude Code is the default ACP backend" below.** Do not
-  revert the registration glue to dormant when rebasing on upstream; re-apply
+  revert the registration glue to dormant when syncing from upstream; re-apply
   the fork's `klaude/` package and its `fork:`-prefixed core-file hunks
   instead (`config/loader.py`'s `_acp()` closure, `platform/bootstrap.py`'s
   registry swap, `acp/client.py`'s resume-guard hook, `providers/acp.py`'s
@@ -208,7 +216,9 @@ Never hardcode a model id (`claude-*`, `opus*`, `sonnet*`, `haiku*`, `gpt-*`,
 - Do NOT proactively `git commit`. Commit only when asked.
 - Do NOT `git push` unless the user explicitly says to push. Being asked to commit
   is NOT permission to push.
-- `main` is the default branch; changes land through a GitHub PR. Full flow:
+- `klaude` is the default branch (the fork's integration branch); changes land
+  through a GitHub PR into it. `main` is a fast-forward-only mirror of
+  `upstream/main` — never a PR target. Full flow:
   [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```
@@ -264,7 +274,7 @@ fail on 3.12 and pass on 3.10 at the same commit.
 | Constants | No hardcoded strings or values in business logic; every limit has an owning module. Index: [code-style](docs/system-specs/common/code-style.md) |
 | Comments | Explain **behavior and rationale (the why)**: invariants, edge cases, units, non-obvious constraints. NOT a task log: no PR/CR numbers, review-round markers, incident dates, milestone tags, or commit SHAs. No "previously/used to/we now" narration, state current behavior in present tense. Don't restate what the code plainly does. `_vendor/` and pragmas are exempt. |
 | Icons | **Never use emojis in the UI.** Use `lucide-react` with `className="lucide-inline"`. |
-| Product name | The product is **Kiro Crew**: two words, a space, capital `K`. Identifiers keep the spelling their own system gave them (the `kirodotdev/KiroCrew` repo slug, `KiroCrew.dmg` artifacts, the `KiroCrew Nightly` OS identifier, the `kirocrew` CLI, `KIROCREW_*` env vars, `kiro_crew` imports). CI-gates the lines a change adds; run `BRAND_BASE_REF=origin/main python3 scripts/check_brand_name.py` before pushing. |
+| Product name | The product is **Kiro Crew**: two words, a space, capital `K`. Identifiers keep the spelling their own system gave them (the `kirodotdev/KiroCrew` repo slug, `KiroCrew.dmg` artifacts, the `KiroCrew Nightly` OS identifier, the `kirocrew` CLI, `KIROCREW_*` env vars, `kiro_crew` imports). CI-gates the lines a change adds; run `BRAND_BASE_REF=origin/klaude python3 scripts/check_brand_name.py` before pushing. |
 | User-facing strings | The dashboard is translated into 12 languages. **Never hardcode a user-facing English string, and never format a date, number, or sort order without naming a locale.** Both are CI-gated. Backend-owned strings have no catalog path yet, so a new non-2xx JSON body MUST carry a machine-readable `code` field. |
 
 ## Cross-platform: route POSIX calls through `platform_compat`

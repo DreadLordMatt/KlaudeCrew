@@ -36,18 +36,21 @@ tell you in a paragraph.
 ## Prerequisites
 
 - macOS or Linux (Windows is not supported by the `kiro-cli` backend)
-- Python ≥ 3.9
+- Python ≥ 3.10
 - Node.js ≥ 22 (24 LTS recommended) and npm (for the frontend)
-- The `kiro-cli` agent on your `PATH`, logged in (`kiro-cli login`) — it is the
-  only LLM backend (`agent.provider = acp`)
+- An ACP agent backend on your `PATH` (`agent.provider = acp` either way):
+  **Claude Code** (`claude` + `claude-agent-acp`, logged in via `claude login`)
+  is this fork's default (`agent.acp_backend = "claude"`); `kiro-cli` (logged
+  in via `kiro-cli login`) is fully supported as the opt-out
+  (`agent.acp_backend: "kiro"`)
 - [Ollama](https://ollama.com) for memory and knowledge-library embeddings
 
 ## First-Time Setup
 
 ```bash
 # 1. Fork the repo on GitHub, then clone your fork
-git clone https://github.com/kirodotdev/KiroCrew.git
-cd kirocrew
+git clone https://github.com/DreadLordMatt/KlaudeCrew.git
+cd KlaudeCrew
 
 # 2. Build the frontend and bundle it into the package
 cd website
@@ -168,6 +171,105 @@ KIROCREW_HOME=.kirocrew-dev KIROCREW_PORT=6777 kirocrew token
 - The frontend hot-reloads automatically — no rebuild for `.tsx`/`.ts`/`.css` changes
 - Always access via `localhost:3000` (Vite) during frontend dev, not `localhost:6777` directly
 - If the backend restarts, you may need a new token (sessions expire with the process)
+
+## Fork Branch Model & Upstream Sync
+
+KlaudeCrew is a fork of [kirodotdev/KiroCrew](https://github.com/kirodotdev/KiroCrew).
+Two branches, two jobs:
+
+- **`klaude`** is the integration branch: the GitHub default branch, the PR
+  target for all fork work, and what a production instance
+  (`kirocrew update`, `scripts/klaude-prod-update.sh`) tracks. Never push to
+  it directly — it lands via squash-merge PR only.
+- **`main`** is a fast-forward-only mirror of `upstream/main`. It carries no
+  fork commits and is never a PR target; it exists so GitHub's own "Sync
+  fork" button (and `git fetch upstream && git push origin upstream/main:main`)
+  has somewhere harmless to land.
+
+Feature branches (`feat/<issue>-<slug>`, `fix/<issue>-<slug>`) fork from and
+PR into `klaude`, exactly as described in
+[`kirocrew-worktree-dev`](src/kiro_crew/builtin_skills/kirocrew-dev/kirocrew-worktree-dev/SKILL.md).
+
+**Pulling in a new upstream release** is its own planned task, not something
+to fold into feature work — upstream ships its own (incompatible) ACP-backend
+selection semantics, so a naive merge can silently revert the fork's default
+backend back to kiro-cli (see `CLAUDE.md § 6`, "Upstream drift"). Before
+starting one:
+
+```bash
+git fetch upstream
+scripts/klaude-upstream-check.sh                       # newest upstream/release/* by default
+scripts/klaude-upstream-check.sh upstream/main          # or a specific ref
+```
+
+This is read-only — it reports the conflict set (`git merge-tree`, grouped by
+area) and flags the known trap seams, without changing anything. The sync
+itself is a merge into `klaude` (`git merge --no-ff upstream/release/x.y.z`),
+never a rebase: production and every in-flight feature branch depend on
+`klaude` only ever fast-forwarding.
+
+## Production Deployment (Homelab / Headless Linux)
+
+A from-source checkout on a Linux host — an LXC container, a VM, bare metal —
+kept up to date from `klaude` and run as a systemd service:
+
+```bash
+# 1. Toolchain (Debian/Ubuntu shown; see minimal_install.sh for other distros)
+sudo apt-get install -y git curl build-essential python3 python3-venv python3-pip
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs
+
+# 2. Code
+git clone -b klaude git@github.com:DreadLordMatt/KlaudeCrew.git ~/klaudecrew
+cd ~/klaudecrew
+bash minimal_install.sh          # frontend build, .venv, claude-agent-acp, ~/.local/bin/kirocrew
+
+# 3. Claude Code auth (headless: `claude login` prints a URL to finish in any browser)
+curl -fsSL https://claude.ai/install.sh | bash
+CLAUDE_CONFIG_DIR="$HOME/.kiro/crew/cc-config" claude login
+CLAUDE_CONFIG_DIR="$HOME/.kiro/crew/cc-config" claude auth status   # must report logged in
+# If the isolated config dir won't authenticate on your platform, fall back
+# to KIROCREW_CC_ISOLATE=0 in /etc/kirocrew/kirocrew.env and `claude login`
+# without CLAUDE_CONFIG_DIR (this shares ~/.claude with the adapter instead
+# of isolating it — see issue #13).
+
+# 4. First-run config
+kirocrew setup --agent-only
+python3 -c 'import kiro_crew.sandbox as sb; sb.reset_backend(); print(sb.detect_backend(), sb._last_unshare_failure)'
+# If no sandbox backend is available (common on an unprivileged LXC where
+# unshare() is denied by the container's seccomp filter), the agent fails
+# CLOSED by default. Opt in to running without OS-level isolation instead:
+#   kirocrew config set agent.sandbox off
+#   kirocrew config set agent.sandbox_allow_no_isolation true
+
+# 5. Service (root-owned system unit; KIROCREW_PORT is baked in at install time)
+KIROCREW_PORT=5476 kirocrew service install
+systemctl status kirocrew --no-pager
+sudo loginctl enable-linger "$USER"      # only needed for `kirocrew pod`
+
+# 6. Remote access (Tailscale shown — see docs/guides/remote-and-mobile.md
+#    for a reverse-proxy alternative). A restart is required after publishing
+#    so the gateway picks up the trusted MagicDNS origin.
+kirocrew config set dashboard.tailscale.enabled true
+sudo tailscale set --operator="$USER"
+kirocrew tailnet up
+kirocrew restart
+kirocrew token                            # presigned dashboard URL, valid 20h
+```
+
+**Updating production** after a PR merges into `klaude`:
+
+```bash
+ssh <host> ~/klaudecrew/scripts/klaude-prod-update.sh --check   # anything new?
+ssh <host> ~/klaudecrew/scripts/klaude-prod-update.sh           # pull, rebuild, restart
+```
+
+The script refuses on a dirty working tree — production never carries local
+edits. To develop *on* the same host (dogfooding), use a separate git
+worktree per the `kirocrew-worktree-dev` skill, or `kirocrew pod up <name>`
+for a fully isolated disposable gateway per branch; never edit the live
+checkout in place. Settings changes only apply over a direct (non-tunnelled)
+connection — SSH in and use `kirocrew config set` rather than the dashboard
+when reached over Tailscale/a reverse proxy.
 
 ## Releasing New Versions
 
@@ -415,10 +517,11 @@ instead of describing the steps yourself.
 ## Pull Request Workflow
 
 1. **Fork** the repository on GitHub.
-2. **Branch** from `main`:
+2. **Branch** from `klaude` (the fork's integration branch — see "Fork Branch
+   Model & Upstream Sync" above; not `main`, which mirrors upstream):
    ```bash
    git fetch origin
-   git checkout -b feat/my-feature origin/main
+   git checkout -b feat/my-feature origin/klaude
    ```
 3. **Make your change** and add tests (new functions/components should be tested).
 4. **Run the checks locally** before opening a PR:
@@ -427,7 +530,7 @@ instead of describing the steps yourself.
    cd website && npm run check && cd ..     # frontend: typecheck + lint + tests
    ```
 5. **Commit** using [Conventional Commits](https://www.conventionalcommits.org/)
-   (see below), push to your fork, and open a **Pull Request against `main`**.
+   (see below), push to your fork, and open a **Pull Request against `klaude`**.
 6. A maintainer will review. Address feedback by pushing additional commits to
    your branch.
 

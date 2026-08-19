@@ -33,12 +33,12 @@ waste hours.
   worktree is live at a time. Be deliberate about migrations, and switch back
   to the clean baseline when done.
 
-## Rule 1 — Create a worktree off `main`
+## Rule 1 — Create a worktree off `klaude`
 
 ```bash
-# From your main KiroCrew clone:
-git fetch origin main
-git worktree add ../kirocrew-wt-<name> -b feat/<name> origin/main
+# From your main KlaudeCrew clone:
+git fetch origin klaude
+git worktree add ../kirocrew-wt-<name> -b feat/<name> origin/klaude
 cd ../kirocrew-wt-<name>
 ```
 
@@ -100,10 +100,10 @@ one) — read `.github/workflows/ci.yml`, which is what actually gates the PR.
 
 **Triaging failures: blame your change last, but verify.** Some hosts carry
 environment-specific failures (permissions, missing optional binaries) that are
-unrelated to any change. If a test fails, re-run it on a clean `origin/main`
+unrelated to any change. If a test fails, re-run it on a clean `origin/klaude`
 checkout — if it fails there too, it's pre-existing and can be noted rather
 than fixed; if it only fails on your branch, it's yours. Never label a failure
-"known flaky" without that main-vs-branch comparison.
+"known flaky" without that integration-branch-vs-feature-branch comparison.
 
 **A confirmed flake is a bug with a root cause, not noise to retry.** Do NOT add a
 rerun, lengthen a `sleep`, or relax an assertion. Read
@@ -121,7 +121,7 @@ xargs -P 10 -I{} sh -c 'gh run view {} --log-failed 2>/dev/null \
   < /tmp/ids | sort | uniq -c | sort -rn | head -30
 ```
 
-Rank by that frequency, and check each candidate against `origin/main` before fixing:
+Rank by that frequency, and check each candidate against `origin/klaude` before fixing:
 a ratchet/contract test failing on feature branches is a TRUE POSITIVE, not a flake.
 The Windows shards fail far more than Linux, so expect timer-granularity and
 process-semantics causes there.
@@ -273,12 +273,14 @@ When the user asks for a PR:
 git add <specific files>     # stage only the files this change touches, never blanket -A
 git commit -m "feat: <description>"
 git push origin feat/<name>
-gh pr create --base main --title "feat: <description>" --body "<details>"
+gh pr create --base klaude --title "feat: <description>" --body "<details>"
 ```
 
-- PRs target `main`.
+- PRs target `klaude`, the fork's integration branch — never `main` (a
+  fast-forward-only mirror of upstream) and never pushed to directly (see
+  `AGENTS.md § This fork`).
 - **One commit per PR.** CI enforces single-commit hygiene. Squash before
-  opening (`git rebase -i origin/main` or `git reset --soft origin/main` +
+  opening (`git rebase -i origin/klaude` or `git reset --soft origin/klaude` +
   one commit), and fold review-round fixes in with `git commit --amend` +
   `git push --force-with-lease origin feat/<name>` rather than stacking commits.
 - **Push as a standalone command.** Prefer running `git push` (including
@@ -393,8 +395,8 @@ the system does, not a changelog of how it got there.
 - Multi-commit branches → PR Hygiene check fails; squash first (Rule 7).
 - Committing or pushing without an explicit user request → violates the repo's
   agent safety convention (Rule 7).
-- Pushing directly to `main` → breaks CI for everyone; always use a feature
-  branch + PR.
+- Pushing directly to `klaude` (or `main`) → bypasses review / breaks CI for
+  everyone; always use a feature branch + PR.
 - Scratch files (PR bodies, log dumps) written into the worktree, or a tracked
   baseline a test rewrote and never restored → `git status` is dirty → Dev
   Fleet "Prune merged" fail-closes (`merged_dirty`) and merged worktrees pile

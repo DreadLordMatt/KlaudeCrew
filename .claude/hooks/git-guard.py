@@ -9,8 +9,8 @@ defeat it. It cannot see through arbitrary interpreters (`python -c`, `$GIT`),
 which is why CLAUDE.md § 3 also makes "route around the guard" a stop point.
 
   ALLOWED  git push [-u|--set-upstream] [-q|-v|-n|--dry-run|--no-verify]
-             origin <feature-branch>          (plain, non-force, non-main)
-  BLOCKED  push to any other remote, to main/master/HEAD, force/lease/`+`,
+             origin <feature-branch>          (plain, non-force, non-integration)
+  BLOCKED  push to any other remote, to main/master/HEAD/klaude, force/lease/`+`,
            deletes, --all/--mirror/--tags, quoted/expanded/refs/heads refspecs;
            reset --hard/--merge/--keep, clean with force, branch -D/-f,
            checkout/restore of a whole tree or directory, stash drop/clear,
@@ -26,6 +26,12 @@ which is why CLAUDE.md § 3 also makes "route around the guard" a stop point.
 
 Why main/upstream are special: local `main` TRACKS upstream/main
 (kirodotdev/KiroCrew); a bare `git push` from main targets the upstream project.
+
+Why `klaude` is also protected: it is the fork's integration branch (GitHub
+default branch, production checks it out, the in-app updater and
+`scripts/klaude-prod-update.sh` fast-forward/pull it). It lands via squash-merge
+PR only, same as `main` -- a direct push would bypass review and could hand
+production a broken build.
 
 Exit 2 = block (stderr shown to the model). Exit 0 = allow. Fails OPEN on
 malformed input so a guard bug never bricks a session.
@@ -46,7 +52,7 @@ PUSH_OK_FLAGS = {"-u", "--set-upstream", "-q", "--quiet", "-v", "--verbose", "-n
                  "--no-verify", "--porcelain", "--progress", "--no-progress"}
 PUSH_BAD_FLAGS = {"-f", "--force", "--force-with-lease", "--force-if-includes", "--mirror", "--all",
                   "--tags", "--delete", "-d", "--prune", "--follow-tags", "--atomic"}
-FORBIDDEN_DST = {"main", "master", "HEAD"}
+FORBIDDEN_DST = {"main", "master", "HEAD", "klaude"}
 REFSPEC_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
 # Directories/files under the operator's home that no Bash call may target.
