@@ -8,6 +8,9 @@ with ``acp_backend = "kiro"``.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from kiro_crew.config.loader import KiroCrewConfig
@@ -109,6 +112,61 @@ class TestFactoryBackendSelection:
             session_key="t-model-kiro", model_override=canonical
         )
         assert provider._client._model == model_registry.to_acp_id(canonical)
+
+    @pytest.fixture
+    def _installed_kiro_default(self, tmp_path: Path, monkeypatch) -> None:
+        """Simulate a real ``kirocrew setup`` install: ``kirocrew.json`` pins a
+        kiro-native default (e.g. ``claude-opus-4.8``), the way kiro-cli itself
+        needs it. This is the file ``_resolve_agent_model()`` reads for the
+        ``agent.model: "auto"`` stock-config case -- issue #17's exact scenario.
+        """
+        d = tmp_path / "agents"
+        d.mkdir()
+        (d / "kirocrew.json").write_text(
+            json.dumps({"model": "claude-opus-4.8"}), encoding="utf-8"
+        )
+        monkeypatch.setattr("kiro_crew.config.loader.kiro_agents_dir", lambda: d)
+
+    def test_claude_stock_config_model_stays_unresolved(
+        self, _home, _installed_kiro_default, monkeypatch
+    ) -> None:
+        # Regression for #17: a stock config (agent.model left at the "auto"
+        # sentinel, claude backend, no model_override) must NOT pick up the
+        # installed kiro-cli default -- that id is never in a claude session's
+        # advertised set, so _apply_startup_model withheld it and WARNed on
+        # every single spawn. It must stay the "auto" sentinel so AcpClient's
+        # early-return path takes over instead.
+        monkeypatch.delenv("CLAUDE_CODE_USE_BEDROCK", raising=False)
+        provider = KiroCrewConfig().create_provider_factory()(session_key="t-stock-claude")
+        assert provider._client._model == "auto"
+
+    def test_kiro_stock_config_still_resolves_installed_default(
+        self, _home, _installed_kiro_default
+    ) -> None:
+        # No-regression guard: the kiro backend still needs the installed
+        # kiro-cli default resolved up front (session/set_model has no
+        # advertised-set withhold path to fall back on).
+        from kiro_crew import model_registry
+
+        cfg = KiroCrewConfig()
+        cfg.agent.acp_backend = "kiro"
+        provider = cfg.create_provider_factory()(session_key="t-stock-kiro")
+        assert provider._client._model == model_registry.to_acp_id("claude-opus-4.8")
+
+    def test_claude_stock_config_still_resolves_under_bedrock(
+        self, _home, _installed_kiro_default, monkeypatch
+    ) -> None:
+        # No-regression guard: CLAUDE_CODE_USE_BEDROCK=1 is the explicit signal
+        # the registry's Bedrock-shaped ids are correct, so the stock-config
+        # value must still resolve through the kiro column and translate via
+        # claude_code, same as before #17's fix.
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+        from kiro_crew import model_registry
+
+        provider = KiroCrewConfig().create_provider_factory()(session_key="t-stock-bedrock")
+        assert provider._client._model == model_registry.to_provider_id(
+            "claude-opus-4.8", "claude_code"
+        )
 
     def test_claude_env_carries_config_dir_isolation(self, _home, monkeypatch) -> None:
         monkeypatch.delenv("KIROCREW_CC_ISOLATE", raising=False)
