@@ -75,26 +75,20 @@ class TestModelSupportsEffort:
     def test_unsupported(self, model: str | None):
         assert not model_supports_effort(model)
 
-    def test_raw_haiku_id_never_supports_effort_even_with_registry_fold(self):
-        # The registry has no Haiku Bedrock profile, so claude-haiku-4.5 (a kiro
-        # id) is registered as a claude_code ALIAS of Sonnet 4.6 1M (the cheapest
-        # VALID Bedrock fold — passing it through verbatim would crash a CC
-        # session with -32603). But "Haiku never supports effort" is a HARD rule
-        # that must win over the registry: model_supports_effort is provider-
-        # agnostic, and a kiro/acp Haiku agent reaches it with the RAW
-        # "claude-haiku-4.5" spelling (the kiro path does NOT translate). So the
-        # raw id must report False, NOT inherit Sonnet's supports_effort flag.
+    def test_raw_haiku_id_never_supports_effort(self):
+        # Haiku 4.5 has its own distinct claude_code Bedrock entry (registry
+        # fix #23) — it no longer folds onto Sonnet 4.6 1M. "Haiku never
+        # supports effort" is a HARD rule that must win regardless: neither the
+        # raw kiro id nor its Bedrock id declares supports_effort, and the
+        # substring guard in model_supports_effort catches both either way.
         from kiro_crew import model_registry as mr
 
-        # The fold itself is unchanged — claude_code translation -> Sonnet id.
         assert mr.to_provider_id("claude-haiku-4.5", "claude_code") == (
-            "global.anthropic.claude-sonnet-4-6[1m]"
+            "global.anthropic.claude-haiku-4-5-20251001"
         )
-        # The raw kiro Haiku id is correctly effort-INCAPABLE (haiku guard wins).
+        # Neither spelling is effort-capable (haiku guard wins on both paths).
         assert model_supports_effort("claude-haiku-4.5") is False
-        # On the claude_code path the value reaching here is the FOLDED Sonnet
-        # provider id (translated at the factory boundary), which IS capable.
-        assert model_supports_effort("global.anthropic.claude-sonnet-4-6[1m]") is True
+        assert model_supports_effort("global.anthropic.claude-haiku-4-5-20251001") is False
         # A model the registry does NOT list still uses the substring heuristic.
         assert model_supports_effort("some-haiku-thing") is False
 

@@ -57,6 +57,10 @@ _FALLBACK_PROVIDER_IDS: dict[str, str] = {
     "fable": "global.anthropic.claude-fable-5[1m]",
     "fable-5": "global.anthropic.claude-fable-5[1m]",
     "claude-fable-5": "global.anthropic.claude-fable-5[1m]",
+    "opus-5": "global.anthropic.claude-opus-5",
+    "claude-opus-5": "global.anthropic.claude-opus-5",
+    "sonnet-5": "global.anthropic.claude-sonnet-5",
+    "claude-sonnet-5": "global.anthropic.claude-sonnet-5",
     "opus-4.8-1m": "global.anthropic.claude-opus-4-8[1m]",
     "opus": "global.anthropic.claude-opus-4-8[1m]",
     "claude-opus-4.8": "global.anthropic.claude-opus-4-8[1m]",
@@ -78,7 +82,8 @@ _FALLBACK_PROVIDER_IDS: dict[str, str] = {
     "claude-sonnet-4.5": "global.anthropic.claude-sonnet-4-6[1m]",
     "claude-sonnet-4.5-1m": "global.anthropic.claude-sonnet-4-6[1m]",
     "claude-sonnet-4": "global.anthropic.claude-sonnet-4-6[1m]",
-    "claude-haiku-4.5": "global.anthropic.claude-sonnet-4-6[1m]",
+    "haiku-4.5": "global.anthropic.claude-haiku-4-5-20251001",
+    "claude-haiku-4.5": "global.anthropic.claude-haiku-4-5-20251001",
     "auto": "",
 }
 

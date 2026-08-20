@@ -202,12 +202,13 @@ class TestModelRegistry:
         # silently resolve to the flagship Opus 4.8 1M (a cost regression).
         flagship = "global.anthropic.claude-opus-4-8[1m]"
         sonnet = "global.anthropic.claude-sonnet-4-6[1m]"
-        # Sonnet/Haiku-class ids route to Sonnet (cheapest available), not Opus.
+        # Sonnet-class ids route to Sonnet (cheapest available), not Opus.
+        # (claude-haiku-4.5 used to fold here too, before Haiku 4.5 got its own
+        # distinct claude_code entry — see test_haiku_4_5_has_its_own_claude_code_entry.)
         for sid in (
             "claude-sonnet-4.5",
             "claude-sonnet-4.5-1m",
             "claude-sonnet-4",
-            "claude-haiku-4.5",
         ):
             assert mr.to_provider_id(sid, "claude_code") == sonnet, sid
         # Opus 4.5 routes to the 200K Opus, not the 1M flagship.
@@ -244,6 +245,48 @@ class TestModelRegistry:
     def test_fable_5_in_available_models(self):
         ids = mr.available_models("claude_code")
         assert "global.anthropic.claude-fable-5[1m]" in ids
+
+    def test_opus_5_canonical_round_trip(self):
+        # Regression for #23: Opus 5 had no canonical entry at all.
+        assert mr.to_provider_id("opus-5", "claude_code") == "global.anthropic.claude-opus-5"
+        assert (
+            mr.from_provider_id("global.anthropic.claude-opus-5", "claude_code") == "opus-5"
+        )
+        assert mr.to_provider_id("claude-opus-5", "claude_code") == "global.anthropic.claude-opus-5"
+
+    def test_opus_5_window_and_effort(self):
+        assert mr.window("opus-5") == 200_000
+        assert mr.supports_effort("opus-5") is True
+
+    def test_opus_5_in_available_models(self):
+        assert "global.anthropic.claude-opus-5" in mr.available_models("claude_code")
+
+    def test_sonnet_5_canonical_round_trip(self):
+        # Regression for #23: Sonnet 5 had no canonical entry at all.
+        assert mr.to_provider_id("sonnet-5", "claude_code") == "global.anthropic.claude-sonnet-5"
+        assert (
+            mr.from_provider_id("global.anthropic.claude-sonnet-5", "claude_code") == "sonnet-5"
+        )
+        assert (
+            mr.to_provider_id("claude-sonnet-5", "claude_code") == "global.anthropic.claude-sonnet-5"
+        )
+
+    def test_sonnet_5_window_and_effort(self):
+        assert mr.window("sonnet-5") == 200_000
+        assert mr.supports_effort("sonnet-5") is True
+
+    def test_sonnet_5_in_available_models(self):
+        assert "global.anthropic.claude-sonnet-5" in mr.available_models("claude_code")
+
+    def test_haiku_4_5_has_its_own_claude_code_entry(self):
+        # Regression for #23: haiku-4.5 had an 'acp' id but no 'claude_code' id
+        # at all, so the claude backend couldn't pick Haiku 4.5. It no longer
+        # folds onto sonnet-4.6-1m on the claude_code path either.
+        expected = "global.anthropic.claude-haiku-4-5-20251001"
+        assert mr.to_provider_id("haiku-4.5", "claude_code") == expected
+        assert mr.to_provider_id("claude-haiku-4.5", "claude_code") == expected
+        assert mr.from_provider_id(expected, "claude_code") == "haiku-4.5"
+        assert expected in mr.available_models("claude_code")
 
     def test_bare_advertised_ids_fold_to_canonical_key(self):
         # claude-agent-acp advertises BARE ids (no "global.anthropic." prefix).
@@ -339,22 +382,26 @@ class TestAcpProviderIds:
         assert mr.to_acp_id("deepseek-3.2") == "deepseek-3.2"
 
     def test_distinct_kiro_aliases_are_NOT_downgraded(self):
-        # REGRESSION GUARD: claude-haiku-4.5 / claude-sonnet-4.5 / claude-sonnet-4
-        # are registry ALIASES of sonnet-4.6-1m (added only to fold
-        # claude-agent-acp's advertised ids for dropdown dedup), and
-        # claude-opus-4.6 is an alias of opus-4.8-1m. But kiro-cli serves each as
-        # a DISTINCT real model. to_acp_id (unlike to_provider_id) must pass these
-        # through unchanged — otherwise the Haiku-pinned kirocrew-knowledge agent
-        # (and mcp_core subagents) silently run on Sonnet.
+        # REGRESSION GUARD: claude-sonnet-4.5 / claude-sonnet-4 are registry
+        # ALIASES of sonnet-4.6-1m (added only to fold claude-agent-acp's
+        # advertised ids for dropdown dedup), and claude-opus-4.6 is an alias
+        # of opus-4.8-1m. But kiro-cli serves each as a DISTINCT real model.
+        # to_acp_id (unlike to_provider_id) must pass these through unchanged.
         assert mr.to_acp_id("claude-haiku-4.5") == "claude-haiku-4.5"
         assert mr.to_acp_id("claude-sonnet-4.5") == "claude-sonnet-4.5"
         assert mr.to_acp_id("claude-sonnet-4") == "claude-sonnet-4"
         assert mr.to_acp_id("claude-opus-4.6") == "claude-opus-4.6"
-        # Contrast: to_provider_id DOES downgrade them on the claude_code path
-        # (the claude backend has no Haiku), which is why the acp path needs its
-        # own alias-blind translator.
-        assert mr.to_provider_id("claude-haiku-4.5", "claude_code") == (
+        # Contrast: to_provider_id DOES downgrade sonnet-4.5/-4 on the
+        # claude_code path (the claude backend has no distinct model for
+        # them), which is why the acp path needs its own alias-blind
+        # translator. claude-haiku-4.5 used to downgrade here too, before
+        # Haiku 4.5 got its own distinct claude_code entry (#23) — it now
+        # resolves to itself instead of folding onto Sonnet.
+        assert mr.to_provider_id("claude-sonnet-4.5", "claude_code") == (
             "global.anthropic.claude-sonnet-4-6[1m]"
+        )
+        assert mr.to_provider_id("claude-haiku-4.5", "claude_code") == (
+            "global.anthropic.claude-haiku-4-5-20251001"
         )
 
     def test_kiro_id_folds_to_canonical_key(self):
@@ -364,15 +411,17 @@ class TestAcpProviderIds:
         assert mr.from_provider_id("claude-sonnet-4.6", "acp") == "sonnet-4.6-1m"
 
     def test_distinct_kiro_models_have_own_canonical_on_acp(self):
-        # REGRESSION (adversarial review): haiku-4.5 / sonnet-4.5 / sonnet-4 /
-        # opus-4.6 are DISTINCT kiro models but claude_code ALIASES of a 1M
-        # canonical. On the acp path each must resolve to its OWN canonical (so
+        # REGRESSION (adversarial review): sonnet-4.5 / sonnet-4 / opus-4.6 are
+        # DISTINCT kiro models but claude_code ALIASES of a 1M canonical (they
+        # fold there for claude-agent-acp dropdown dedup/downgrade). haiku-4.5
+        # used to be the same shape but now has its own distinct claude_code
+        # entry too (#23), so its claude_code column resolves to itself, not a
+        # fold. On the acp path each must resolve to its OWN canonical (so
         # /api/models keeps them as separate pickable rows and _normalize_model
-        # stores them distinctly) with its REAL window — while the claude_code
-        # index still folds them for claude-agent-acp dropdown dedup/downgrade.
+        # stores them distinctly) with its REAL window.
         cases = {
-            # kiro id            acp canonical    window   cc fold (downgrade)
-            "claude-haiku-4.5":  ("haiku-4.5",    200_000, "sonnet-4.6-1m"),
+            # kiro id            acp canonical    window   cc resolution
+            "claude-haiku-4.5":  ("haiku-4.5",    200_000, "haiku-4.5"),
             "claude-sonnet-4.5": ("sonnet-4.5",   200_000, "sonnet-4.6-1m"),
             "claude-sonnet-4":   ("sonnet-4",     200_000, "sonnet-4.6-1m"),
             "claude-opus-4.6":   ("opus-4.6-1m", 1_000_000, "opus-4.8-1m"),

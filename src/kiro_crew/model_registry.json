@@ -8,6 +8,22 @@
     "aliases": ["fable", "fable-5", "claude-fable-5"],
     "providers": { "claude_code": "global.anthropic.claude-fable-5[1m]", "acp": "claude-fable-5" }
   },
+  "opus-5": {
+    "display": "Opus 5 (200K)",
+    "description": "Most capable, 200K context",
+    "window": 200000,
+    "supports_effort": true,
+    "aliases": ["claude-opus-5"],
+    "providers": { "claude_code": "global.anthropic.claude-opus-5" }
+  },
+  "sonnet-5": {
+    "display": "Sonnet 5 (200K)",
+    "description": "Best for everyday tasks, 200K context",
+    "window": 200000,
+    "supports_effort": true,
+    "aliases": ["claude-sonnet-5"],
+    "providers": { "claude_code": "global.anthropic.claude-sonnet-5" }
+  },
   "opus-4.6-1m": {
     "display": "Opus 4.6 (1M context)",
     "description": "Highly capable, 1M context",
@@ -62,14 +78,14 @@
     "description": "Fastest, cheapest, 200K context",
     "window": 200000,
     "aliases": ["claude-haiku-4.5"],
-    "providers": { "acp": "claude-haiku-4.5" }
+    "providers": { "claude_code": "global.anthropic.claude-haiku-4-5-20251001", "acp": "claude-haiku-4.5" }
   },
   "sonnet-4.6-1m": {
     "display": "Sonnet 4.6 (1M context)",
     "description": "Best for everyday tasks, 1M context",
     "window": 1000000,
     "supports_effort": true,
-    "_comment_aliases": "claude-sonnet-4.5/-4/haiku-4.5 stay listed as claude_code aliases ONLY so claude-agent-acp (which lacks those distinct models) still folds them onto Sonnet 4.6 for dropdown dedup + graceful downgrade. On the 'acp' (kiro) path they are DISTINCT real models with their own canonical entries above (haiku-4.5/sonnet-4.5/sonnet-4, 200K) — declared first so the per-provider acp index maps each kiro id to itself, not to this 1M canonical. See from_provider_id / _registry_window (provider-aware).",
+    "_comment_aliases": "claude-sonnet-4.5/-4 stay listed as claude_code aliases ONLY so claude-agent-acp (which lacks those distinct models) still folds them onto Sonnet 4.6 for dropdown dedup + graceful downgrade. On the 'acp' (kiro) path they are DISTINCT real models with their own canonical entries above (haiku-4.5/sonnet-4.5/sonnet-4, 200K) — declared first so the per-provider acp index maps each kiro id to itself, not to this 1M canonical. See from_provider_id / _registry_window (provider-aware). Haiku 4.5 now has its own distinct claude_code entry above and no longer folds here.",
     "aliases": [
       "sonnet",
       "claude-sonnet-4.6",
@@ -77,8 +93,7 @@
       "claude-sonnet-4-6[1m]",
       "claude-sonnet-4.5",
       "claude-sonnet-4.5-1m",
-      "claude-sonnet-4",
-      "claude-haiku-4.5"
+      "claude-sonnet-4"
     ],
     "providers": { "claude_code": "global.anthropic.claude-sonnet-4-6[1m]", "acp": "claude-sonnet-4.6" }
   },

@@ -73,14 +73,12 @@ def model_supports_effort(model: str | None) -> bool:
         return False
     m = model.lower()
     # Haiku NEVER supports effort — a hard rule that must win even over the
-    # registry. On the acp path a kiro Haiku id (``claude-haiku-4.5``) has its
-    # own canonical entry (``haiku-4.5``) with no ``supports_effort`` flag; on
-    # the claude_code path it is an ALIAS of Sonnet-4.6 (the cheapest valid fold,
-    # which IS effort-capable) — but that fold happens at the translation
-    # boundary (config.loader factory), so the value reaching here is the Sonnet
-    # provider id (no "haiku" substring) and stays capable. Only the raw kiro
-    # spelling — which the kiro/acp path passes untranslated — is gated here, so
-    # a kiro Haiku agent can never wrongly report effort-capable.
+    # registry. Both the acp id (``claude-haiku-4.5``) and its claude_code
+    # Bedrock id (``global.anthropic.claude-haiku-4-5-20251001``) have their
+    # own canonical entry (``haiku-4.5``) with no ``supports_effort`` flag, so
+    # the registry lookup below would already say False — this substring check
+    # is belt-and-suspenders against a future registry entry mistakenly
+    # setting the flag, since Haiku genuinely never supports it on any path.
     if "haiku" in m:
         return False
     try:
