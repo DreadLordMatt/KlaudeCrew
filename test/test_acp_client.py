@@ -7599,6 +7599,30 @@ class TestFormatAcpError:
         assert "transient error" not in out.lower()
         assert "kiro-cli login" in out.lower()
 
+    def test_session_expired_claude_backend_names_claude_login(self):
+        """Regression for #14: a claude-backend session expiry must not tell
+        the user to run kiro-cli, a tool they may not have installed."""
+        err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": "DispatchFailure: session expired",
+        }
+        out = _format_acp_error(err, is_claude=True)
+        assert "kiro-cli" not in out.lower()
+        assert "claude login" in out.lower()
+        assert "session has expired" in out.lower() or "session expired" in out.lower()
+
+    def test_session_expired_defaults_to_kiro_login(self):
+        """is_claude defaults False — the kiro path's wording is unchanged."""
+        err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": "DispatchFailure: session expired",
+        }
+        out = _format_acp_error(err)
+        assert "kiro-cli login" in out.lower()
+        assert "claude login" not in out.lower()
+
 
 class TestIsTransientRawError:
     """_is_transient_raw_error classifies retryability from the RAW JSON-RPC
@@ -7777,6 +7801,23 @@ class TestIsTransientRawError:
         auth_exc = auth_ei.value
         assert auth_exc.transient is False
         assert "authentication failed" in str(auth_exc).lower()
+
+    def test_raise_acp_error_forwards_is_claude_to_formatter(self):
+        """Regression for #14: is_claude must reach the raised message, not
+        just _format_acp_error's direct callers."""
+        import pytest
+
+        from kiro_crew.acp.client import AcpError, _raise_acp_error
+
+        session_expired_err = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": "DispatchFailure: session expired",
+        }
+        with pytest.raises(AcpError) as ei:
+            _raise_acp_error(session_expired_err, is_claude=True)
+        assert "claude login" in str(ei.value).lower()
+        assert "kiro-cli" not in str(ei.value).lower()
 
     def test_acp_error_default_transient_is_none(self):
         from kiro_crew.acp.client import AcpError
