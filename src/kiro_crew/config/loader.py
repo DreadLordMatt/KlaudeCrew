@@ -6103,8 +6103,24 @@ class KiroCrewConfig:
         # Anything but an explicit "kiro" opt-out drives claude-agent-acp.
         acp_backend = ACP_BACKEND_CLAUDE if self.agent.acp_backend != "kiro" else ""
 
+        # Fork (KlaudeCrew): _resolve_agent_model() substitutes the "auto"
+        # sentinel with a kiro-canonical id (e.g. "claude-opus-4.8") meant for
+        # kiro-cli's own session/set_model. On the non-Bedrock claude path that
+        # substitution is wrong -- _acp below deliberately leaves a real,
+        # explicitly-configured model UNRESOLVED for claude (see its
+        # "Translation boundary" comment) because only the session's own
+        # advertised set, captured after session/new, can resolve it; a
+        # pre-resolved kiro id sent there is never on that list, so it silently
+        # withholds and logs a WARNING on every single spawn (issue #17). Leave
+        # ``model`` as the "auto" sentinel here so it flows through unresolved,
+        # same as an explicit non-kiro pick would. The Bedrock path is
+        # unaffected -- it still resolves through the kiro column and then
+        # translates via the claude_code registry column, same as before.
+        claude_use_bedrock = os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1"
+        skip_auto_resolve = bool(acp_backend) and not claude_use_bedrock
+
         model = self.agent.model
-        if model == DEFAULT_MODEL:
+        if model == DEFAULT_MODEL and not skip_auto_resolve:
             model = self._resolve_agent_model()
 
         sandbox = self.agent.sandbox
