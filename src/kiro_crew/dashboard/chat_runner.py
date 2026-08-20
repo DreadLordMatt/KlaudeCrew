@@ -4084,9 +4084,17 @@ async def _run_chat(
                 disk_count = 0
                 if state.conversation_log:
                     disk_count = len(state.conversation_log.read_messages(history_key))
-                mem_count = sum(1 for m in slot.messages if m.get("role") in ("user", "assistant"))
+                # slot.messages already carries the in-flight message — the
+                # handler appends it (slot.append("user", ...)) before this turn
+                # starts — so exclude it from both the count and the snapshot
+                # below; otherwise a brand-new slot's first message counts itself
+                # as unflushed history and re-injects itself as its own prior turn.
+                _older_messages = slot.messages[:-1] if slot.messages else []
+                mem_count = sum(
+                    1 for m in _older_messages if m.get("role") in ("user", "assistant")
+                )
                 if mem_count > disk_count:
-                    history = _build_history_prefix(slot)
+                    history = _build_history_prefix(slot, exclude_last_n=1)
                     if history:
                         full_message = history + full_message
 
