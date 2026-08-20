@@ -36,10 +36,19 @@ that pulls aiohttp in behind it would defeat the point.
 import http.client
 import os
 import socket
+import time
 import urllib.error
 import urllib.request
 
 __all__ = ["build_loopback_opener", "loopback_urlopen"]
+
+# One retry, short backoff, ConnectionRefusedError only: mcp_gateway's backend
+# pool recycles a worker mid-request during churn (see issue #22), which can
+# refuse a connect() that lands in the gap between the old worker dying and a
+# new one accepting. The refusal happens at connect() time, before any bytes
+# are sent, so -- same proof the unix-to-TCP fallback below relies on --
+# retrying cannot double-send.
+_CONNECT_RETRY_DELAY_SECS = 0.2
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -152,23 +161,39 @@ def loopback_urlopen(
     passed even with ``ProxyHandler({})`` deleted. Constructing a few stateless
     handlers is far cheaper than the loopback round trip that follows.
 
+    A ``ConnectionRefusedError`` from the final attempt (unix and/or TCP) is
+    retried once after :data:`_CONNECT_RETRY_DELAY_SECS` -- see that constant
+    for why a refused connect is always safe to retry.
+
     Use this for the local gateway ONLY. External requests must keep the
     default opener, because they genuinely need the corporate proxy to leave
     the host.
     """
-    if unix_socket_path is not None and hasattr(socket, "AF_UNIX"):
-        sock_path = os.fspath(unix_socket_path)
-        if os.path.exists(sock_path):
-            try:
-                return _build_unix_opener(sock_path).open(req, timeout=timeout)
-            except urllib.error.HTTPError:
-                # The gateway answered (4xx/5xx) -- a real response, never a
-                # transport failure. HTTPError subclasses URLError, so this
-                # re-raise must precede the URLError arm below.
-                raise
-            except urllib.error.URLError as exc:
-                if not isinstance(exc.reason, (FileNotFoundError, ConnectionRefusedError)):
+
+    def _attempt():
+        if unix_socket_path is not None and hasattr(socket, "AF_UNIX"):
+            sock_path = os.fspath(unix_socket_path)
+            if os.path.exists(sock_path):
+                try:
+                    return _build_unix_opener(sock_path).open(req, timeout=timeout)
+                except urllib.error.HTTPError:
+                    # The gateway answered (4xx/5xx) -- a real response, never a
+                    # transport failure. HTTPError subclasses URLError, so this
+                    # re-raise must precede the URLError arm below.
                     raise
-                # Stale socket file (gateway died / restarted TCP-only):
-                # connect never delivered anything, so TCP retry is safe.
-    return build_loopback_opener().open(req, timeout=timeout)
+                except urllib.error.URLError as exc:
+                    if not isinstance(exc.reason, (FileNotFoundError, ConnectionRefusedError)):
+                        raise
+                    # Stale socket file (gateway died / restarted TCP-only):
+                    # connect never delivered anything, so TCP retry is safe.
+        return build_loopback_opener().open(req, timeout=timeout)
+
+    try:
+        return _attempt()
+    except urllib.error.HTTPError:
+        raise
+    except urllib.error.URLError as exc:
+        if not isinstance(exc.reason, ConnectionRefusedError):
+            raise
+        time.sleep(_CONNECT_RETRY_DELAY_SECS)
+        return _attempt()

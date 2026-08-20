@@ -25,7 +25,9 @@ below builds a fresh one, so neither touches that cache.
 """
 
 import http.server
+import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -90,6 +92,20 @@ def _serve(sink, redirect_to=None):
     server = http.server.HTTPServer(("127.0.0.1", 0), _make_handler(sink, redirect_to))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, server.server_address[1]
+
+
+def _free_port():
+    """Reserve a port number without leaving anything bound to it.
+
+    Used by the retry tests, which need a port that is refusing connections
+    at the moment ``loopback_urlopen`` is called and only starts accepting
+    afterwards -- mirroring a backend-pool recycle in flight.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
 
 
 def _post(url):
@@ -274,3 +290,49 @@ class TestOpenerShape:
             if isinstance(h, urllib.request.ProxyHandler) and h.proxies
         ]
         assert live == [], f"opener still carries a populated ProxyHandler: {live}"
+
+
+class TestConnectionRefusedRetry:
+    """Regression guard for issue #22.
+
+    ``mcp_gateway``'s backend pool recycles a worker mid-request during churn:
+    the old worker is gone and the replacement hasn't bound yet, so a connect
+    lands in that gap and is refused even though a listener answers moments
+    later. ``loopback_urlopen`` must absorb one such refusal rather than
+    surface it to the caller, and must still fail if nothing ever answers.
+    """
+
+    def test_retries_once_after_a_refused_connect(self, monkeypatch):
+        for key in _PROXY_ENV_KEYS:
+            monkeypatch.delenv(key, raising=False)
+        port = _free_port()
+        gateway_hits: list[dict] = []
+        started = threading.Event()
+
+        def _start_late():
+            # Nothing is listening on `port` yet, so the first connect
+            # attempt is refused synchronously. This delay just has to clear
+            # before the retry fires at _CONNECT_RETRY_DELAY_SECS.
+            time.sleep(0.05)
+            server = http.server.HTTPServer(("127.0.0.1", port), _make_handler(gateway_hits))
+            started.set()
+            server.handle_request()
+            server.server_close()
+
+        threading.Thread(target=_start_late, daemon=True).start()
+
+        with loopback_urlopen(_post(f"http://127.0.0.1:{port}/api/lessons"), timeout=5) as resp:
+            assert resp.status == 200
+
+        assert started.is_set(), "listener never started -- test setup is broken"
+        assert [h["secret"] for h in gateway_hits] == [CANARY]
+
+    def test_does_not_retry_a_permanent_refusal(self, monkeypatch):
+        """A connect that is never answered must still fail, not hang forever."""
+        for key in _PROXY_ENV_KEYS:
+            monkeypatch.delenv(key, raising=False)
+        port = _free_port()
+
+        with pytest.raises(urllib.error.URLError) as excinfo:
+            loopback_urlopen(_post(f"http://127.0.0.1:{port}/api/lessons"), timeout=5)
+        assert isinstance(excinfo.value.reason, ConnectionRefusedError)
