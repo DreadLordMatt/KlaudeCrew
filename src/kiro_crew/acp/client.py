@@ -1181,7 +1181,9 @@ def resolve_usable_model(preferred: str, advertised: Sequence[str] | None) -> st
     return ""
 
 
-def _format_acp_error(error: object, available_models: Sequence[str] | None = None) -> str:
+def _format_acp_error(
+    error: object, available_models: Sequence[str] | None = None, is_claude: bool = False
+) -> str:
     """Format a JSON-RPC error from the ACP backend into actionable user text.
 
     The ACP backend (kiro-cli or claude-agent-acp) surfaces upstream Bedrock
@@ -1196,6 +1198,12 @@ def _format_acp_error(error: object, available_models: Sequence[str] | None = No
 
     The provider request_id is preserved in every variant so that operators
     can correlate against support tickets and Bedrock logs.
+
+    *is_claude* selects the sign-in command named in the session-expiry
+    branch (``claude login`` vs ``kiro-cli login``) — this formatter has no
+    ``self`` and is called from both backends' code paths, so callers pass
+    their own ``AcpClient._is_claude`` rather than the message silently
+    telling a claude-only user to run a CLI they may not have installed.
 
     Security: the ``data`` field originates from upstream and may contain
     credential patterns or exfiltration URLs (especially in the fallback
@@ -1280,8 +1288,9 @@ def _format_acp_error(error: object, available_models: Sequence[str] | None = No
             # Session expiry (401/403, or prose saying as much) — distinct from
             # the Bedrock credential errors above. Retrying or switching models
             # cannot succeed, so the message must not suggest either.
+            login_cmd = "claude login" if is_claude else "kiro-cli login"
             formatted = (
-                "Your session has expired. Run `kiro-cli login` in your "
+                f"Your session has expired. Run `{login_cmd}` in your "
                 "terminal to sign back in, then start a new chat. "
                 "Retrying or switching models will not help — this is a "
                 "sign-in issue, not a backend error."
@@ -1408,7 +1417,9 @@ def _rejected_model_from_error(error: object) -> str | None:
     return m.group(1) if m else None
 
 
-def _raise_acp_error(error: object, available_models: Sequence[str] | None = None) -> None:
+def _raise_acp_error(
+    error: object, available_models: Sequence[str] | None = None, is_claude: bool = False
+) -> None:
     """Format and raise the appropriate AcpError subclass for *error*.
 
     Delegates formatting to ``_format_acp_error`` and raises either
@@ -1417,9 +1428,10 @@ def _raise_acp_error(error: object, available_models: Sequence[str] | None = Non
 
     *available_models* is passed to BOTH the formatter and the transient
     classifier so a model-rejection's wording and its retry verdict are decided
-    from the same evidence.
+    from the same evidence. *is_claude* is forwarded to the formatter so the
+    session-expiry branch names the right sign-in command.
     """
-    formatted = _format_acp_error(error, available_models)
+    formatted = _format_acp_error(error, available_models, is_claude)
     # Detect prompt-busy from the raw error (before formatting rewrites it)
     raw_data = ""
     if isinstance(error, dict):
@@ -3876,7 +3888,7 @@ class AcpClient:
                     self._turn_done.set()
                     return
                 if action == "error":
-                    _raise_acp_error(msg.error, self._advertised_model_ids())
+                    _raise_acp_error(msg.error, self._advertised_model_ids(), self._is_claude)
                 if action == "permission":
                     await self._handle_permission(msg)
                 elif action == "server_request_unknown":
@@ -4008,7 +4020,7 @@ class AcpClient:
                 )
                 return
             if action == "error":
-                _raise_acp_error(msg.error, self._advertised_model_ids())
+                _raise_acp_error(msg.error, self._advertised_model_ids(), self._is_claude)
             if action == "permission":
                 yield self._build_permission_event(msg)
             elif action == "server_request_unknown":
@@ -4506,7 +4518,7 @@ class AcpClient:
                 self._turn_done.set()
                 return "".join(output)
             if action == "error":
-                _raise_acp_error(msg.error, self._advertised_model_ids())
+                _raise_acp_error(msg.error, self._advertised_model_ids(), self._is_claude)
             if action == "permission":
                 await self._handle_permission(msg)
             elif action == "server_request_unknown":
