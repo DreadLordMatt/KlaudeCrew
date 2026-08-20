@@ -1983,7 +1983,7 @@ async def save_slot_off_loop(
     await loop.run_in_executor(None, _do)
 
 
-def _build_history_prefix(slot: _ChatSlot) -> str:
+def _build_history_prefix(slot: _ChatSlot, *, exclude_last_n: int = 0) -> str:
     """Build a condensed history prefix from slot messages for session re-injection.
 
     Redacts here as defence in depth. The returned prefix is prepended to the ACP
@@ -1991,10 +1991,16 @@ def _build_history_prefix(slot: _ChatSlot) -> str:
     into its session file — an egress path, not an internal read, so it does not
     rely solely on the load-time content pass upstream. Redaction is idempotent,
     so the common case is a no-op.
+
+    *exclude_last_n* drops that many trailing entries from the snapshot before
+    scanning — the caller's in-flight message is already appended to
+    ``slot.messages`` by the time this runs (see the caller), so without this
+    the message being sent would be re-injected as its own prior turn.
     """
     lines: list[str] = []
     total = 0
-    for m in slot.messages:
+    messages = slot.messages[:-exclude_last_n] if exclude_last_n else slot.messages
+    for m in messages:
         role = m.get("role", "")
         if role in ("chunk", "done", "streaming", "queued", "permission", "error", "tool"):
             continue

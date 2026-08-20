@@ -10959,6 +10959,76 @@ class TestStopHistoryBanner:
         assert self._last_stop_soft(slot) is False
 
 
+class TestFreshSlotHistoryReinjectionSkipsInFlightMessage:
+    """Regression for #16: the stop-recovery history-reinjection block in
+    _run_chat used to count the in-flight message (already appended to
+    slot.messages by the caller before _run_chat runs) as unflushed history,
+    so a brand-new slot's very first message was re-injected as its own
+    prior turn. Fixed by excluding the trailing in-flight message from both
+    the mem/disk comparison and the _build_history_prefix snapshot."""
+
+    def _make_streaming_state(self, tmp_path):
+        from kiro_crew.dashboard.chat_runner import _run_chat
+        from kiro_crew.providers.base import EVENT_COMPLETE, LLMEvent
+
+        delivered: list[str] = []
+
+        async def stream(stream_message: str):
+            delivered.append(stream_message)
+            yield LLMEvent(kind=EVENT_COMPLETE)
+
+        client = MagicMock()
+        client.stream = stream
+        client.stream_command = stream
+        client.context_usage_pct = MagicMock(return_value=1.0)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        state.push_slots_update = MagicMock()
+        state.context_builder = None
+        state.consolidator = None
+        state._hook_store = None
+        state._yolo = False
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+        return state, delivered, _run_chat
+
+    @pytest.mark.asyncio
+    async def test_fresh_slot_first_message_has_no_history_banner(self, tmp_path):
+        """A brand-new slot's first-ever message must not see itself echoed
+        back as '[Previous chat history for this tab]'."""
+        state, delivered, _run_chat = self._make_streaming_state(tmp_path)
+        slot = state.get_or_create_slot("fresh-slot")
+        slot._titled = True
+        # Mirrors the real handler: the caller appends the user message to
+        # slot.messages BEFORE invoking _run_chat with the same text.
+        slot.append("user", "hello there", "msg msg-u")
+
+        await _run_chat(state, slot, "hello there")
+
+        assert delivered, "expected the turn to reach client.stream"
+        assert "[Previous chat history" not in delivered[0]
+        assert delivered[0] == "hello there"
+
+    @pytest.mark.asyncio
+    async def test_genuine_unflushed_history_is_still_reinjected(self, tmp_path):
+        """A real stop-recovery case (prior turns in memory, never flushed to
+        disk) must still get its history banner — the fix only excludes the
+        trailing in-flight message, not genuine prior history."""
+        state, delivered, _run_chat = self._make_streaming_state(tmp_path)
+        slot = state.get_or_create_slot("recovering-slot")
+        slot._titled = True
+        slot.append("user", "first turn", "msg msg-u")
+        slot.append("assistant", "first reply", "msg msg-a")
+        # The new in-flight message, appended by the caller just like above.
+        slot.append("user", "second turn", "msg msg-u")
+
+        await _run_chat(state, slot, "second turn")
+
+        assert delivered, "expected the turn to reach client.stream"
+        assert "[Previous chat history" in delivered[0]
+        assert "first turn" in delivered[0]
+        assert "first reply" in delivered[0]
+
+
 # ── Tests: AcpProcessDied handler in _run_chat ──
 
 
