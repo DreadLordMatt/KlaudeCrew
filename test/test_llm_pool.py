@@ -17,6 +17,7 @@ from kiro_crew.knowledge.llm_pool import (
     CCWorker,
     LLMPool,
     Worker,
+    _get_acp_backend,
     _get_idle_ttl,
     _get_provider_type,
     _get_sandbox_mode,
@@ -416,6 +417,39 @@ class TestSandboxMode:
 
 
 # ---------------------------------------------------------------------------
+# Tests: ACP backend selection (knowledge workers honour agent.acp_backend;
+# default claude, "kiro" opts out — mirrors config/loader.py's provider factory)
+# ---------------------------------------------------------------------------
+
+
+class TestAcpBackendSelection:
+    def test_default_is_claude(self, tmp_path):
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert _get_acp_backend() == "claude"
+
+    def test_kiro_opt_out_returns_empty(self, tmp_path):
+        config = tmp_path / ".kirocrew" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text('{"agent": {"acp_backend": "kiro"}}')
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert _get_acp_backend() == ""
+
+    def test_unrecognised_value_still_drives_claude(self, tmp_path):
+        # Anything but the explicit "kiro" opt-out drives claude-agent-acp,
+        # matching create_provider_factory()'s "anything but kiro" contract.
+        config = tmp_path / ".kirocrew" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text('{"agent": {"acp_backend": "bogus"}}')
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert _get_acp_backend() == "claude"
+
+    def test_accepts_preread_config_dict(self):
+        assert _get_acp_backend({"agent": {"acp_backend": "kiro"}}) == ""
+        assert _get_acp_backend({"agent": {"acp_backend": "claude"}}) == "claude"
+        assert _get_acp_backend({}) == "claude"
+
+
+# ---------------------------------------------------------------------------
 # Tests: shared config read (single disk read threaded into pure parsers)
 # ---------------------------------------------------------------------------
 
@@ -471,6 +505,7 @@ class TestReadConfig:
         the no-op-on-malformed-config contract of ``_read_config``."""
         assert _get_provider_type(bad) == "acp"
         assert _get_sandbox_mode(bad) == "auto"
+        assert _get_acp_backend(bad) == "claude"
 
     def test_read_config_coerces_non_dict_sections(self, tmp_path):
         """``_read_config`` normalises non-dict ``agent``/``knowledge`` to ``{}``
@@ -509,6 +544,37 @@ class TestReadConfig:
             worker = AcpWorker()
             await worker.start()
         assert mk.call_args.kwargs["sandbox_mode"] == "auto"
+
+    @pytest.mark.asyncio
+    async def test_start_passes_configured_acp_backend_to_client(self, tmp_path):
+        """AcpWorker.start wires the configured acp_backend into AcpClient.
+
+        Regression for #8: a worker built with no acp_backend previously fell
+        through to AcpClient's own default ("" -> kiro), so knowledge workers
+        always spawned kiro-cli even on a claude-backend gateway.
+        """
+        config = tmp_path / ".kirocrew" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text('{"agent": {"acp_backend": "kiro"}}')
+        mock_client = AsyncMock()
+        mock_client.is_ready = True
+        with patch("pathlib.Path.home", return_value=tmp_path), \
+             patch("kiro_crew.knowledge.llm_pool.AcpClient", return_value=mock_client) as mk:
+            worker = AcpWorker()
+            await worker.start()
+        assert mk.call_args.kwargs["acp_backend"] == ""
+
+    @pytest.mark.asyncio
+    async def test_start_defaults_acp_backend_to_claude(self, tmp_path):
+        # With no config, acp_backend defaults to "claude" — this fork's
+        # default backend (config/loader.py's create_provider_factory()).
+        mock_client = AsyncMock()
+        mock_client.is_ready = True
+        with patch("pathlib.Path.home", return_value=tmp_path), \
+             patch("kiro_crew.knowledge.llm_pool.AcpClient", return_value=mock_client) as mk:
+            worker = AcpWorker()
+            await worker.start()
+        assert mk.call_args.kwargs["acp_backend"] == "claude"
 
 
 # ---------------------------------------------------------------------------

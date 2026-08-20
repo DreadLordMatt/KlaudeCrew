@@ -14,6 +14,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Optional
 
+from kiro_crew.acp.types import ACP_BACKEND_CLAUDE
 from kiro_crew.config.paths import config_dir
 from kiro_crew.sandbox import cgroup_scope_argv, create_subprocess_limited, wrap_argv
 
@@ -145,6 +146,19 @@ def _get_sandbox_mode(config: Optional[dict] = None) -> str:
     return "auto"  # present but malformed -> fail secure, never silently unsandboxed
 
 
+def _get_acp_backend(config: Optional[dict] = None) -> str:
+    """ACP backend selector for knowledge-worker ``AcpClient`` sessions.
+
+    Mirrors ``config/loader.py``'s ``create_provider_factory()``: anything but
+    an explicit ``"kiro"`` opt-out drives ``claude-agent-acp``. Without this, a
+    worker built with the ``AcpClient`` default (``acp_backend=""``, meaning
+    kiro) always spawns ``kiro-cli`` regardless of the configured backend.
+    """
+    data = _read_config() if config is None else config
+    backend = _section(data, "agent").get("acp_backend")
+    return "" if backend == "kiro" else ACP_BACKEND_CLAUDE
+
+
 def _get_idle_ttl(config: Optional[dict] = None) -> float:
     """Seconds the pool may sit fully idle before scaling to zero.
 
@@ -225,11 +239,14 @@ class Worker(ABC):
 class AcpWorker(Worker):
     """Long-lived AcpClient session with kirocrew-knowledge agent."""
 
-    def __init__(self, *, sandbox_mode: Optional[str] = None) -> None:
+    def __init__(
+        self, *, sandbox_mode: Optional[str] = None, acp_backend: Optional[str] = None
+    ) -> None:
         self._client: Optional[AcpClient] = None
         # Pre-resolved by the caller (off the event loop). ``None`` -> resolve
         # lazily in ``start`` (direct construction outside the pool / tests).
         self._sandbox_mode = sandbox_mode
+        self._acp_backend = acp_backend
         # PID currently shielded from the gateway orphan sweep (see module note).
         self._protected_pid: Optional[int] = None
 
@@ -258,9 +275,17 @@ class AcpWorker(Worker):
             if self._sandbox_mode is not None
             else await asyncio.to_thread(_get_sandbox_mode)
         )
+        acp_backend = (
+            self._acp_backend
+            if self._acp_backend is not None
+            else await asyncio.to_thread(_get_acp_backend)
+        )
         logger.info("AcpWorker: starting with agent=%s", AGENT_NAME)
         self._client = AcpClient(
-            agent=AGENT_NAME, sandbox_mode=sandbox_mode, audit_source="subagent"
+            agent=AGENT_NAME,
+            sandbox_mode=sandbox_mode,
+            acp_backend=acp_backend,
+            audit_source="subagent",
         )
         await self._client.ensure_ready()
         # Shield the live worker PID from the periodic orphan sweep for as long
@@ -477,6 +502,7 @@ class LLMPool:
         self._started = False
         self._provider_type: str = ""
         self._sandbox_mode: str = "auto"
+        self._acp_backend: str = ACP_BACKEND_CLAUDE
         self._config: dict = {}
         self._start_lock = asyncio.Lock()
         # Idle-TTL scale-to-zero (see DEFAULT_IDLE_TTL_SECS). Set from config in
@@ -504,6 +530,7 @@ class LLMPool:
             config = await asyncio.to_thread(_read_config)
             self._provider_type = _get_provider_type(config)
             self._sandbox_mode = _get_sandbox_mode(config)
+            self._acp_backend = _get_acp_backend(config)
             # Allow config to override pool size (knowledge.extraction_pool_size).
             # Only applies when the key is explicitly set in config (not the
             # fallback default), so callers that pass a specific pool_size to the
@@ -545,7 +572,9 @@ class LLMPool:
         if self._provider_type == "claude_code":
             worker: Worker = CCWorker()
         else:
-            worker = AcpWorker(sandbox_mode=self._sandbox_mode)
+            worker = AcpWorker(
+                sandbox_mode=self._sandbox_mode, acp_backend=self._acp_backend
+            )
         await worker.start()
         return worker
 
