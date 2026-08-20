@@ -341,6 +341,54 @@ class TestSkipFallbackBranch:
         assert slot.title == "a fairly vague opening question here"  # short enough, no ellipsis
 
 
+class TestExceptionFallbackBranch:
+    """Regression for #15: a genuine LLM-call error (not SKIP/empty) used to
+    be caught, logged, and leave the slot untitled forever. Now applies the
+    same truncated fallback the SKIP branch already uses."""
+
+    def _run_with_error(self, slot):
+        import asyncio
+
+        from kiro_crew.dashboard import chat_title
+
+        state = _fake_state()
+
+        async def _raise(*_a, **_k):
+            raise RuntimeError("API Error: 500")
+
+        orig = chat_title._generate_title_via_kiro
+        chat_title._generate_title_via_kiro = _raise  # type: ignore[assignment]
+        try:
+            asyncio.run(chat_title._maybe_auto_title(state, slot))
+        finally:
+            chat_title._generate_title_via_kiro = orig  # type: ignore[assignment]
+        return state
+
+    def test_on_send_error_falls_back_but_stays_unlocked(self):
+        # Only the user message present (on-send attempt). An error now shows
+        # the truncated fallback immediately, mirroring the SKIP branch, but
+        # leaves _titled False so the end-of-turn retry can still upgrade it.
+        slot = _ChatSlot("chat-9-3")
+        slot.messages.append({"role": "user", "content": "something vague"})
+
+        self._run_with_error(slot)
+
+        assert slot._titled is False
+        assert slot.title == "something vague"
+
+    def test_error_after_response_falls_back_to_truncation_and_locks(self):
+        # Assistant has responded and the LLM call still errored — definitive
+        # failure. Pre-fix, this left the slot on "New Session…" forever.
+        slot = _ChatSlot("chat-9-4")
+        slot.messages.append({"role": "user", "content": "a fairly vague opening question here"})
+        slot.messages.append({"role": "assistant", "content": "some reply"})
+
+        self._run_with_error(slot)
+
+        assert slot._titled is True
+        assert slot.title == "a fairly vague opening question here"
+
+
 class TestAutoTitleRunsForEveryMemoryMode:
     """Titling is not gated on ``memory_mode``.
 

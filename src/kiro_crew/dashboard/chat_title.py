@@ -897,6 +897,31 @@ def _fallback_title_from_messages(messages: list[dict[str, Any]]) -> str:
     return f"{cut}…"
 
 
+async def _apply_truncated_fallback_title(
+    state: DashboardState, slot: _ChatSlot, attempt_has_assistant: bool, *, reason: str
+) -> None:
+    """Show the truncated-first-message title and persist it.
+
+    Shared by the SKIP/empty branch and the exception branch of
+    ``_maybe_auto_title`` — both are "the LLM didn't give us a title" and get
+    the same fallback. Locks it (``_titled=True``) only once the assistant has
+    responded (a definitive failure); on the on-send attempt leaves it
+    unlocked so the end-of-turn retry can still upgrade it to a real title.
+    """
+    slot.title = _fallback_title_from_messages(slot.messages)
+    slot._titled = attempt_has_assistant
+    if attempt_has_assistant:
+        slot._title_origin = _TITLE_ORIGIN_AUTO
+    await _persist_title(state, slot)
+    state.push_slot_title(slot.key, slot.title)
+    logger.info(
+        "Auto-title: fell back to truncated message for slot %s (%s, locked=%s)",
+        slot.key,
+        reason,
+        attempt_has_assistant,
+    )
+
+
 async def _maybe_auto_title(state: DashboardState, slot: _ChatSlot) -> None:
     """Background task: attempt to LLM-title a slot.
 
@@ -984,22 +1009,22 @@ async def _maybe_auto_title(state: DashboardState, slot: _ChatSlot) -> None:
             # definitive failure); on the on-send attempt leave it unlocked so
             # the end-of-turn retry can still upgrade the truncation to a real
             # LLM title.
-            slot.title = _fallback_title_from_messages(slot.messages)
-            slot._titled = attempt_has_assistant
-            if attempt_has_assistant:
-                slot._title_origin = _TITLE_ORIGIN_AUTO
-            await _persist_title(state, slot)
-            state.push_slot_title(slot.key, slot.title)
-            logger.info(
-                "Auto-title: fell back to truncated message for slot %s (locked=%s)",
-                slot.key,
-                attempt_has_assistant,
+            await _apply_truncated_fallback_title(
+                state, slot, attempt_has_assistant, reason="SKIP/empty"
             )
     except asyncio.CancelledError:
         cancelled = True
         raise
     except Exception:
+        # A genuine error (LLM call raised) used to just log and leave the slot
+        # untitled forever — the SKIP/empty branch above already has a fallback,
+        # this path didn't. Apply the same one so a transient upstream error
+        # doesn't strand the slot on "New Session…" indefinitely.
         logger.warning("Auto-title failed for slot %s", slot.key, exc_info=True)
+        if not slot._titled and slot._title_epoch == epoch:
+            await _apply_truncated_fallback_title(
+                state, slot, attempt_has_assistant, reason="generation error"
+            )
     finally:
         slot._title_in_flight = False
         retry_pending = slot._title_retry_pending
