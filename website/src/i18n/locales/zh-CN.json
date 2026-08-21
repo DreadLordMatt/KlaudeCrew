@@ -7223,6 +7223,11 @@
         "turn_took_cost": "本轮次耗时 {{elapsed}}（API 成本 {{cost}}）",
         "turn_took_credits": "本轮次耗时 {{elapsed}}，消耗 {{credits}} 额度",
         "turn_took_credits_cost": "本轮次耗时 {{elapsed}}，消耗 {{credits}} 额度（API 成本 {{cost}}）",
+        "turn_took_tokens": "本轮次耗时 {{elapsed}}，使用了 {{tokens}} 个令牌",
+        "turn_took_cost_tokens": "本轮次耗时 {{elapsed}}，使用了 {{tokens}} 个令牌（API 成本 {{cost}}）",
+        "turn_took_credits_tokens": "本轮次耗时 {{elapsed}}，消耗 {{credits}} 额度并使用了 {{tokens}} 个令牌",
+        "turn_took_credits_cost_tokens": "本轮次耗时 {{elapsed}}，消耗 {{credits}} 额度（API 成本 {{cost}}），并使用了 {{tokens}} 个令牌",
+        "turn_tokens_compact": "{{formatted}} 个令牌",
         "use_as_plan_count": "用作计划（{{count}} 个步骤）",
         "pin_message": "置顶消息",
         "unpin_message": "取消置顶"

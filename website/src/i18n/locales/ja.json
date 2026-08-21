@@ -7223,6 +7223,11 @@
         "turn_took_cost": "ターンに {{elapsed}} かかりました({{cost}} の API コスト)",
         "turn_took_credits": "ターンに {{elapsed}} かかり {{credits}} クレジットを使用しました",
         "turn_took_credits_cost": "ターンに {{elapsed}} かかり {{credits}} クレジットを使用しました({{cost}} の API コスト)",
+        "turn_took_tokens": "ターンに {{elapsed}} かかり {{tokens}} トークンを使用しました",
+        "turn_took_cost_tokens": "ターンに {{elapsed}} かかり {{tokens}} トークンを使用しました({{cost}} の API コスト)",
+        "turn_took_credits_tokens": "ターンに {{elapsed}} かかり {{credits}} クレジットと {{tokens}} トークンを使用しました",
+        "turn_took_credits_cost_tokens": "ターンに {{elapsed}} かかり {{credits}} クレジットと {{tokens}} トークンを使用しました({{cost}} の API コスト)",
+        "turn_tokens_compact": "{{formatted}} トークン",
         "use_as_plan_count": "プランとして使用({{count}} ステップ)",
         "pin_message": "メッセージをピン留め",
         "unpin_message": "メッセージのピン留めを解除"

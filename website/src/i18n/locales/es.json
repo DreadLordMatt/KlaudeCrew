@@ -7421,6 +7421,11 @@
         "turn_took_cost": "El turno tardó {{elapsed}} ({{cost}} de coste de API)",
         "turn_took_credits": "El turno tardó {{elapsed}} y consumió {{credits}} créditos",
         "turn_took_credits_cost": "El turno tardó {{elapsed}} y consumió {{credits}} créditos ({{cost}} de coste de API)",
+        "turn_took_tokens": "El turno tardó {{elapsed}} y usó {{tokens}} tokens",
+        "turn_took_cost_tokens": "El turno tardó {{elapsed}} y usó {{tokens}} tokens ({{cost}} de coste de API)",
+        "turn_took_credits_tokens": "El turno tardó {{elapsed}}, consumió {{credits}} créditos y usó {{tokens}} tokens",
+        "turn_took_credits_cost_tokens": "El turno tardó {{elapsed}}, consumió {{credits}} créditos ({{cost}} de coste de API) y usó {{tokens}} tokens",
+        "turn_tokens_compact": "{{formatted}} tokens",
         "use_as_plan_count": "Usar como plan ({{count}} pasos)",
         "pin_message": "Fijar mensaje",
         "unpin_message": "Desfijar mensaje"

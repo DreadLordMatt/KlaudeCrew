@@ -7322,6 +7322,11 @@
         "turn_took_cost": "টার্নে সময় লেগেছে {{elapsed}} ({{cost}} API ব্যয়)",
         "turn_took_credits": "টার্নে সময় লেগেছে {{elapsed}} এবং খরচ হয়েছে {{credits}} ক্রেডিট",
         "turn_took_credits_cost": "টার্নে সময় লেগেছে {{elapsed}} এবং খরচ হয়েছে {{credits}} ক্রেডিট ({{cost}} API ব্যয়)",
+        "turn_took_tokens": "টার্নে সময় লেগেছে {{elapsed}} এবং ব্যবহৃত হয়েছে {{tokens}} টোকেন",
+        "turn_took_cost_tokens": "টার্নে সময় লেগেছে {{elapsed}} এবং ব্যবহৃত হয়েছে {{tokens}} টোকেন ({{cost}} API ব্যয়)",
+        "turn_took_credits_tokens": "টার্নে সময় লেগেছে {{elapsed}}, খরচ হয়েছে {{credits}} ক্রেডিট এবং ব্যবহৃত হয়েছে {{tokens}} টোকেন",
+        "turn_took_credits_cost_tokens": "টার্নে সময় লেগেছে {{elapsed}}, খরচ হয়েছে {{credits}} ক্রেডিট ({{cost}} API ব্যয়) এবং ব্যবহৃত হয়েছে {{tokens}} টোকেন",
+        "turn_tokens_compact": "{{formatted}} টোকেন",
         "use_as_plan_count": "প্ল্যান হিসেবে ব্যবহার করুন ({{count}}টি ধাপ)",
         "pin_message": "বার্তা পিন করুন",
         "unpin_message": "বার্তা আনপিন করুন"

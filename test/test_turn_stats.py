@@ -135,3 +135,35 @@ class TestAttachTurnStats:
         meta = slot.messages[-1]["meta"]
         assert meta["file_changes"] == [{"path": "/tmp/x"}]
         assert meta["turn_stats"]["elapsed_ms"] == 2000
+
+    def test_tokens_summed_from_all_four_dimensions(self):
+        # Regression for #21: tokens is the sum of TurnUsage's four raw
+        # dimensions, matching the "total" convention TokenDailyChart.tsx
+        # already uses (input + output + cache creation + cache read).
+        slot = _make_slot_with_assistant_message()
+        _attach_turn_stats(
+            slot, 10_000, 0.0, 0.16,
+            input_tokens=800, output_tokens=400,
+            cache_creation_tokens=50, cache_read_tokens=150,
+        )
+        stats = slot.messages[-1]["meta"]["turn_stats"]
+        assert stats["tokens"] == 1400
+        assert stats["cost_usd"] == 0.16
+
+    def test_zero_tokens_key_omitted(self):
+        # kiro/acp turns leave every token dimension at 0 — no key at all.
+        slot = _make_slot_with_assistant_message()
+        _attach_turn_stats(slot, 5000, 1.0, 0.0)
+        stats = slot.messages[-1]["meta"]["turn_stats"]
+        assert "tokens" not in stats
+
+    def test_tokens_present_alongside_credits(self):
+        # Not reachable today (kiro/acp never reports tokens), but the helper
+        # itself must not assume tokens and credits are mutually exclusive.
+        slot = _make_slot_with_assistant_message()
+        _attach_turn_stats(
+            slot, 3000, 2.0, 0.0, input_tokens=100, output_tokens=50,
+        )
+        stats = slot.messages[-1]["meta"]["turn_stats"]
+        assert stats["tokens"] == 150
+        assert stats["credits"] == 2.0

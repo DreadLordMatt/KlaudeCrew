@@ -470,6 +470,41 @@ describe('turn stats footer (elapsed time + credits)', () => {
       .toBe('Turn took 1m 24s and used 2.50 credits ($0.0231 API cost)')
   })
 
+  it('renders the token count between the billed amount and the elapsed time', () => {
+    render(<AssistantMessage content="done" isStreaming={false} slotRunning={false} turnStats={{ elapsed_ms: 10_000, cost_usd: 0.16, tokens: 1_234 }} />)
+    const text = screen.getByTestId('turn-stats').textContent!.replace(/\s+/g, ' ').trim()
+    expect(text).toMatch(/^\$0\.16 ·\s*1\.2K tokens ·\s*10s$/)
+  })
+
+  it('renders the token count alone when nothing was billed', () => {
+    render(<AssistantMessage content="done" isStreaming={false} slotRunning={false} turnStats={{ elapsed_ms: 10_000, tokens: 800 }} />)
+    const stats = screen.getByTestId('turn-stats')
+    expect(stats).toHaveTextContent('800 tokens')
+    expect(stats).not.toHaveTextContent('$')
+    expect(stats).not.toHaveTextContent('credits')
+  })
+
+  it('omits the token segment when tokens is absent or zero', () => {
+    render(<AssistantMessage content="done" isStreaming={false} slotRunning={false} turnStats={{ elapsed_ms: 10_000, cost_usd: 0.16 }} />)
+    expect(screen.getByTestId('turn-stats')).not.toHaveTextContent('tokens')
+  })
+
+  it('spells the whole sentence in the tooltip for every tokens combination', () => {
+    const title = (stats: { elapsed_ms: number; credits?: number; cost_usd?: number; tokens?: number }) => {
+      const { unmount } = render(<AssistantMessage content="done" isStreaming={false} slotRunning={false} turnStats={stats} />)
+      const value = screen.getByTestId('turn-stats').getAttribute('title')
+      unmount()
+      return value
+    }
+    expect(title({ elapsed_ms: 42_000, tokens: 800 })).toBe('Turn took 42s and used 800 tokens')
+    expect(title({ elapsed_ms: 8_400, cost_usd: 0.0231, tokens: 800 }))
+      .toBe('Turn took 8.4s and used 800 tokens ($0.0231 API cost)')
+    expect(title({ elapsed_ms: 84_000, credits: 2.5, tokens: 800 }))
+      .toBe('Turn took 1m 24s and used 2.50 credits and 800 tokens')
+    expect(title({ elapsed_ms: 84_000, credits: 2.5, cost_usd: 0.0231, tokens: 800 }))
+      .toBe('Turn took 1m 24s, used 2.50 credits ($0.0231 API cost) and 800 tokens')
+  })
+
   it('hidden while streaming', () => {
     render(<AssistantMessage content="typing…" isStreaming={true} slotRunning={true} turnStats={{ elapsed_ms: 5_000, credits: 1 }} />)
     expect(screen.queryByTestId('turn-stats')).not.toBeInTheDocument()
