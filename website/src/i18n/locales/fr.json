@@ -7421,6 +7421,11 @@
         "turn_took_cost": "Le tour a pris {{elapsed}} ({{cost}} de coût API)",
         "turn_took_credits": "Le tour a pris {{elapsed}} et consommé {{credits}} crédits",
         "turn_took_credits_cost": "Le tour a pris {{elapsed}} et consommé {{credits}} crédits ({{cost}} de coût API)",
+        "turn_took_tokens": "Le tour a pris {{elapsed}} et utilisé {{tokens}} tokens",
+        "turn_took_cost_tokens": "Le tour a pris {{elapsed}} et utilisé {{tokens}} tokens ({{cost}} de coût API)",
+        "turn_took_credits_tokens": "Le tour a pris {{elapsed}}, consommé {{credits}} crédits et utilisé {{tokens}} tokens",
+        "turn_took_credits_cost_tokens": "Le tour a pris {{elapsed}}, consommé {{credits}} crédits ({{cost}} de coût API) et utilisé {{tokens}} tokens",
+        "turn_tokens_compact": "{{formatted}} tokens",
         "use_as_plan_count": "Utiliser comme plan ({{count}} étapes)",
         "pin_message": "Épingler le message",
         "unpin_message": "Désépingler le message"

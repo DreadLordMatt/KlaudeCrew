@@ -7223,6 +7223,11 @@
         "turn_took_cost": "턴에 {{elapsed}} 걸렸습니다(API 비용 {{cost}})",
         "turn_took_credits": "턴에 {{elapsed}} 걸렸고 크레딧 {{credits}}을(를) 사용했습니다",
         "turn_took_credits_cost": "턴에 {{elapsed}} 걸렸고 크레딧 {{credits}}을(를) 사용했습니다(API 비용 {{cost}})",
+        "turn_took_tokens": "턴에 {{elapsed}} 걸렸고 토큰 {{tokens}}을(를) 사용했습니다",
+        "turn_took_cost_tokens": "턴에 {{elapsed}} 걸렸고 토큰 {{tokens}}을(를) 사용했습니다(API 비용 {{cost}})",
+        "turn_took_credits_tokens": "턴에 {{elapsed}} 걸렸고 크레딧 {{credits}}와(과) 토큰 {{tokens}}을(를) 사용했습니다",
+        "turn_took_credits_cost_tokens": "턴에 {{elapsed}} 걸렸고 크레딧 {{credits}}와(과) 토큰 {{tokens}}을(를) 사용했습니다(API 비용 {{cost}})",
+        "turn_tokens_compact": "{{formatted}} 토큰",
         "use_as_plan_count": "플랜으로 사용({{count}}단계)",
         "pin_message": "Pin message",
         "unpin_message": "Unpin message"

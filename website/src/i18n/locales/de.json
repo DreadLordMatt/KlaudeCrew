@@ -7322,6 +7322,11 @@
         "turn_took_cost": "Zug dauerte {{elapsed}} ({{cost}} API-Kosten)",
         "turn_took_credits": "Zug dauerte {{elapsed}} und verbrauchte {{credits}} Credits",
         "turn_took_credits_cost": "Zug dauerte {{elapsed}} und verbrauchte {{credits}} Credits ({{cost}} API-Kosten)",
+        "turn_took_tokens": "Zug dauerte {{elapsed}} und nutzte {{tokens}} Tokens",
+        "turn_took_cost_tokens": "Zug dauerte {{elapsed}} und nutzte {{tokens}} Tokens ({{cost}} API-Kosten)",
+        "turn_took_credits_tokens": "Zug dauerte {{elapsed}}, verbrauchte {{credits}} Credits und nutzte {{tokens}} Tokens",
+        "turn_took_credits_cost_tokens": "Zug dauerte {{elapsed}}, verbrauchte {{credits}} Credits ({{cost}} API-Kosten) und nutzte {{tokens}} Tokens",
+        "turn_tokens_compact": "{{formatted}} Tokens",
         "use_as_plan_count": "Als Plan verwenden ({{count}} Schritte)",
         "pin_message": "Nachricht anheften",
         "unpin_message": "Nachricht loslösen"
