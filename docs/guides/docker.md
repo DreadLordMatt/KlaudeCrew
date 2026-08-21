@@ -42,7 +42,15 @@ gh attestation verify oci://ghcr.io/kirodotdev/kirocrew:stable --repo kirodotdev
 
 Two one-time steps after the container is up:
 
-1. **Log in the agent runtime** (chat sessions run on kiro-cli):
+1. **Log in the agent runtime.** Chat sessions run on whichever backend
+   `agent.acp_backend` selects — **Claude Code** (`claude` +
+   `claude-agent-acp`) is this fork's default:
+
+   ```
+   docker exec -it kirocrew env CLAUDE_CONFIG_DIR="$HOME/.kiro/crew/cc-config" claude login
+   ```
+
+   or, with `agent.acp_backend: "kiro"`:
 
    ```
    docker exec -it kirocrew kiro-cli login

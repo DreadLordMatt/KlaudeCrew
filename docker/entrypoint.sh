@@ -164,7 +164,15 @@ if [ "${1:-gateway}" = "gateway" ]; then
     echo "[entrypoint] Dashboard login: run  docker exec <container> kirocrew token --ttl 2h"
     echo "[entrypoint] then open the printed link, replacing the host with how you reach"
     echo "[entrypoint] this container (e.g. http://localhost:${PORT}/?token=... with -p ${PORT}:${PORT})."
-    echo "[entrypoint] Chat sessions need a logged-in kiro-cli:  docker exec -it <container> kiro-cli login"
+    # agent.acp_backend defaults to "claude" (this fork) and is only ever
+    # written to config.json when set explicitly, so absence means claude,
+    # not "unconfigured" -- mirrors the sandbox_allow_unsandboxed_exec check
+    # above (grep the operator-owned file, never re-derive the default here).
+    if [ -f "$CONFIG" ] && grep -q '"acp_backend"[[:space:]]*:[[:space:]]*"kiro"' "$CONFIG"; then
+        echo "[entrypoint] Chat sessions need a logged-in kiro-cli:  docker exec -it <container> kiro-cli login"
+    else
+        echo "[entrypoint] Chat sessions need Claude Code logged in:  docker exec -it <container> env CLAUDE_CONFIG_DIR=\"$ACTIVE_HOME/cc-config\" claude login"
+    fi
 fi
 
 if [ $# -eq 0 ]; then

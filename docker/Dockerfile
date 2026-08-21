@@ -112,6 +112,28 @@ RUN set -eux; \
     printf '%s\n' "${RESOLVED}" > /usr/local/share/kirocrew/kiro-cli-version; \
     kiro-cli --version
 
+# Node.js 22 (NodeSource) — required by the claude-agent-acp adapter below.
+# kiro-cli's install above needs no Node; this stage exists only for the
+# claude backend, this fork's default (agent.acp_backend = "claude").
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# claude backend runtime: the ACP adapter (claude-agent-acp) plus the native
+# Claude Code CLI it drives (claude-agent-acp does not itself talk to the
+# model — see docs/system-specs/modules/acp-client.md "Backend Selection").
+# Installed globally via npm (root, before USER kirocrew) so both binaries
+# land in /usr/local/bin — outside the /home/kirocrew volume mount, for the
+# same reason kiro-cli installs outside it above: a stale or empty mounted
+# home must never shadow or omit them.
+RUN set -eux; \
+    npm install -g --no-audit --no-fund \
+        @agentclientprotocol/claude-agent-acp \
+        @anthropic-ai/claude-code; \
+    command -v claude-agent-acp; \
+    command -v claude; \
+    claude --version
+
 # The CI-built wheel (build-wheel.yml artifact). The glob keeps the Dockerfile
 # version-agnostic; the lane stages exactly one wheel into dist/.
 COPY dist/*.whl /tmp/wheels/
