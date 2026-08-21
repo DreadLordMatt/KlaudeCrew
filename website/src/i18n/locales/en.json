@@ -5076,6 +5076,11 @@
         "turn_took_cost": "Turn took {{elapsed}} ({{cost}} API cost)",
         "turn_took_credits": "Turn took {{elapsed}} and used {{credits}} credits",
         "turn_took_credits_cost": "Turn took {{elapsed}} and used {{credits}} credits ({{cost}} API cost)",
+        "turn_took_tokens": "Turn took {{elapsed}} and used {{tokens}} tokens",
+        "turn_took_cost_tokens": "Turn took {{elapsed}} and used {{tokens}} tokens ({{cost}} API cost)",
+        "turn_took_credits_tokens": "Turn took {{elapsed}} and used {{credits}} credits and {{tokens}} tokens",
+        "turn_took_credits_cost_tokens": "Turn took {{elapsed}}, used {{credits}} credits ({{cost}} API cost) and {{tokens}} tokens",
+        "turn_tokens_compact": "{{formatted}} tokens",
         "pin_message": "Pin message",
         "unpin_message": "Unpin message"
       },

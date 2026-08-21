@@ -957,6 +957,10 @@ def _attach_turn_stats(
     credits: float,
     cost_usd: float,
     turn_boundary: int = 0,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
 ) -> None:
     """Attach per-turn stats to the last assistant message's meta.
 
@@ -966,8 +970,12 @@ def _attach_turn_stats(
 
     ``elapsed_ms`` is the turn wall clock (or the provider-reported duration
     when available); ``credits`` is kiro-cli's per-turn ``meteringUsage`` sum;
-    ``cost_usd`` is claude_code's API-reported cost. Zero fields are omitted so
-    the frontend renders only what the provider actually bills in.
+    ``cost_usd`` is claude_code's API-reported cost. The four token fields are
+    ``TurnUsage``'s raw dimensions (claude_code/bedrock only; kiro/acp leaves
+    them 0) — summed into a single ``tokens`` field, matching the "total"
+    convention ``TokenDailyChart.tsx`` already uses (input + output + cache
+    creation + cache read). Zero fields are omitted so the frontend renders
+    only what the provider actually bills in.
 
     ``turn_boundary`` is ``len(slot.messages)`` captured at turn start: only
     messages appended DURING this turn are candidates. Without it, an
@@ -983,6 +991,9 @@ def _attach_turn_stats(
         stats["credits"] = round(credits, 4)
     if cost_usd > 0:
         stats["cost_usd"] = round(cost_usd, 6)
+    tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens
+    if tokens > 0:
+        stats["tokens"] = tokens
     boundary = max(0, turn_boundary)
     for m in reversed(slot.messages[boundary:]):
         if m.get("role") == "assistant":
@@ -4220,6 +4231,10 @@ async def _run_chat(
         _turn_elapsed_ms = 0
         _turn_credits = 0.0
         _turn_cost_usd = 0.0
+        _turn_input_tokens = 0
+        _turn_output_tokens = 0
+        _turn_cache_creation_tokens = 0
+        _turn_cache_read_tokens = 0
         _turn_msg_boundary = len(slot.messages)
 
         # Lease-dispatch race gate: this session's semaphore lease
@@ -5629,6 +5644,10 @@ async def _run_chat(
                     _turn_elapsed_ms = int(_u.duration_ms or (time.monotonic() - _turn_t0) * 1000)
                     _turn_credits = float(_u.credits or 0.0)
                     _turn_cost_usd = float(_u.cost_usd or 0.0)
+                    _turn_input_tokens = int(_u.input_tokens or 0)
+                    _turn_output_tokens = int(_u.output_tokens or 0)
+                    _turn_cache_creation_tokens = int(_u.cache_creation_tokens or 0)
+                    _turn_cache_read_tokens = int(_u.cache_read_tokens or 0)
                 except (TypeError, ValueError):
                     _turn_elapsed_ms = int((time.monotonic() - _turn_t0) * 1000)
                 if _u.input_tokens or _u.output_tokens or _u.credits:
@@ -6080,6 +6099,10 @@ async def _run_chat(
                 _turn_credits,
                 _turn_cost_usd,
                 turn_boundary=_turn_msg_boundary,
+                input_tokens=_turn_input_tokens,
+                output_tokens=_turn_output_tokens,
+                cache_creation_tokens=_turn_cache_creation_tokens,
+                cache_read_tokens=_turn_cache_read_tokens,
             )
             # Attach accumulated file changes to last assistant message before persist
             _flush_file_changes(slot)

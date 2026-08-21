@@ -7520,6 +7520,11 @@
         "turn_took_cost": "Ход занял {{elapsed}} (стоимость API: {{cost}})",
         "turn_took_credits": "Ход занял {{elapsed}} и израсходовал {{credits}} кредитов",
         "turn_took_credits_cost": "Ход занял {{elapsed}} и израсходовал {{credits}} кредитов (стоимость API: {{cost}})",
+        "turn_took_tokens": "Ход занял {{elapsed}} и использовал {{tokens}} токенов",
+        "turn_took_cost_tokens": "Ход занял {{elapsed}} и использовал {{tokens}} токенов (стоимость API: {{cost}})",
+        "turn_took_credits_tokens": "Ход занял {{elapsed}}, израсходовал {{credits}} кредитов и использовал {{tokens}} токенов",
+        "turn_took_credits_cost_tokens": "Ход занял {{elapsed}}, израсходовал {{credits}} кредитов (стоимость API: {{cost}}) и использовал {{tokens}} токенов",
+        "turn_tokens_compact": "{{formatted}} токенов",
         "use_as_plan_count": "Использовать как план (шагов: {{count}})",
         "pin_message": "Закрепить сообщение",
         "unpin_message": "Открепить сообщение"

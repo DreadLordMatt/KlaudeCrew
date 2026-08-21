@@ -7322,6 +7322,11 @@
         "turn_took_cost": "टर्न में {{elapsed}} लगे ({{cost}} API लागत)",
         "turn_took_credits": "टर्न में {{elapsed}} लगे और {{credits}} क्रेडिट खर्च हुए",
         "turn_took_credits_cost": "टर्न में {{elapsed}} लगे और {{credits}} क्रेडिट खर्च हुए ({{cost}} API लागत)",
+        "turn_took_tokens": "टर्न में {{elapsed}} लगे और {{tokens}} टोकन उपयोग हुए",
+        "turn_took_cost_tokens": "टर्न में {{elapsed}} लगे और {{tokens}} टोकन उपयोग हुए ({{cost}} API लागत)",
+        "turn_took_credits_tokens": "टर्न में {{elapsed}} लगे, {{credits}} क्रेडिट खर्च हुए और {{tokens}} टोकन उपयोग हुए",
+        "turn_took_credits_cost_tokens": "टर्न में {{elapsed}} लगे, {{credits}} क्रेडिट खर्च हुए ({{cost}} API लागत) और {{tokens}} टोकन उपयोग हुए",
+        "turn_tokens_compact": "{{formatted}} टोकन",
         "use_as_plan_count": "योजना के रूप में उपयोग करें ({{count}} चरण)",
         "pin_message": "संदेश पिन करें",
         "unpin_message": "संदेश अनपिन करें"

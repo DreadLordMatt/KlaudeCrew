@@ -16,15 +16,17 @@ import { useSmoothStream } from '../../hooks/useSmoothStream'
 import type { PlanStepInput } from '../../api/client'
 import { OPTION_MARKER_RE, stripPartialOptionMarker } from '../../utils/optionsMarker'
 import { i18nT } from '../../i18n/t'
-import { fmtCurrency, fmtDuration, fmtNumber, fmtUnit } from '../../i18n/format'
+import { fmtCompact, fmtCurrency, fmtDuration, fmtNumber, fmtUnit } from '../../i18n/format'
 const PLAN_HEADER_RE = /📋\s*Plan for:/i
 const STAGE_RE = /^Stage\s+\d+\s*:/m
 
 /** Per-turn stats attached by the backend to the last assistant message of a
  *  completed turn (chat_runner._attach_turn_stats). Parity with the end-of-turn
  *  line kiro-cli prints natively: elapsed wall clock + credits (kiro) or
- *  API cost (claude_code). Zero fields are omitted by the backend. */
-export interface TurnStats { elapsed_ms: number; credits?: number; cost_usd?: number }
+ *  API cost (claude_code). ``tokens`` is claude_code/bedrock's summed token
+ *  count (input + output + cache creation + cache read — the same "total"
+ *  convention TokenDailyChart.tsx uses). Zero fields are omitted by the backend. */
+export interface TurnStats { elapsed_ms: number; credits?: number; cost_usd?: number; tokens?: number }
 
 /** "8.4s" under 10s, "42s" under a minute, "2m 34s" beyond. */
 export function fmtTurnElapsed(ms: number): string {
@@ -215,24 +217,34 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
     return () => { disposed = true; observer.disconnect(); cancelScroll?.() }
   }, [term, caseSensitive, currentOcc, effectiveContent, rawMode])
 
-  // Four whole-sentence keys, one per combination of the two optional clauses,
-  // rather than a base sentence with ` and used …` / ` (… API cost)` appended.
-  // A translator handed those two fragments cannot place them: the credit clause
-  // and the cost parenthetical bind to different parts of the sentence in other
-  // languages, and several put the duration last. Interpolated values are
-  // already locale-formatted by the `format.ts` seam.
+  // Whole-sentence keys, one per combination of the optional clauses, rather
+  // than a base sentence with ` and used …` / ` (… API cost)` / ` ({{tokens}}
+  // tokens)` appended. A translator handed those fragments cannot place them:
+  // the credit clause, the cost parenthetical and the token count bind to
+  // different parts of the sentence in other languages, and several put the
+  // duration last. Interpolated values are already locale-formatted by the
+  // `format.ts` seam. Tokens is claude_code-only in practice (kiro/acp never
+  // reports it), so credits+tokens is not reachable today — the key still
+  // exists so a future kiro token-reporting change has somewhere to land
+  // instead of silently falling through to the no-tokens sentence.
   const turnStatsTitle = (() => {
     if (!turnStats) return undefined
     const elapsed = fmtTurnElapsed(turnStats.elapsed_ms)
     const hasCredits = (turnStats.credits ?? 0) > 0
     const hasCost = (turnStats.cost_usd ?? 0) > 0
+    const hasTokens = (turnStats.tokens ?? 0) > 0
     const credits = hasCredits ? fmtCredits(turnStats.credits!) : ''
     const cost = hasCost
       ? fmtCurrency(turnStats.cost_usd!, 'USD', { maximumFractionDigits: 4, minimumFractionDigits: 4 })
       : ''
+    const tokens = hasTokens ? fmtCompact(turnStats.tokens!) : ''
+    if (hasCredits && hasCost && hasTokens) return i18nT('pages.chat.assistantMessage.turn_took_credits_cost_tokens', { elapsed, credits, cost, tokens })
     if (hasCredits && hasCost) return i18nT('pages.chat.assistantMessage.turn_took_credits_cost', { elapsed, credits, cost })
+    if (hasCredits && hasTokens) return i18nT('pages.chat.assistantMessage.turn_took_credits_tokens', { elapsed, credits, tokens })
     if (hasCredits) return i18nT('pages.chat.assistantMessage.turn_took_credits', { elapsed, credits })
+    if (hasCost && hasTokens) return i18nT('pages.chat.assistantMessage.turn_took_cost_tokens', { elapsed, cost, tokens })
     if (hasCost) return i18nT('pages.chat.assistantMessage.turn_took_cost', { elapsed, cost })
+    if (hasTokens) return i18nT('pages.chat.assistantMessage.turn_took_tokens', { elapsed, tokens })
     return i18nT('pages.chat.assistantMessage.turn_took', { elapsed })
   })()
 
@@ -269,11 +281,25 @@ const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, 
         {(() => {
           const credits = turnStats.credits ?? 0
           const cost = turnStats.cost_usd ?? 0
+          const tokens = turnStats.tokens ?? 0
           const billed = credits > 0
             ? `${fmtCredits(credits)} credits`
             : cost > 0 ? `$${cost.toFixed(cost < 0.01 ? 4 : 2)}` : ''
+          // Token count sits between the billed figure and the elapsed clock,
+          // matching the issue's own compact shape ("$0.16 · 1.2K tokens · 10s").
+          // Uses the app's already-established "tokens" noun (see
+          // overviewPage.tokens) rather than inventing a per-language
+          // abbreviation — the compactness comes from fmtCompact's number
+          // formatting, not from shortening the word.
+          // Routed through i18nT (unlike the pre-existing `billed` string above,
+          // which already hardcoded "credits"/"$" before this change) so the
+          // new segment does not compound that debt.
+          const tokenLabel = tokens > 0
+            ? i18nT('pages.chat.assistantMessage.turn_tokens_compact', { formatted: fmtCompact(tokens) })
+            : ''
           return <>
             {billed && <span>{billed} ·</span>}
+            {tokenLabel && <span>{tokenLabel} ·</span>}
             <Clock size={11} aria-hidden="true" />
             <span>{fmtTurnElapsed(turnStats.elapsed_ms)}</span>
           </>
